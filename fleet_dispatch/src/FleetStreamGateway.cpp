@@ -16,6 +16,11 @@ void FleetStreamGateway::run(asio::io_context& ctx){
     asio::co_spawn(ctx, [self = shared_from_this()]() {
            return self->handle_registration_events();
        }, asio::detached);
+
+    asio::co_spawn(ctx, [self = shared_from_this()]() {
+               return self->handle_unregistration_events();
+           }, asio::detached);
+
 }
 
 asio::awaitable<void> FleetStreamGateway::handle_registration_events(){
@@ -31,8 +36,13 @@ asio::awaitable<void> FleetStreamGateway::handle_registration_events(){
             std::string status_topic = "uagv/v2/" + robot.manufacturer + "/" + robot.robot_id + "/status";
             std::string visu_topic = "uagv/v2/" + robot.manufacturer + "/" + robot.robot_id + "/visualization";
 
-            mqtt_client.subscribe_topic(status_topic);
-            mqtt_client.subscribe_topic(visu_topic);
+            robot_topic_manager.add_topic(robot.robot_id, status_topic);
+            robot_topic_manager.add_topic(robot.robot_id, visu_topic);
+            auto topics = robot_topic_manager.get_robot_topics(robot.robot_id);
+            for (const auto& topic : topics){
+                mqtt_client.subscribe_topic(topic);
+            }
+
         } else {
             std::println("[Gateway] gRPC registration channel closed. Exiting loop.");
             asio::steady_timer timer(co_await boost::asio::this_coro::executor, std::chrono::seconds(2));
@@ -51,11 +61,11 @@ asio::awaitable<void> FleetStreamGateway::handle_unregistration_events(){
             const auto& robot = unreg_event.value();
             std::println("[Gateway] Processing unregistration for robot: {}", robot.robot_id);
 
-            std::string status_topic = "uagv/v2/" + robot.manufacturer + "/" + robot.robot_id + "/status";
-            std::string visu_topic = "uagv/v2/" + robot.manufacturer + "/" + robot.robot_id + "/visualization";
-
-            mqtt_client.unsubscribe_topic(status_topic);
-            mqtt_client.unsubscribe_topic(visu_topic);
+            auto topics = robot_topic_manager.get_robot_topics(robot.robot_id);
+            for (const auto& topic : topics){
+                mqtt_client.unsubscribe_topic(topic);
+            }
+            robot_topic_manager.delete_robot_topics(robot.robot_id);
         } else {
             std::println("[Gateway] gRPC registration channel closed. Exiting loop.");
             asio::steady_timer timer(co_await boost::asio::this_coro::executor, std::chrono::seconds(2));
