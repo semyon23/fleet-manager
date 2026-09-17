@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package fms;
+
+service FleetDispatchService {
+  rpc RegisterRobot (RegisterRobotRequest) returns (RegisterRobotResponse);
+  rpc UnregisterRobot (UnregisterRobotRequest) returns (UnregisterRobotResponse);
+
+  rpc StreamRobotStatuses (StreamStatusesRequest) returns (stream RobotStatusUpdate);
+
+  rpc StreamRobotVisualizations (StreamStatusesRequest) returns (stream RobotVisualization);
+}
+
+message StreamStatusesRequest {
+  string client_id = 1;
+}
+
+message RobotStatusUpdate {
+  string robot_id = 1;
+  string status = 2;
+  double battery_level = 3;
+
+  uint32 header_id = 4;
+  string timestamp = 5;
+  string version = 6;
+  string manufacturer = 7;
+  string serial_number = 8;
+
+  string order_id = 9;
+  uint32 order_update_id = 10;
+  string last_node_id = 11;
+  uint32 last_node_sequence_id = 12;
+
+  string operating_mode = 13;
+  bool driving = 14;
+
+  BatteryState battery_state = 15;
+  SafetyState safety_state = 16;
+
+  repeated string action_states = 17;
+  repeated string edge_states = 18;
+  repeated string node_states = 19;
+  repeated string errors = 20;
+  repeated string information = 21;
+  repeated string loads = 22;
+}
+
+message RobotVisualization {
+  string robot_id = 1;
+  AgvPosition agv_position = 2;
+}
+
+message AgvPosition {
+  string map_id = 1;
+  bool position_initialized = 2;
+  double x = 3;
+  double y = 4;
+  double theta = 5;
+}
+
+message BatteryState {
+  double battery_charge = 1;
+  bool charging = 2;
+}
+
+message SafetyState {
+  string e_stop = 1;
+  bool field_violation = 2;
+}
+
+message RegisterRobotRequest {
+  string robot_id = 1;
+  string manufacturer = 2;
+}
+
+message RegisterRobotResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+message UnregisterRobotRequest {
+  string robot_id = 1;
+}
+
+message UnregisterRobotResponse {
+  bool success = 1;
+}

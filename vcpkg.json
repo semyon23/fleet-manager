@@ -1,0 +1,21 @@
+{
+  "name": "untitled",
+  "version-string": "1.0.0",
+  "dependencies": [
+    "nlohmann-json",
+    "boost-beast",
+    "boost-json",
+    "boost-uuid",
+    "boost-mqtt5",
+    "asio-grpc",
+    {
+      "name": "grpc",
+      "features": [
+        "codegen"
+      ]
+    }
+  ]
+}
+
+
+
