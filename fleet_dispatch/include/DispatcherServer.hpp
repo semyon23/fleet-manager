@@ -3,12 +3,12 @@
 #define FLEETSTREAMGATEWAY_HPP
 
 #include "include/MqttClientHandler.hpp"
-#include "include/GrpcServerHandler.hpp"
+#include "include/GrpcDispatchService.hpp"
 #include "include/utils/RobotTopicManager.hpp"
 
-class FleetStreamGateway : public std::enable_shared_from_this<FleetStreamGateway>  {
+class DispatcherServer : public std::enable_shared_from_this<DispatcherServer>  {
 public:
-    FleetStreamGateway(MqttClientHandler& mqtt, std::shared_ptr<GrpcServerHandler> grpc_server);
+    DispatcherServer(MqttClientHandler& mqtt, std::shared_ptr<GrpcDispatchService> grpc_server);
     void run(asio::io_context& ctx);
 
 private:
@@ -16,7 +16,7 @@ private:
     asio::awaitable<void> handle_registration_events();
     asio::awaitable<void> handle_unregistration_events();
     MqttClientHandler& mqtt_client;
-    std::shared_ptr<GrpcServerHandler> server;
+    std::shared_ptr<GrpcDispatchService> server;
 
     RobotTopicManager robot_topic_manager;
 };

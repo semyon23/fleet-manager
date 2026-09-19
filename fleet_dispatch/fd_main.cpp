@@ -1,8 +1,8 @@
 #include <boost/asio/signal_set.hpp>
 #include "include/MqttClientHandler.hpp"
-#include "include/GrpcServerHandler.hpp"
+#include "include/GrpcDispatchService.hpp"
 #include <grpcpp/server_builder.h>
-#include "include/FleetStreamGateway.hpp"
+#include "include/DispatcherServer.hpp"
 
 int main() {
 
@@ -12,22 +12,22 @@ int main() {
     std::unique_ptr<grpc::ServerCompletionQueue> cq = builder.AddCompletionQueue();
     agrpc::GrpcContext grpc_context{std::move(cq)};
 
-    auto server_handler = std::make_shared<GrpcServerHandler>(builder, grpc_context, "0.0.0.0:5001");
-    server_handler->start(builder);
+    auto DispatchServer = std::make_shared<GrpcDispatchService>(builder, grpc_context, "0.0.0.0:5001");
+    DispatchServer->start(builder);
 
     MqttClientConfig config;
-    MqttClientHandler client(ioc, config);
-    client.start();
+    MqttClientHandler mqtt_client(ioc, config);
+    mqtt_client.start();
 
-    auto FleetStream = std::make_shared<FleetStreamGateway>(client, server_handler);
+    auto FleetStream = std::make_shared<DispatcherServer>(mqtt_client, DispatchServer);
 
     FleetStream->run(ioc);
 
     asio::signal_set signals(ioc, SIGINT, SIGTERM);
 
     signals.async_wait([&](auto, int) {
-        server_handler->stop();
-        client.stop();
+        DispatchServer->stop();
+        mqtt_client.stop();
         grpc_context.stop();
         ioc.stop();
     });
@@ -40,7 +40,7 @@ int main() {
 
     ioc.run();
 
-    server_handler.reset();
+    DispatchServer.reset();
 
     return EXIT_SUCCESS;
 }

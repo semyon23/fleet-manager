@@ -25,17 +25,20 @@ public:
     FleetDispatchClient(agrpc::GrpcContext& context, const std::string& server_address);
     ~FleetDispatchClient();
     void run();
-
+    void stop();
     using StatusesStreamRPC = agrpc::ClientRPC<&fms::FleetDispatchService::Stub::PrepareAsyncStreamRobotStatuses>;
     using VisualizationsStreamRPC = agrpc::ClientRPC<&fms::FleetDispatchService::Stub::PrepareAsyncStreamRobotVisualizations>;
 
     asio::awaitable<fms::RegisterRobotResponse> register_robot(const std::string& robot_id, const std::string& manufacturer);
     asio::awaitable<fms::UnregisterRobotResponse> unregister_robot(const std::string& robot_id);
 
+private:
+    // template <typename RpcType, typename ResponseType, typename MessageHandler>
+    // asio::awaitable<void>  stream_implimentation( const std::string& client_id, const std::string& stream_name, MessageHandler&& handler);
     asio::awaitable<void> stream_robot_statuses(const std::string& client_id);
     asio::awaitable<void> stream_robot_visualizations(const std::string& client_id);
-
-private:
+    asio::cancellation_signal cancel_statuses_stream;
+    asio::cancellation_signal cancel_visu_stream;
     std::unique_ptr<fms::FleetDispatchService::Stub> stub;
     agrpc::GrpcContext& ctx;
 };

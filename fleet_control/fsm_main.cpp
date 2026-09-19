@@ -90,21 +90,25 @@ int main() {
     asio::signal_set signals(ioc, SIGINT, SIGTERM);
 
     signals.async_wait([&](auto, int) {
-
+        DispatchClient->stop();
         //ticker.cancel();
         session.stop();
         grpc_work.reset();
 
-        grpc_context.stop();
+         //grpc_context.stop();
         ioc.stop();
+        // DispatchClient.reset();
         std::cout << "Shutdown initiated...\n";
     });
+
 
     asio::post(ioc, [&] {
         agrpc::run(grpc_context, ioc, [&] {
             return grpc_context.is_stopped();
         });
     });
+
+
 
     ioc.run();
 

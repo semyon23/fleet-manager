@@ -30,7 +30,10 @@ void MqttClientHandler::start(){
 }
 
 void MqttClientHandler::stop(){
+    message_channel.cancel();
+    std::cout << "[MQTT] Message channel cancel" << std::endl;
     mqtt_client.cancel();
+    std::cout << "[MQTT] Stopped " << std::endl;
 }
 
 asio::awaitable<void> MqttClientHandler::co_subscribe(){

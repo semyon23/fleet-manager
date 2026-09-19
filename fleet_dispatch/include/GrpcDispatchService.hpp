@@ -18,10 +18,10 @@ using stream_visualisation_channel = asio::experimental::channel<void(boost::sys
 using register_channel = asio::experimental::channel<void(boost::system::error_code, RegisterRobot)>;
 using unregister_channel = asio::experimental::channel<void(boost::system::error_code, UnregisterRobot)>;
 
-class GrpcServerHandler : public std::enable_shared_from_this<GrpcServerHandler> {
+class GrpcDispatchService : public std::enable_shared_from_this<GrpcDispatchService> {
 public:
-    GrpcServerHandler(grpc::ServerBuilder& builder, agrpc::GrpcContext& context, const std::string& server_address);
-    ~GrpcServerHandler();
+    GrpcDispatchService(grpc::ServerBuilder& builder, agrpc::GrpcContext& context, const std::string& server_address);
+    ~GrpcDispatchService();
     void start(grpc::ServerBuilder& builder) ;
     void stop();
     asio::awaitable<std::optional<RegisterRobot>> get_register_robot();

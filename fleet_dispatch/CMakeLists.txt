@@ -6,9 +6,9 @@ find_package(asio-grpc CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 add_executable(fleet_dispatch fd_main.cpp
         src/MqttClientHandler.cpp
-        src/GrpcServerHandler.cpp
-        src/FleetStreamGateway.cpp
-        include/FleetStreamGateway.hpp
+        src/GrpcDispatchService.cpp
+        src/DispatcherServer.cpp
+        include/DispatcherServer.hpp
         include/types.hpp
         src/utils/RobotTopicManager.cpp
         include/utils/RobotTopicManager.hpp

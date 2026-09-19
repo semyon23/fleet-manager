@@ -1,14 +1,14 @@
-#include "../include/FleetStreamGateway.hpp"
+#include "../include/DispatcherServer.hpp"
 #include <print>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
 
-FleetStreamGateway::FleetStreamGateway(MqttClientHandler& mqtt, std::shared_ptr<GrpcServerHandler> grpc_server)
+DispatcherServer::DispatcherServer(MqttClientHandler& mqtt, std::shared_ptr<GrpcDispatchService> grpc_server)
         : mqtt_client(mqtt), server(grpc_server){}
 
 
-void FleetStreamGateway::run(asio::io_context& ctx){
+void DispatcherServer::run(asio::io_context& ctx){
     asio::co_spawn(ctx, [self = shared_from_this()]() {
             return self->mqtt_reader_loop();
         }, asio::detached);
@@ -23,7 +23,7 @@ void FleetStreamGateway::run(asio::io_context& ctx){
 
 }
 
-asio::awaitable<void> FleetStreamGateway::handle_registration_events(){
+asio::awaitable<void> DispatcherServer::handle_registration_events(){
     std::println("[Gateway] Started gRPC registration event processor loop.");
 
     while (true) {
@@ -51,7 +51,7 @@ asio::awaitable<void> FleetStreamGateway::handle_registration_events(){
     }
 }
 
-asio::awaitable<void> FleetStreamGateway::handle_unregistration_events(){
+asio::awaitable<void> DispatcherServer::handle_unregistration_events(){
     std::println("[Gateway] Started gRPC unregistration event processor loop.");
 
     while (true) {
@@ -75,7 +75,7 @@ asio::awaitable<void> FleetStreamGateway::handle_unregistration_events(){
 }
 
 
-asio::awaitable<void> FleetStreamGateway::mqtt_reader_loop(){
+asio::awaitable<void> DispatcherServer::mqtt_reader_loop(){
      while (true) {
         auto msg = co_await mqtt_client.get_message_received();
 
