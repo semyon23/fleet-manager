@@ -4,7 +4,7 @@
 
 #include "include/MqttClientHandler.hpp"
 #include "include/GrpcDispatchService.hpp"
-#include "include/utils/RobotTopicManager.hpp"
+#include "controllers/RobotTopicManager.hpp"
 
 class DispatcherServer : public std::enable_shared_from_this<DispatcherServer>  {
 public:
