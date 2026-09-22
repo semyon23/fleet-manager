@@ -10,14 +10,8 @@ add_executable(fleet_dispatch fd_main.cpp
         src/MqttClientHandler.cpp
         src/GrpcDispatchService.cpp
         src/DispatcherServer.cpp
-        include/DispatcherServer.hpp
-        include/types.hpp
         src/controllers/RobotTopicManager.cpp
-        include/controllers/RobotTopicManager.hpp
         src/controllers/RobotController.cpp
-        include/controllers/RobotController.hpp
-
-
 )
 
 target_link_libraries(fleet_dispatch

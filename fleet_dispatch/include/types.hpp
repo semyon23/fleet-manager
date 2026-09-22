@@ -12,7 +12,7 @@ struct  AgvPosition {
     double theta;
 };
 
-struct BatteryState {
+struct Battery_State {
     double battery_charge;
     bool charging;
 };
@@ -56,7 +56,7 @@ struct RobotStatusUpdate {
     std::string operating_mode;
     bool driving;
 
-    BatteryState battery_state;
+    Battery_State battery_state;
     SafetyState safety_state;
 
     std::string  action_states;

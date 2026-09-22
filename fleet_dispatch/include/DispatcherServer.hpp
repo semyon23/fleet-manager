@@ -5,6 +5,8 @@
 #include "include/MqttClientHandler.hpp"
 #include "include/GrpcDispatchService.hpp"
 #include "controllers/RobotTopicManager.hpp"
+#include "include/controllers/RobotController.hpp"
+#include <unordered_map>
 
 class DispatcherServer : public std::enable_shared_from_this<DispatcherServer>  {
 public:
@@ -13,12 +15,14 @@ public:
 
 private:
     asio::awaitable<void> mqtt_reader_loop();
-    asio::awaitable<void> handle_registration_events();
-    asio::awaitable<void> handle_unregistration_events();
+    asio::awaitable<void> handle_registration_robots();
+    asio::awaitable<void> handle_unregistration_robots();
     MqttClientHandler& mqtt_client;
     std::shared_ptr<GrpcDispatchService> server;
 
     RobotTopicManager robot_topic_manager;
+
+    std::unordered_map<std::string, std::shared_ptr<RobotController>> robot_controllers;
 };
 
 

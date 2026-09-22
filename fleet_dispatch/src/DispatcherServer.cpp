@@ -14,44 +14,45 @@ void DispatcherServer::run(asio::io_context& ctx){
         }, asio::detached);
 
     asio::co_spawn(ctx, [self = shared_from_this()]() {
-           return self->handle_registration_events();
+           return self->handle_registration_robots();
        }, asio::detached);
 
     asio::co_spawn(ctx, [self = shared_from_this()]() {
-               return self->handle_unregistration_events();
+               return self->handle_unregistration_robots();
            }, asio::detached);
 
 }
 
-asio::awaitable<void> DispatcherServer::handle_registration_events(){
-    std::println("[Gateway] Started gRPC registration event processor loop.");
-
+asio::awaitable<void> DispatcherServer::handle_registration_robots(){
+    std::println("[DispatcherServer] Started registration robots processor loop");
     while (true) {
         auto reg_event = co_await server->get_register_robot();
 
-        if (reg_event.has_value()) {
-            const auto& robot = reg_event.value();
-            std::println("[Gateway] Processing registration for robot: {}", robot.robot_id);
+        if (!reg_event.has_value()) {
+            std::println("[DispatcherServer] Registration channel closed. Exiting loop.");
+            co_return;
+        }
+        const auto& robot = reg_event.value();
+        std::println("[DispatcherServer] Processing registration for robot: {}", robot.robot_id);
 
-            std::string status_topic = "uagv/v2/" + robot.manufacturer + "/" + robot.robot_id + "/status";
-            std::string visu_topic = "uagv/v2/" + robot.manufacturer + "/" + robot.robot_id + "/visualization";
+        auto it = robot_controllers.find(robot.robot_id);
 
-            robot_topic_manager.add_topic(robot.robot_id, status_topic);
-            robot_topic_manager.add_topic(robot.robot_id, visu_topic);
-            auto topics = robot_topic_manager.get_robot_topics(robot.robot_id);
+        if (it == robot_controllers.end()){
+            auto new_robot = std::make_shared<RobotController>(robot.robot_id, robot.manufacturer);
+            robot_controllers[robot.robot_id] = new_robot;
+            auto topics = new_robot->get_required_topics();
             for (const auto& topic : topics){
                 mqtt_client.subscribe_topic(topic);
             }
-
+            std::println("[DispatcherServer] The robot ID [{}] has been successfully registered.!", robot.robot_id);
         } else {
-            std::println("[Gateway] gRPC registration channel closed. Exiting loop.");
-            asio::steady_timer timer(co_await boost::asio::this_coro::executor, std::chrono::seconds(2));
-            co_await timer.async_wait(boost::asio::use_awaitable);
+            std::println("[DispatcherServer] A robot with ID [{}] already exists", robot.robot_id);
         }
     }
+
 }
 
-asio::awaitable<void> DispatcherServer::handle_unregistration_events(){
+asio::awaitable<void> DispatcherServer::handle_unregistration_robots(){
     std::println("[Gateway] Started gRPC unregistration event processor loop.");
 
     while (true) {
