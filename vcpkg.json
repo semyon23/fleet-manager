@@ -2,6 +2,7 @@
   "name": "untitled",
   "version-string": "1.0.0",
   "dependencies": [
+    "yaml-cpp",
     "behaviortree-cpp",
     "nlohmann-json",
     "boost-beast",

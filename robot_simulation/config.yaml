@@ -1,0 +1,10 @@
+project_name: "Super App"
+version: 2.5
+enabled: False
+database:
+  host: "0.0.0.0"
+  port: 5432
+tags:
+  - cxx
+  - yaml
+  - vcpkg
