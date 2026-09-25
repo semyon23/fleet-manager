@@ -1,0 +1,68 @@
+<root BTCPP_format="4">
+    <BehaviorTree ID="VdaUniversalTree">
+        <!-- Внешний цикл: заставляет робота бесконечно возвращаться к ожиданию новых заказов -->
+        <KeepRunningUntilFailure name="MainLoop">
+            <Sequence name="OrderExecutionSequence">
+                <!-- 1. Асинхронное ожидание: узел крутится в RUNNING, пока по сети не придет JSON -->
+                <WaitForOrder name="WaitForNewVdaOrder"/>
+                <!-- 2. Распределитель финала: переключит на фиксацию итогов при любом исходе цикла -->
+                <Fallback name="ProcessOrFinish">
+                    <!-- Внутренний цикл: перебирает сегменты графа VDA 5050 один за другим -->
+                    <KeepRunningUntilFailure name="SegmentLoop">
+                        <Sequence name="SegmentStepSequence">
+                            <!-- А. Извлекаем из робота координаты и экшны следующей точки пути -->
+                            <GetNextSegment target_x="{x}" target_y="{y}"
+                                            edge_actions="{e_actions}" node_actions="{n_actions}"/>
+                            <!-- Б. Реактивная секция: проверяет отмену каждый тик во время движения -->
+                            <ReactiveSequence name="SafeMovementSequence">
+                                <!-- Если придет cancelOrder, вернет FAILURE и погасит движение ниже -->
+                                <CheckOrderValid/>
+                                <!-- В. Движение: едем к точке и параллельно крутим экшны на ребре -->
+                                <Parallel failure_count="1" success_count="2">
+                                    <MoveToPose x="{x}" y="{y}"/>
+                                    <ExecuteVdaActions actions="{e_actions}" trigger="DURING_MOVEMENT"/>
+                                </Parallel>
+                            </ReactiveSequence>
+                            <!-- Г. Приехали: выполняем технологические операции в самой точке (подъем, зарядка) -->
+                            <ExecuteVdaActions actions="{n_actions}" trigger="AFTER_ARRIVE"/>
+                            <!-- Д. Отчет: фиксируем успешное прохождение этой точки для VDA State -->
+                            <MarkSegmentComplete/>
+                        </Sequence>
+                    </KeepRunningUntilFailure>
+                    <Sequence name="FinalizationSequence">
+                        <!-- Внутри С++ ноды мы проверяем робота и понимаем, был это успех или отмена -->
+                        <OrderFullyCompleted/>
+                        <!-- Гарантируем закрытие ветки успехом, чтобы вернуться к началу внешнего Sequence -->
+                        <AlwaysSuccess/>
+                    </Sequence>
+                </Fallback>
+            </Sequence>
+        </KeepRunningUntilFailure>
+    </BehaviorTree>
+</root>
+
+<!--<root BTCPP_format="4">-->
+<!--    <BehaviorTree ID="VdaUniversalTree">-->
+<!--        <KeepRunningUntilFailure>-->
+<!--            <Sequence>-->
+<!--                <WaitForOrder/>-->
+<!--                <KeepRunningUntilFailure>-->
+<!--                    <Sequence>-->
+<!--                        <GetNextSegment target_x="{x}" target_y="{y}"-->
+<!--                                        edge_actions="{e_actions}" node_actions="{n_actions}"/>-->
+<!--                        <ReactiveSequence>-->
+<!--                            <CheckOrderValid/>-->
+<!--                            <Parallel failure_count="1" success_count="2">-->
+<!--                                <MoveToPose x="{x}" y="{y}"/>-->
+<!--                                <ExecuteVdaActions actions="{e_actions}" trigger="DURING_MOVEMENT"/>-->
+<!--                            </Parallel>-->
+<!--                        </ReactiveSequence>-->
+<!--                        <ExecuteVdaActions actions="{n_actions}" trigger="AFTER_ARRIVE"/>-->
+<!--                        <MarkSegmentComplete/>-->
+<!--                    </Sequence>-->
+<!--                </KeepRunningUntilFailure>-->
+<!--                <OnOrderFullyCompleted/>-->
+<!--            </Sequence>-->
+<!--        </KeepRunningUntilFailure>-->
+<!--    </BehaviorTree>-->
+<!--</root>-->

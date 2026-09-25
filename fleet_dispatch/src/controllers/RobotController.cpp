@@ -3,7 +3,7 @@
 RobotController::RobotController(std::string id, std::string manufacturer) : robot_id(id),  robot_manufacturer(manufacturer)
 {
     status_topic = std::format("arm/v1/{}/{}/state", robot_id, robot_manufacturer);
-    status_topic = std::format("arm/v1/{}/{}/visualization", robot_id, robot_manufacturer);
+    visu_topic = std::format("arm/v1/{}/{}/visualization", robot_id, robot_manufacturer);
 }
 
 RobotController::~RobotController() {}
@@ -17,7 +17,7 @@ void RobotController::update_state(std::string topic_state)
 {
     try {
         nlohmann::json json_payload = nlohmann::json::parse(topic_state);
-        RobotState incoming_state = json_payload.get<RobotState>();
+        State incoming_state = json_payload.get<State>();
         this->robot_state = std::move(incoming_state);
 
         // Дальше здесь вызывается логика вашей стейт-машины и таймеров

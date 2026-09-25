@@ -18,7 +18,11 @@ endif()
 set(GRPC_CPP_PLUGIN_EXECUTABLE $<TARGET_FILE:gRPC::grpc_cpp_plugin>)
 
 set(GEN_PATH "${CMAKE_CURRENT_BINARY_DIR}")
-set(ALL_GENERATED_SRCS "")
+set(ALL_GENERATED_SRCS ""
+        ../robot_simulation/src/rs_main.cpp
+        ../vda5050/order/Order.hpp
+        ../vda5050/connection/Connection.hpp
+        ../vda5050/visualization/Visualization.hpp)
 
 foreach(PROTO_FILE ${PROTO_FILES})
     get_filename_component(FIL_WE ${PROTO_FILE} NAME_WE)

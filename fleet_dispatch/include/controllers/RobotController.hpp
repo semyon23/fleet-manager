@@ -4,7 +4,7 @@
 
 #include <string>
 #include <behaviortree_cpp/behavior_tree.h>
-#include "include/vda5050/state/RobotState.hpp"
+#include "../vda5050/state/State.hpp"
 
 class RobotController {
 public:
@@ -18,7 +18,7 @@ private:
     std::string status_topic;
     std::string visu_topic;
 
-    RobotState robot_state;
+    State robot_state;
 };
 
 

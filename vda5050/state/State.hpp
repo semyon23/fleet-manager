@@ -8,6 +8,8 @@
 #include <nlohmann/json.hpp>
 #include <print>
 
+
+
 namespace sentinel {
     constexpr double NO_VALUE = -1.0;
     constexpr double NO_ANGLE = -999.0;
@@ -17,8 +19,9 @@ namespace sentinel {
 enum class OperatingMode { AUTOMATIC, SEMIAUTOMATIC, MANUAL, SERVICE, TEACHIN, EMERGENCY };
 enum class BlockingType { NONE, SOFT, HARD };
 enum class ErrorLevel { WARNING, FATAL };
+enum class ActionStatus {WAITING, INITIALIZING, RUNNING, PAUSED, RETRIABLE, FINISHED, FAILED};
 
-struct Position {
+struct MobileRobotPosition {
     double x = 0.0;
     double y = 0.0;
     double theta = 0.0;
@@ -56,9 +59,9 @@ struct Error {
 struct ActionState {
     std::string actionId;
     std::string actionType;
-    std::string actionStatus;
-    uint8_t progress = sentinel::NO_PROGRESS;
-    std::string resultDescription;
+    std::string actionDescriptor;
+    ActionStatus actionStatus{ActionStatus::WAITING};
+    std::string actionResult;
 };
 
 struct EdgeState {
@@ -79,35 +82,46 @@ struct ZoneState {
 };
 
 
-struct RobotState {
+struct State {
     uint32_t headerId = 0;
     std::string timestamp;
     std::string version = "3.0.0";
+    std::string manufacturer;
+    std::string serialNumber;
 
     std::string orderId;
-    uint32_t orderUpdateId = 0;
+    uint32_t orderUpdateId = 0; //
     uint32_t lastNodeSequenceId = 0;
     std::string lastNodeId;
 
-    Position edgePosition;
+    MobileRobotPosition Position;
     Velocity velocity;
     std::vector<PlannedPathPoint> plannedPath;
 
-    OperatingMode operatingMode = OperatingMode::AUTOMATIC;
+    OperatingMode operatingMode = OperatingMode::AUTOMATIC;  //
     BlockingType blockingType = BlockingType::NONE;
     bool idle = true;
 
     BatteryState batteryState;
-    bool driving = false;
-    bool paused = false;
+    bool driving = false;   //
+    bool paused = false;   //
     bool newBaseRequest = false;
 
     std::vector<NodeState> nodeStates;
     std::vector<EdgeState> edgeStates;
     std::vector<ActionState> actionStates;
     std::vector<ZoneState> zoneStates;
-    std::vector<Error> errors;
+    std::vector<Error> errors;   //
 };
+NLOHMANN_JSON_SERIALIZE_ENUM(ActionStatus, {
+    {ActionStatus::WAITING, "WAITING"},
+    {ActionStatus::INITIALIZING, "INITIALIZING"},
+    {ActionStatus::RUNNING, "RUNNING"},
+    {ActionStatus::PAUSED, "PAUSED"},
+    {ActionStatus::RETRIABLE, "RETRIABLE"},
+    {ActionStatus::FINISHED, "FINISHED"},
+    {ActionStatus::FAILED, "FAILED"}
+})
 
 
 NLOHMANN_JSON_SERIALIZE_ENUM(OperatingMode, {
@@ -130,20 +144,21 @@ NLOHMANN_JSON_SERIALIZE_ENUM(ErrorLevel, {
     {ErrorLevel::FATAL, "FATAL"}
 })
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Position, x, y, theta, mapId, positionInitialized, deviationRange)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(MobileRobotPosition, x, y, theta, mapId, positionInitialized, deviationRange)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Velocity, vx, vy, omega)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(PlannedPathPoint, x, y, theta)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(BatteryState, batteryCharge, batteryVoltage, batteryTemperature, charging, powerSavingMode)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Error, errorType, errorLevel, errorDescription)
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(ActionState, actionId, actionType, actionStatus, progress, resultDescription)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(ActionState, actionId, actionType, actionDescriptor, actionStatus, actionResult)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(NodeState, nodeId, sequenceId, released)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EdgeState, edgeId, sequenceId, released)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(ZoneState, zoneId, active)
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(RobotState,
-    headerId, timestamp, version,
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(State,
+    headerId, timestamp, version, manufacturer, serialNumber,
     orderId, orderUpdateId, lastNodeSequenceId, lastNodeId,
-    edgePosition, velocity, plannedPath,
+    Position, velocity, plannedPath,
     operatingMode, blockingType, idle,
     batteryState, driving, paused, newBaseRequest,
     nodeStates, edgeStates, actionStates, zoneStates, errors

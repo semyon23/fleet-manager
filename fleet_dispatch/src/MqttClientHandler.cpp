@@ -89,7 +89,6 @@ asio::awaitable<std::optional<MqttMessage>> MqttClientHandler::get_message_recei
     if (ec) co_return std::nullopt;
 
     co_return std::move(msg);
-
 }
 
 
@@ -206,7 +205,6 @@ void MqttClientHandler::publish_topic(const std::string& topic_string, const std
                 std::cerr << "[MQTT] Broker rejected publish on topic [" << topic_string
                           << "]. Reason: " << rc.message() << std::endl;
             } else {
-
                 std::cout << "[MQTT] Successfully published message to: " << topic_string << std::endl;
             }
 

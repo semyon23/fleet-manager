@@ -1,13 +1,31 @@
 cmake_minimum_required(VERSION 3.15)
-cmake_policy(SET CMP0167 OLD)
+cmake_policy(SET CMP0167 OLD) # Подавляет предупреждение о FindBoost
+
 project(FleetManagerSystem CXX)
 
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Поиск глобальных зависимостей
 find_package(gRPC CONFIG REQUIRED)
 find_package(protobuf CONFIG REQUIRED)
+
 
 add_subdirectory(proto)
 add_subdirectory(fleet_control)
 add_subdirectory(fleet_dispatch)
+add_subdirectory(robot_simulation)
 
+#cmake_minimum_required(VERSION 3.15)
+#cmake_policy(SET CMP0167 OLD)
+#project(FleetManagerSystem CXX)
+#
+#set(CMAKE_CXX_STANDARD 17)
+#
+#find_package(gRPC CONFIG REQUIRED)
+#find_package(protobuf CONFIG REQUIRED)
+#
+#add_subdirectory(proto)
+#add_subdirectory(fleet_control)
+#add_subdirectory(fleet_dispatch)
+#add_subdirectory(robot_simulation)
