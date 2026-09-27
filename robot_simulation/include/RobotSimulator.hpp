@@ -2,11 +2,9 @@
 #define FLEETMANAGERSYSTEM_ROBOTSIMULATOR_HPP
 #include <string>
 #include <nlohmann/json.hpp>
-#include "../vda5050/state/State.hpp"
-#include "../vda5050/order/Order.hpp"
-#include "../vda5050/connection/Connection.hpp"
-#include "../vda5050/visualization/Visualization.hpp"
-#include "include/DiffDriveController.hpp"
+#include "include/RobotDriveController.hpp"
+#include "../vda5050/vda5050.hpp"
+
 #include "behaviortree_cpp/bt_factory.h"
 
 #include <boost/asio/steady_timer.hpp>
@@ -18,7 +16,7 @@
 #include <boost/asio/this_coro.hpp>
 #include <chrono>
 #include <print>
-
+#include "behaviortree_cpp/loggers/groot2_publisher.h"
 namespace asio = boost::asio;
 
 struct RobotMessage{
@@ -30,6 +28,10 @@ struct RobotConfig{
     std::string name;
     std::string manufacturer;
     std::string map;
+    DiffDriveParams drive_params;
+
+    std::chrono::milliseconds min_state_interval_{100};
+    std::chrono::seconds max_state_interval_{30};
 };
 
 using publishing_channel = asio::experimental::channel<void(boost::system::error_code, RobotMessage)>;
@@ -42,8 +44,10 @@ public:
     void stop();
     void init_behavior_tree(BT::BehaviorTreeFactory& factory, const std::string& xml_path);
 
-    void update_order(std::string json_order);
+    void update_order(const std::string& json_order);
     std::vector<std::string> get_subscribe_topics();
+
+    bool has_active_order() const;
 
     void emit_state_changed();
 
@@ -55,8 +59,26 @@ public:
 
     std::string get_name() const;
 private:
-    void update_battery();
+    void simulation_tick(double dt);
+    struct Rejection {
+        std::string type;
+        vda5050::ErrorLevel level = vda5050::ErrorLevel::Warning;
+        std::string description;
+        std::vector<vda5050::ErrorReference> references;
+    };
+
+    std::optional<vda5050::Order> parse_order(const std::string& json_order);
+    std::optional<Rejection> validate_structure(const vda5050::Order& order) const;
+    std::optional<Rejection> validate_capabilities(const vda5050::Order& order) const;
     void init_state();
+    bool is_idle() const;
+    bool is_start_node_in_range(const vda5050::Node& node) const;
+    const vda5050::Node* decision_point() const;
+    void drop_horizon();
+    void append_states(const vda5050::Order& order, std::size_t first_node_index);
+    void reject(const Rejection& r, const vda5050::Order* order);
+    void clear_order_errors();
+
 
     RobotMessage pub_state_topic();
     RobotMessage pub_visu_topic();
@@ -67,10 +89,12 @@ private:
     asio::awaitable<void> run_state_publisher_loop();
 
     RobotConfig config;
-    State robot_state;
-    OrderMessage robot_order;
-    ConnectionMessage robot_connection;
-    VisualizationMessage robot_visualization;
+    RobotDriveController drive_controller;
+    BT::Tree tree;
+    BT::Blackboard::Ptr blackboard;
+
+    // std::unique_ptr<BT::Groot2Publisher> groot;
+    // unsigned groot_port = 1667;
 
     std::string sub_order_topic;
     std::string sub_instantAction_topic;
@@ -78,19 +102,29 @@ private:
     std::string state_topic;
     std::string visu_topic;
     std::string connection_topic;
-
-    DiffDriveController robot_controller;
-
-    const double DISCHARGE_RATE_IDLE{0.01};
-    const double DISCHARGE_RATE_DRIVE{0.05};
-    const double CHARGE_RATE{0.2};
-
-    BT::Tree tree;
-    BT::Blackboard::Ptr blackboard;
+    std::string factsheet_topic;
 
     Pub_channel_ptr pub_channel;
     std::unique_ptr<asio::experimental::channel<void(boost::system::error_code, bool)>> state_trigger_channel;
     std::unique_ptr<asio::steady_timer> simulation_timer;
+
+    vda5050::State State;
+    vda5050::Order Order;
+    vda5050::Connection Connection;
+    vda5050::Visualization Visualization;
+
+    vda5050::Order Last_received_order;
+    vda5050::State Last_sent_state;
+    bool state_sent_once = false;
+    std::uint32_t state_header_id_ = 0;
+    std::chrono::milliseconds min_state_interval_{100};    // factsheet: protocolLimits.timing.minimumStateInterval
+    std::chrono::seconds max_state_interval_{30};
+
+    double default_start_tolerance_{0.5};
+    std::set<std::string> supported_action_types_;
+
+    std::atomic<bool> has_active_order_{false};
+    bool stopping{false};
 
     std::string current_order_id{""};     // Текущий активный orderId
     uint32_t last_order_update_id{0};     // Последний обработанный orderUpdateId

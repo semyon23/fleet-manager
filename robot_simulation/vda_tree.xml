@@ -1,0 +1,85 @@
+<root BTCPP_format="4">
+    <!--
+        Дерево выполнения заказов VDA 5050 с непрерывным движением по вершинам.
+
+        Главная идея: дерево больше не ведёт робота от вершины к вершине.
+        Оно отдаёт контроллеру сразу весь кусок пути ("чанк") до ближайшей
+        вершины, где действительно нужна остановка, а транзитные вершины
+        контроллер проезжает сам, не снижая скорость.
+
+        Вершина-остановка — это:
+          * последняя released вершина (конец base);
+          * вершина с экшнами blockingType = HARD или SOFT.
+
+        Что происходит вне дерева (в RobotSimulator):
+          * колбэк DiffDriveController::on_node_reached при прохождении каждой
+            вершины обновляет lastNodeId, убирает пройденные node/edge из state,
+            публикует state и запускает неблокирующие экшны (blockingType = NONE);
+          * при приходе order update из MQTT-потока вызывается append_path(),
+            и робот продолжает ехать без торможения в бывшем конце base;
+          * при cancelOrder выставляется флаг, который читает CheckOrderValid.
+    -->
+    <BehaviorTree ID="VdaUniversalTree">
+        <!-- Внешний цикл: после каждого заказа робот возвращается к ожиданию нового -->
+        <KeepRunningUntilFailure name="MainLoop">
+            <Sequence name="OrderExecutionSequence">
+                <WaitForOrder name="WaitForNewVdaOrder"/>
+
+                <!-- 2. Выполнение заказа. При любом исходе (заказ пройден или отменён)
+                        Fallback переходит к финализации -->
+                <Fallback name="ProcessOrFinish">
+
+                    <!-- Цикл по чанкам: один проход = движение до следующей вершины-остановки.
+                         Если в заказе нет блокирующих экшнов, весь base проходится
+                         за одну итерацию одним непрерывным движением.
+                         Цикл завершается FAILURE, когда чанки кончились или заказ отменён -->
+                    <KeepRunningUntilFailure name="ChunkLoop">
+                        <Sequence name="ChunkStepSequence">
+
+                            <!-- А. Берём из заказа все released вершины до ближайшей остановки,
+                                    передаём их контроллеру через set_path() и отдаём наружу
+                                    блокирующие экшны вершины-остановки.
+                                    FAILURE — если released вершин больше нет (заказ пройден) -->
+                            <GetNextPathChunk stop_node_actions="{n_actions}"/>
+
+                            <!-- Б. Реактивная секция: CheckOrderValid проверяется на каждом тике,
+                                    пока идёт движение. FAILURE прерывает FollowPath,
+                                    у которого в onHalted() вызывается standstill() -->
+                            <ReactiveSequence name="SafeMovementSequence">
+
+                                <!-- Нет ли cancelOrder / критической ошибки -->
+                                <CheckOrderValid/>
+
+                                <!-- В. Движение по чанку. RUNNING, пока контроллер не доедет
+                                        до вершины-остановки (path_finished() == true).
+                                        Транзитные вершины и неблокирующие экшны на рёбрах
+                                        обрабатываются в колбэке on_node_reached, дерево
+                                        в это не вмешивается и не тормозит робота -->
+                                <FollowPath/>
+                            </ReactiveSequence>
+
+                            <!-- Г. Стоим в вершине-остановке: выполняем блокирующие экшны
+                                    (подъём груза, зарядка, ожидание). Если экшнов нет,
+                                    узел сразу возвращает SUCCESS -->
+                            <ExecuteVdaActions actions="{n_actions}" trigger="AFTER_ARRIVE"/>
+
+                            <!-- Д. Закрываем чанк: фиксируем завершение экшнов в actionStates
+                                    и публикуем state. О прохождении самих вершин робот
+                                    уже отчитался в колбэке on_node_reached -->
+                            <MarkSegmentComplete/>
+                        </Sequence>
+                    </KeepRunningUntilFailure>
+
+                    <!-- Финализация: сюда попадаем и после успешного заказа, и после отмены -->
+                    <Sequence name="FinalizationSequence">
+                        <!-- Внутри узла проверяем, был это успех или отмена,
+                             очищаем blackboard и состояние заказа в роботе -->
+                        <OrderFullyCompleted/>
+                        <!-- Закрываем ветку успехом, чтобы MainLoop вернулся к WaitForOrder -->
+                        <AlwaysSuccess/>
+                    </Sequence>
+                </Fallback>
+            </Sequence>
+        </KeepRunningUntilFailure>
+    </BehaviorTree>
+</root>

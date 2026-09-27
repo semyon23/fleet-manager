@@ -10,13 +10,12 @@ BT::NodeStatus WaitForOrder::onStart() {
     if (!config().blackboard->get("robot_instance", robot)) {
         return BT::NodeStatus::FAILURE;
     }
-
     std::println("[BT] {} Robot started waiting for a new order...",  robot->get_name());
     return BT::NodeStatus::RUNNING;
 }
 
 BT::NodeStatus WaitForOrder::onRunning() {
-    if (false) {
+    if (robot->has_active_order()) {
         std::println("[BT] {} Robot -> WaitForOrder : SUCCESS (Order received!)",  robot->get_name());
         return BT::NodeStatus::SUCCESS;
     }

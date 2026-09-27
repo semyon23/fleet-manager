@@ -10,11 +10,14 @@ add_executable(robot_simulation src/rs_main.cpp
         src/RobotSimulator.cpp
         src/TreeNodes.cpp
         src/DiffDriveController.cpp
+        src/RobotDriveController.cpp
         src/RobotMessageRouter.cpp
-../fleet_dispatch/src/MqttClientHandler.cpp)
+../fleet_dispatch/src/MqttClientHandler.cpp
+)
 
 target_include_directories(robot_simulation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-
+target_compile_definitions(robot_simulation PRIVATE
+        ROBOT_TREE_XML="${CMAKE_CURRENT_SOURCE_DIR}/robot_tree.xml")
 target_link_libraries(robot_simulation
         PRIVATE
         yaml-cpp::yaml-cpp

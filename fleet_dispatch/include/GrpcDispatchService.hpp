@@ -10,6 +10,7 @@
 #include "include/types.hpp"
 #include "FleetDispatchService.grpc.pb.h"
 #include <print>
+
 namespace asio = boost::asio;
 
 using stream_status_channel = asio::experimental::channel<void(boost::system::error_code, RobotStatusUpdate)>;
