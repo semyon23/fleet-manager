@@ -1,7 +1,7 @@
 
 #include "../include/MqttClientHandler.hpp"
 #include <boost/asio/as_tuple.hpp>
-
+#include <print>
 constexpr auto use_nothrow_awaitable = boost::asio::as_tuple(asio::deferred);
 
 MqttClientHandler::MqttClientHandler(asio::io_context &ioc,  const MqttClientConfig &config)
@@ -27,11 +27,14 @@ void MqttClientHandler::start(){
         .async_run(boost::asio::detached);
 
     asio::co_spawn(network_strand, listen_loop(), boost::asio::detached);
+
+    std::println("[MQTT] Client started, connection to the broker {}:{}", client_config.host, client_config.port);
 }
 
 void MqttClientHandler::stop(){
     message_channel.cancel();
     std::cout << "[MQTT] Message channel cancel" << std::endl;
+
     mqtt_client.cancel();
     std::cout << "[MQTT] Stopped " << std::endl;
 }
@@ -101,7 +104,7 @@ asio::awaitable<void> MqttClientHandler::listen_loop()
         if (!ec)
         {
             if (!topic.empty()) {
-                std::cout << "[MQTT] Topic : "<< topic << " Payload : "<< payload <<std::endl;
+                //std::cout << "[MQTT] Topic : "<< topic << " Payload : "<< payload <<std::endl;
                 message_channel.try_send(boost::system::error_code{}, MqttMessage{std::move(topic), std::move(payload)});
             }
         }else if (ec == boost::mqtt5::client::error::session_expired){
@@ -204,9 +207,10 @@ void MqttClientHandler::publish_topic(const std::string& topic_string, const std
             } else if (rc) {
                 std::cerr << "[MQTT] Broker rejected publish on topic [" << topic_string
                           << "]. Reason: " << rc.message() << std::endl;
-            } else {
-                std::cout << "[MQTT] Successfully published message to: " << topic_string << std::endl;
             }
+            // else {
+            //     std::cout << "[MQTT] Successfully published message to: " << topic_string << std::endl;
+            // }
 
             co_return;
         },

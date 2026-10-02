@@ -7,20 +7,34 @@
 #include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include "include/RobotBehaviorImpl.hpp"
+#include <spdlog/spdlog.h>
+#include "../../utils/coro_guard.hpp"
+
 
 RobotSimulator::RobotSimulator(RobotConfig conf, Pub_channel_ptr channel)
     : config(conf),
     pub_channel(std::move(channel)),
     drive_controller(conf.drive_params){
     this->init_state();
+    spdlog::info("[{}] Robot creating", get_name());
 };
 
+RobotSimulator::~RobotSimulator(){
+    spdlog::info("[{}] Robot destroyed", get_name());
+}
+
 void RobotSimulator::init_behavior_tree(BT::BehaviorTreeFactory& factory, const std::string& xml_path){
+
     blackboard = BT::Blackboard::create();
-    blackboard->set<std::shared_ptr<RobotSimulator>>("robot_instance", shared_from_this());
+    auto behavior_api = std::make_shared<RobotBehaviorImpl>(shared_from_this());
+    blackboard->set<std::shared_ptr<RobotBehaviorApi>>("robot_api", behavior_api);
     tree = factory.createTreeFromFile(xml_path, blackboard);
-    // groot = std::make_unique<BT::Groot2Publisher>(tree, groot_port);
-    std::println("[BT] Groot2 publisher on port {}", 1999);
+    // 6. Опционально: Раскомментируйте для визуализации дерева в Groot2
+   // groot = std::make_unique<BT::Groot2Publisher>(tree, groot_port);
+    // std::cout << "[BT] Groot2 publisher started on port " << groot_port << std::endl;
+
+    spdlog::info("[{}] The behavior tree has been successfully initialized", get_name());
 }
 
 void RobotSimulator::start(asio::any_io_executor executor){
@@ -36,7 +50,11 @@ void RobotSimulator::stop(){
     stopping = true;
     simulation_timer->cancel();
     state_trigger_channel->cancel();
+
+    this->blackboard->set("robot_api", std::shared_ptr<RobotBehaviorApi>());
+    this->tree = BT::Tree();
 }
+
 
 void RobotSimulator::init_state(){
     for (vda5050::Header* h : {&State.header, &Connection.header, &Visualization.header}) {
@@ -78,6 +96,13 @@ void RobotSimulator::init_state(){
     State.power_supply.battery_current = 0.0;     // [A], робот стоит
     State.power_supply.battery_health = 100;      // [%]
     State.power_supply.charging = false;
+
+    drive_controller.set_on_node_reached([this](const std::string& node_id)
+        {
+            this->on_node_reached(node_id);
+        });
+    spdlog::info("[{}] Robot initialized", get_name());
+
 }
 
 
@@ -103,6 +128,109 @@ void RobotSimulator::simulation_tick(double dt){
     Visualization.velocity = State.velocity;
 }
 
+void RobotSimulator::on_node_reached(const std::string& node_id){
+    const vda5050::Node* node = find_next_node(node_id);
+    if (!node) {
+            std::cerr << "[Robot] reached node '" << node_id
+                      << "' which is not ahead in the current order, ignored\n";
+            return;
+        }
+        const std::uint32_t seq = node->sequence_id;
+
+        // Узлы проходятся строго по порядку. Пропуск означает рассинхрон контроллера и Order.
+        const std::uint32_t expected = State.last_node_id.empty() ? seq : State.last_node_sequence_id + 2;
+        if (seq != expected) {
+            std::cerr << "[Robot] node '" << node_id << "' (seq " << seq << ") reached, expected seq "
+                      << expected << "\n";
+        }
+
+        // 1. Съехали с ребра, которое вело к узлу: убрать из edgeStates, завершить его action'ы.
+        if (const auto* edge_in = find_edge(seq - 1)) {
+            finish_edge_actions(*edge_in);
+        }
+        auto& es = State.edge_states;
+        es.erase(std::remove_if(es.begin(), es.end(),
+                                [&](const auto& e) { return e.sequence_id < seq; }),
+                 es.end());
+
+        // 2. Узел пройден: убрать из nodeStates, обновить lastNodeId / lastNodeSequenceId.
+        auto& ns = State.node_states;
+        ns.erase(std::remove_if(ns.begin(), ns.end(),
+                                [&](const auto& n) { return n.sequence_id <= seq; }),
+                 ns.end());
+        State.last_node_id = node->node_id;
+        State.last_node_sequence_id = seq;
+
+        // 3. Запустить action'ы узла. Блокирующие (SOFT/HARD) — это точки остановки,
+        //    их завершения ждёт нода дерева ExecuteNodeActions.
+        trigger_actions(node->actions);
+
+        // 4. Въехали на следующее ребро (если оно released) — запустить его action'ы.
+        //    Если на узле есть SOFT/HARD action, въезд на ребро будет, когда робот тронется (6.6.2);
+        //    для простоты симулятора запускаем сразу.
+        if (const auto* edge_out = find_edge(seq + 1); edge_out && edge_out->released) {
+            trigger_actions(edge_out->actions);
+        }
+
+        //std::cout << "[Robot] node '" << node_id << "' (seq " << seq << ") traversed\n";
+        spdlog::info("[{}] node : {}, seq : {}", get_name(), node_id, seq);
+}
+
+void RobotSimulator::finish_edge_actions(const vda5050::Edge& edge){
+    using vda5050::ActionStatus;
+    for (const auto& action : edge.actions) {
+        auto* st = find_action_state(action.action_id);
+        if (!st || st->action_status == ActionStatus::Finished ||
+            st->action_status == ActionStatus::Failed) {
+            continue;
+            }
+        // Запускался — завершён; так и не начался — не выполнен.
+        st->action_status = st->action_status == ActionStatus::Waiting ? ActionStatus::Failed
+                                                                        : ActionStatus::Finished;
+    }
+}
+
+vda5050::ActionState* RobotSimulator::find_action_state(const std::string& action_id){
+    for (auto& a : State.action_states) {
+        if (a.action_id == action_id) {
+            return &a;
+        }
+    }
+    return nullptr;
+}
+
+void RobotSimulator::trigger_actions(const std::vector<vda5050::Action>& actions){
+    for (const auto& action : actions) {
+        auto* st = find_action_state(action.action_id);
+        if (!st || st->action_status != vda5050::ActionStatus::Waiting) {
+            continue;  // уже запущен или завершён
+        }
+        std::cout << "[Robot] action '" << action.action_type << "' (" << action.action_id
+                  << ") executed\n";
+        st->action_status = vda5050::ActionStatus::Finished;
+    }
+}
+
+const vda5050::Edge* RobotSimulator::find_edge(std::uint32_t sequence_id){
+    for (const auto& edge : Order.edges) {
+        if (edge.sequence_id == sequence_id) {
+            return &edge;
+        }
+    }
+    return nullptr;
+}
+
+const vda5050::Node* RobotSimulator::find_next_node(const std::string& node_id) const{
+    for (const auto& node : Order.nodes) {
+        if (!node.released) {
+            break;
+        }
+        if (node.sequence_id > State.last_node_sequence_id && node.node_id == node_id) {
+            return &node;
+        }
+    }
+    return nullptr;
+}
 
 void RobotSimulator::emit_state_changed(){
     has_active_order_ = !vda5050::is_idle(State);
@@ -116,21 +244,23 @@ void RobotSimulator::emit_state_changed(){
 
     bool success = state_trigger_channel->try_send(boost::system::error_code{}, true);
 
-    if (success) {
-        std::cout << "Trigger state changed activate." << std::endl;
-    } else {
+    if (!success) {
         std::cerr << "The trigger did not activate (Buffer is full)." << std::endl;
     }
 }
 
 asio::awaitable<void> RobotSimulator::run_simulation_loop(){
     using clock = std::chrono::steady_clock;
-    constexpr auto period = std::chrono::milliseconds(1000);
+    constexpr auto period = std::chrono::milliseconds(100);
 
     auto next = clock::now();
     auto last = next;
-
-    while (!stopping) {
+    spdlog::info("[{}] Run simulation loop start", get_name());
+    CoroGuard guard([this](){
+        tree.haltTree();
+        spdlog::info("[{}] Run simulation loop stopped", get_name());
+    });
+    while (true) {
         next += period;
         simulation_timer->expires_at(next);
         auto [ec] = co_await simulation_timer->async_wait(asio::as_tuple(asio::use_awaitable));
@@ -147,16 +277,20 @@ asio::awaitable<void> RobotSimulator::run_simulation_loop(){
         tree.tickOnce();
         emit_state_changed();
     }
+}
 
-    tree.haltTree();   // onHalted() у активных нод
-    std::cout << "[Sim] simulation loop stopped" << std::endl;
+void RobotSimulator::on_link_up(){
+    if (!pub_channel->is_open()) return;
+    auto connect_packet = this->pub_connection_topic();
+    pub_channel->try_send(boost::system::error_code{}, connect_packet);
 }
 
 asio::awaitable<void> RobotSimulator::run_visu_publisher_loop()
 {
     asio::steady_timer timer(co_await asio::this_coro::executor);
+    spdlog::info("[{}] Run visu publisher loop start", get_name());
     while (true) {
-        timer.expires_after(std::chrono::milliseconds(100000));
+        timer.expires_after(std::chrono::milliseconds(200000));
         auto [ec] = co_await timer.async_wait(asio::as_tuple(asio::use_awaitable));
 
         if (ec) {
@@ -169,17 +303,18 @@ asio::awaitable<void> RobotSimulator::run_visu_publisher_loop()
         bool success=  pub_channel->try_send(boost::system::error_code{}, visu_packet);
         if (!success) {
             co_return;
-            std::cerr << "[Channel] Buffer is full or channel is closed. Message dropped!" << std::endl;
         }
     }
 }
 
-asio::awaitable<void> RobotSimulator::run_state_publisher_loop()
-{
+asio::awaitable<void> RobotSimulator::run_state_publisher_loop(){
     auto executor = co_await boost::asio::this_coro::executor;
     asio::steady_timer periodic_timer{executor};
 
     while (true) {
+
+        if (stopping) { co_return;}
+
         periodic_timer.expires_after(config.max_state_interval_);
 
         auto [order, err_timer, err_channel, state_received] = co_await boost::asio::experimental::make_parallel_group(
@@ -190,16 +325,14 @@ asio::awaitable<void> RobotSimulator::run_state_publisher_loop()
         size_t first_completed = order[0];
 
         if (first_completed == 0) {
-            if (err_timer && err_timer != boost::asio::error::operation_aborted) co_return;
+            if (err_timer) co_return;
         }
         else if (first_completed == 1) {
-            if (err_channel) {
-                if (err_channel != boost::asio::error::operation_aborted) co_return;
-            }
-            if (!state_received) {co_return;}
+            if (err_channel) co_return;
+            if (!state_received) co_return;
         }
 
-        if (!pub_channel || !pub_channel->is_open()) co_return;
+        if (!pub_channel || !pub_channel->is_open() || stopping) co_return;
 
         auto state_packet = this->pub_state_topic();
         bool sent = pub_channel->try_send(boost::system::error_code{}, state_packet);
@@ -212,14 +345,146 @@ asio::awaitable<void> RobotSimulator::run_state_publisher_loop()
     }
 }
 
+
+vda5050::Order RobotSimulator::get_last_received_order() const{
+    return Order;
+}
+
+vda5050::State& RobotSimulator::get_state(){
+    return State;
+}
+
 std::string RobotSimulator::get_name() const{
     return config.name;
 };
 
+void RobotSimulator::set_new_path(std::vector<DriveWaypoint> wps){
+    drive_controller.set_path(std::move(wps));
+}
+
+bool RobotSimulator::path_finished() const{
+    return drive_controller.path_finished();
+}
+
+void RobotSimulator::append_path(std::vector<DriveWaypoint> wps){
+    drive_controller.append_path(std::move(wps));
+}
+
+bool RobotSimulator::is_blocking(const vda5050::Node& node){
+
+    for (auto it = node.actions.begin(); it != node.actions.end(); ++it) {
+        const vda5050::Action& a = *it;
+
+        if (a.blocking_type == vda5050::BlockingType::Soft ||
+            a.blocking_type == vda5050::BlockingType::Hard) {
+            return true;
+            }
+    }
+    return false;
+    // return std::any_of(node.actions.begin(), node.actions.end(), [](const vda5050::Action& a) {
+    //         return a.blocking_type == vda5050::BlockingType::Soft ||
+    //                a.blocking_type == vda5050::BlockingType::Hard;
+    //     });
+}
+
+std::vector<DriveWaypoint> RobotSimulator::build_segment(std::uint32_t after_seq){
+    std::vector<DriveWaypoint> wps;
+
+    for (const auto& node : Order.nodes) {
+        if (!node.released) {
+            break;
+        }
+        if (node.sequence_id <= after_seq) {
+            continue;
+        }
+        if (!node.node_position) {
+            std::cerr << "[Robot] node '" << node.node_id << "' has no nodePosition, segment cut\n";
+            break;
+        }
+
+        DriveWaypoint wp;
+        wp.x = node.node_position->x;
+        wp.y = node.node_position->y;
+        wp.node_id = node.node_id;
+        wp.theta = node.node_position->theta;
+        wp.stop = is_blocking(node); // Использует std::any_of, который мы разобрали
+
+        wps.push_back(std::move(wp));
+
+        // Фиксируем продвижение в полях класса RobotSimulator
+        this->segment_end_seq_ = node.sequence_id;
+        this->segment_ends_blocking_ = wps.back().stop;
+
+        // Если уперлись в блокирующий экшн — этот чанк закончен, выходим
+        if (this->segment_ends_blocking_) {
+            break;
+        }
+    }
+    return wps;
+}
+
+bool RobotSimulator::start_new_segment(){
+    // Строим чанк, начиная от последней подтвержденной сервером (пройденной) вершины
+    // Вызов build_segment(с_какой_точки) сам внутри заполнит segment_end_seq_ и segment_ends_blocking_
+    std::vector<DriveWaypoint> wps = this->build_segment(this->State.last_node_sequence_id);
+
+    if (wps.empty()) {
+        return false;
+    }
+
+    // Загружаем новый путь в контроллер движения (очищая старый)
+    this->drive_controller.set_path(std::move(wps));
+    return true;
+}
+
+bool RobotSimulator::extend_current_segment(){
+    // 1. Проверяем флаги симулятора: если чанк завершается блокирующим действием
+    //    или робот уже физически закончил путь — продлевать на лету нельзя.
+    if (this->segment_ends_blocking_ || this->drive_controller.path_finished()) {
+        return false;
+    }
+
+    // 2. Бэкапим старые параметры на случай, если новых released-точек в заказе нет
+    const std::uint32_t backup_end_seq = this->segment_end_seq_;
+    const bool backup_ends_blocking = this->segment_ends_blocking_;
+
+    // 3. Вызов build_segment ПЕРЕЗАПИШЕТ segment_end_seq_ и segment_ends_blocking_ новыми данными
+    std::vector<DriveWaypoint> more = this->build_segment(backup_end_seq);
+
+    if (more.empty()) {
+        // ОТКАТ: Новых точек нет (или они еще не released), возвращаем старое состояние назад!
+        this->segment_end_seq_ = backup_end_seq;
+        this->segment_ends_blocking_ = backup_ends_blocking;
+        return false;
+    }
+
+    // 4. Сшивание путей (Stitching)
+    const auto it = std::find_if(Order.nodes.begin(), Order.nodes.end(),
+                                 [&](const auto& n) { return n.sequence_id == backup_end_seq; });
+    if (it != Order.nodes.end() && it->node_position) {
+        DriveWaypoint stitch;
+        stitch.x = it->node_position->x;
+        stitch.y = it->node_position->y;
+        stitch.node_id = it->node_id;
+        stitch.theta = it->node_position->theta;
+        stitch.stop = false; // Важно: летим старый конец без остановки!
+        more.insert(more.begin(), std::move(stitch));
+    }
+
+    // 5. Безопасно дописываем склеенный путь в хвост контроллеру
+    this->drive_controller.append_path(std::move(more));
+
+    return true;
+}
+
+bool RobotSimulator::is_moving() const{
+    return this->drive_controller.is_moving();
+}
+
 RobotMessage RobotSimulator::pub_connection_topic(){
     Connection.header.header_id++;
     Connection.header.timestamp =  vda5050::make_timestamp();
-    RobotMessage msg{visu_topic, vda5050::json(Connection).dump()};
+    RobotMessage msg{connection_topic, vda5050::json(Connection).dump()};
     return msg;
 }
 
@@ -493,16 +758,18 @@ void RobotSimulator::reject(const Rejection& r, const vda5050::Order* order){
 }
 
 
-std::optional<vda5050::Order> RobotSimulator::parse_order(const std::string& json_order){
+std::expected<vda5050::Order, std::string> RobotSimulator::parse_order(const std::string& json_order){
     namespace vda = vda5050;
-    auto fail = [&](const std::string& why) -> std::optional<vda::Order> {
+
+    auto fail = [&](const std::string& why) -> std::unexpected<std::string> {
         reject({vda::error_type::kValidationFailure, vda::ErrorLevel::Warning, why, {}}, nullptr);
-        return std::nullopt;
+        return std::unexpected(why);
     };
 
     if (json_order.empty()) {
         return fail("Empty order message");
     }
+
     try {
         return vda::json::parse(json_order).get<vda::Order>();
     } catch (const vda::json::parse_error& e) {
@@ -528,11 +795,12 @@ bool same_content(const vda5050::Order& a, const vda5050::Order& b) {
 
 void RobotSimulator::update_order(const std::string& json_order) {
     namespace vda = vda5050;
-
     auto parsed = parse_order(json_order);
     if (!parsed) {
+        std::println(stderr,"[RobotSim][{}] Failed to parse: {}", get_name(), parsed.error());
         return;
     }
+
     const vda::Order& incoming = parsed.value();
 
     if (auto r = validate_structure(incoming)) {
@@ -619,6 +887,7 @@ void RobotSimulator::update_order(const std::string& json_order) {
         // (8) Тот же orderUpdateId: повтор — молча игнорируем, другое содержимое — ошибка.
         if (incoming.order_update_id == State.order_update_id) {
             if (same_content(incoming, Last_received_order)) {
+                std::println(stderr,"[RobotSim][{}] Error: resending the order", get_name());
                 return;
             }
             reject({vda::error_type::kSameOrderUpdateId, vda::ErrorLevel::Warning,
@@ -667,6 +936,7 @@ std::vector<std::string> RobotSimulator::get_subscribe_topics(){
 
 
 void RobotSimulator::standstill(){
+    drive_controller.standstill();
 }
 
 void RobotSimulator::charge_battery(){

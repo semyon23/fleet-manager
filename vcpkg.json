@@ -3,8 +3,14 @@
   "version-string": "1.0.0",
   "dependencies": [
     "yaml-cpp",
-    "behaviortree-cpp",
+    {
+      "name": "behaviortree-cpp",
+      "features": [
+        "groot"
+      ]
+    },
     "nlohmann-json",
+    "spdlog",
     "boost-beast",
     "boost-json",
     "boost-uuid",

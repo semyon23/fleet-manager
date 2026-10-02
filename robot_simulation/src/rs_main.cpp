@@ -1,7 +1,6 @@
 #include <behaviortree_cpp/behavior_tree.h>
 #include <print>
 #include "include/RobotSimulator.hpp"
-#include "include/TreeNodes.hpp"
 #include "behaviortree_cpp/bt_factory.h"
 #include <boost/asio/signal_set.hpp>
 
@@ -9,11 +8,12 @@
 #include <yaml-cpp/yaml.h>
 #include "../vda5050/vda5050.hpp"
 #include "include/RobotDriveController.hpp"
-
-
+#include "include/action_nodes.hpp"
+#include "../../utils/logger.hpp"
 
 int main() {
-    std::println("Robot simulation started");
+    if (!Logger::init()) return 1;
+    spdlog::info("[System] Robot simulation started");
     asio::io_context io_ctx;
 
     MqttClientConfig mqtt_config{ "0.0.0.0", 1883, "sim_client"};
@@ -26,22 +26,14 @@ int main() {
     RobotMessageRouter Robots_router(mqtt_client, publisher_channel);
 
     BT::BehaviorTreeFactory factory;
-    factory.registerNodeType<WaitForOrder>("WaitForOrder");
-    factory.registerNodeType<GetNextSegment>("GetNextSegment");
-    factory.registerNodeType<CheckOrderValid>("CheckOrderValid");
-    factory.registerNodeType<MoveToPose>("MoveToPose");
-    factory.registerNodeType<ExecuteVdaActions>("ExecuteVdaActions");
-    factory.registerNodeType<MarkSegmentComplete>("MarkSegmentComplete");
-    factory.registerNodeType<OrderFullyCompleted>("OrderFullyCompleted");
+    register_action_nodes(factory);
 
-    const int N = 1;
+    const int number_robots = 1;
 
-    for (int i = 0; i < N; ++i) {
-
-        RobotConfig robot_config{"amr1", "KTC", "office"};
+    for (int i = 0; i < number_robots; ++i) {
+        std::string robot_name = std::format("amr{}", i + 1);
+        RobotConfig robot_config{robot_name, "KTC", "office"};
         auto robot = std::make_shared<RobotSimulator>(robot_config, publisher_channel);
-        std::println("Robot creating");
-        //robot->init_behavior_tree(factory,"/home/ubuntu/fleet-manager/robot_simulation/robot_tree.xml");
 
         robot->init_behavior_tree(factory, ROBOT_TREE_XML);
 
@@ -54,7 +46,7 @@ int main() {
     asio::signal_set signals(io_ctx, SIGINT, SIGTERM);
     signals.async_wait([&](const boost::system::error_code& error, int signal_number) {
         if (!error) {
-            std::println("\n[System] Shutdown signal ({}) received! Stopping fleet gracefully...", signal_number);
+            spdlog::info("[System] Shutdown signal ({}) received!", signal_number);
             mqtt_client->stop();
             publisher_channel->cancel();
             Robots_router.shutdown();
@@ -63,9 +55,7 @@ int main() {
     });
 
     io_ctx.run();
-
-    std::println("[System] Fleet Manager completely stopped. Memory released clean.");
-
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
     return 0;
 }
 

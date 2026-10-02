@@ -6,11 +6,11 @@
 #include "../vda5050/vda5050.hpp"
 
 #include "behaviortree_cpp/bt_factory.h"
-
+#include <boost/asio/co_spawn.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/experimental/channel.hpp>
 #include <boost/asio/experimental/concurrent_channel.hpp>
-#include <boost/asio/co_spawn.hpp>
+
 
 #include <boost/asio/experimental/channel.hpp>
 #include <boost/asio/this_coro.hpp>
@@ -31,33 +31,45 @@ struct RobotConfig{
     DiffDriveParams drive_params;
 
     std::chrono::milliseconds min_state_interval_{100};
-    std::chrono::seconds max_state_interval_{30};
+    std::chrono::seconds max_state_interval_{10};
 };
 
 using publishing_channel = asio::experimental::channel<void(boost::system::error_code, RobotMessage)>;
 using Pub_channel_ptr = std::shared_ptr<publishing_channel>;
 
-class RobotSimulator : public std::enable_shared_from_this<RobotSimulator>{
+class RobotSimulator : public std::enable_shared_from_this<RobotSimulator> {
 public:
     RobotSimulator(RobotConfig conf, Pub_channel_ptr channel);
+    ~RobotSimulator();
     void start(asio::any_io_executor executor);
     void stop();
     void init_behavior_tree(BT::BehaviorTreeFactory& factory, const std::string& xml_path);
 
     void update_order(const std::string& json_order);
+    void on_link_up();
+
     std::vector<std::string> get_subscribe_topics();
 
     bool has_active_order() const;
 
-    void emit_state_changed();
 
-    void standstill();
     void charge_battery();
     void execute_action();
     void start_action();
     void move_to();
 
+    std::vector<DriveWaypoint> build_segment(std::uint32_t after_seq);
+    bool path_finished() const;
     std::string get_name() const;
+    vda5050::State& get_state();
+    vda5050::Order get_last_received_order() const;
+    void set_new_path(std::vector<DriveWaypoint> wps);
+    void append_path(std::vector<DriveWaypoint> wps);
+    bool start_new_segment();
+    bool extend_current_segment();
+    bool is_moving() const;
+    void standstill();
+
 private:
     void simulation_tick(double dt);
     struct Rejection {
@@ -67,7 +79,9 @@ private:
         std::vector<vda5050::ErrorReference> references;
     };
 
-    std::optional<vda5050::Order> parse_order(const std::string& json_order);
+    bool is_blocking(const vda5050::Node& node);
+    //std::optional<vda5050::Order> parse_order(const std::string& json_order);
+    std::expected<vda5050::Order, std::string> parse_order(const std::string& json_order);
     std::optional<Rejection> validate_structure(const vda5050::Order& order) const;
     std::optional<Rejection> validate_capabilities(const vda5050::Order& order) const;
     void init_state();
@@ -79,6 +93,13 @@ private:
     void reject(const Rejection& r, const vda5050::Order* order);
     void clear_order_errors();
 
+    void on_node_reached(const std::string& node_id);
+    const vda5050::Edge* find_edge(std::uint32_t sequence_id);
+    const vda5050::Node* find_next_node(const std::string& node_id) const;
+    void trigger_actions(const std::vector<vda5050::Action>& actions);
+    vda5050::ActionState* find_action_state(const std::string& action_id);
+    void finish_edge_actions(const vda5050::Edge& edge);
+    void emit_state_changed();
 
     RobotMessage pub_state_topic();
     RobotMessage pub_visu_topic();
@@ -122,6 +143,9 @@ private:
 
     double default_start_tolerance_{0.5};
     std::set<std::string> supported_action_types_;
+
+    bool segment_ends_blocking_{false};
+    uint32_t segment_end_seq_{0};
 
     std::atomic<bool> has_active_order_{false};
     bool stopping{false};

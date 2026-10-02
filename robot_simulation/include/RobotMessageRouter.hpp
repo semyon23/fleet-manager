@@ -19,7 +19,7 @@ public:
     ~RobotMessageRouter();
 
     void register_robot(const std::shared_ptr<RobotSimulator>& robot);
-
+    std::string extract_robot_name(std::string_view topic);
     void start(const asio::any_io_executor& executor);
     void shutdown();
 

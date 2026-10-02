@@ -1,13 +1,5 @@
 #pragma once
 
-// VDA 5050 v3.0.0 — топик `order` (6.1, 7.3).
-// Публикует: fleet control. Подписан: робот. QoS 0.
-//
-// Order — это сегмент графа: nodes[] и edges[] с общим sequenceId
-// (node 0, edge 1, node 2, ...). edges.size() == nodes.size() - 1.
-// released = true — "base" (можно ехать), false — "horizon" (план, ехать нельзя).
-// Order update: тот же orderId, orderUpdateId + 1, первый node = последний node прошлой base.
-
 #include <cstdint>
 #include <optional>
 #include <string>

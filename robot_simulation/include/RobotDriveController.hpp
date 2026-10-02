@@ -35,7 +35,7 @@ public:
     RobotDriveController() = default;
     explicit RobotDriveController(const DiffDriveParams& params);
 
-    void set_path(std::vector<DriveWaypoint> wps);      // новый заказ: заменить путь
+    void set_path(std::vector<DriveWaypoint> wps);
     void append_path(std::vector<DriveWaypoint> wps);   // order update: дописать base
     void set_target(double x, double y,            // одна точка (совместимость)
                     std::optional<double> theta = std::nullopt,
@@ -85,5 +85,5 @@ private:
     std::deque<DriveWaypoint> path_;
     NodeReachedCallback on_node_reached_;
 
-    mutable std::mutex mtx_;
+    // mutable std::mutex mtx_;
 };

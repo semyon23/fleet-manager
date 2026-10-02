@@ -1,68 +1,81 @@
-<root BTCPP_format="4">
-    <BehaviorTree ID="VdaUniversalTree">
-        <!-- Внешний цикл: заставляет робота бесконечно возвращаться к ожиданию новых заказов -->
-        <KeepRunningUntilFailure name="MainLoop">
-            <Sequence name="OrderExecutionSequence">
-                <!-- 1. Асинхронное ожидание: узел крутится в RUNNING, пока по сети не придет JSON -->
-                <WaitForOrder name="WaitForNewVdaOrder"/>
-                <!-- 2. Распределитель финала: переключит на фиксацию итогов при любом исходе цикла -->
-                <Fallback name="ProcessOrFinish">
-                    <!-- Внутренний цикл: перебирает сегменты графа VDA 5050 один за другим -->
-                    <KeepRunningUntilFailure name="SegmentLoop">
-                        <Sequence name="SegmentStepSequence">
-                            <!-- А. Извлекаем из робота координаты и экшны следующей точки пути -->
-                            <GetNextSegment target_x="{x}" target_y="{y}"
-                                            edge_actions="{e_actions}" node_actions="{n_actions}"/>
-                            <!-- Б. Реактивная секция: проверяет отмену каждый тик во время движения -->
-                            <ReactiveSequence name="SafeMovementSequence">
-                                <!-- Если придет cancelOrder, вернет FAILURE и погасит движение ниже -->
-                                <CheckOrderValid/>
-                                <!-- В. Движение: едем к точке и параллельно крутим экшны на ребре -->
-                                <Parallel failure_count="1" success_count="2">
-                                    <MoveToPose x="{x}" y="{y}"/>
-                                    <ExecuteVdaActions actions="{e_actions}" trigger="DURING_MOVEMENT"/>
-                                </Parallel>
-                            </ReactiveSequence>
-                            <!-- Г. Приехали: выполняем технологические операции в самой точке (подъем, зарядка) -->
-                            <ExecuteVdaActions actions="{n_actions}" trigger="AFTER_ARRIVE"/>
-                            <!-- Д. Отчет: фиксируем успешное прохождение этой точки для VDA State -->
-                            <MarkSegmentComplete/>
-                        </Sequence>
-                    </KeepRunningUntilFailure>
-                    <Sequence name="FinalizationSequence">
-                        <!-- Внутри С++ ноды мы проверяем робота и понимаем, был это успех или отмена -->
-                        <OrderFullyCompleted/>
-                        <!-- Гарантируем закрытие ветки успехом, чтобы вернуться к началу внешнего Sequence -->
-                        <AlwaysSuccess/>
-                    </Sequence>
-                </Fallback>
-            </Sequence>
-        </KeepRunningUntilFailure>
-    </BehaviorTree>
-</root>
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4" main_tree_to_execute="Robot">
 
-<!--<root BTCPP_format="4">-->
-<!--    <BehaviorTree ID="VdaUniversalTree">-->
-<!--        <KeepRunningUntilFailure>-->
-<!--            <Sequence>-->
-<!--                <WaitForOrder/>-->
-<!--                <KeepRunningUntilFailure>-->
-<!--                    <Sequence>-->
-<!--                        <GetNextSegment target_x="{x}" target_y="{y}"-->
-<!--                                        edge_actions="{e_actions}" node_actions="{n_actions}"/>-->
-<!--                        <ReactiveSequence>-->
-<!--                            <CheckOrderValid/>-->
-<!--                            <Parallel failure_count="1" success_count="2">-->
-<!--                                <MoveToPose x="{x}" y="{y}"/>-->
-<!--                                <ExecuteVdaActions actions="{e_actions}" trigger="DURING_MOVEMENT"/>-->
-<!--                            </Parallel>-->
-<!--                        </ReactiveSequence>-->
-<!--                        <ExecuteVdaActions actions="{n_actions}" trigger="AFTER_ARRIVE"/>-->
-<!--                        <MarkSegmentComplete/>-->
-<!--                    </Sequence>-->
-<!--                </KeepRunningUntilFailure>-->
-<!--                <OnOrderFullyCompleted/>-->
-<!--            </Sequence>-->
-<!--        </KeepRunningUntilFailure>-->
-<!--    </BehaviorTree>-->
-<!--</root>-->
+  <BehaviorTree ID="Robot">
+    <ReactiveSequence name="Guards">
+      <IsSafe/>
+      <IsAutomaticMode/>
+      <ReactiveFallback name="PauseOrWork">
+        <ReactiveSequence name="Pause">
+          <IsPaused/>
+          <HoldPosition/>
+        </ReactiveSequence>
+        <Fallback name="Work">
+          <ReactiveSequence name="HasOrder">
+            <HasActiveOrder/>
+            <SubTree ID="ExecuteOrder"/>
+          </ReactiveSequence>
+          <WaitForOrder/>
+        </Fallback>
+      </ReactiveFallback>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <BehaviorTree ID="ExecuteOrder">
+    <Sequence name="OrderStep">
+      <Fallback name="Drive">
+        <Sequence>
+          <HasBaseAhead/>
+          <DriveSegment/>
+        </Sequence>
+        <AlwaysSuccess name="NothingToDrive"/>
+      </Fallback>
+      <ExecuteNodeActions/>
+      <Fallback name="WaitForUpdate">
+        <Sequence>
+          <AtDecisionPoint/>
+          <WaitForBaseExtension/>
+        </Sequence>
+        <AlwaysSuccess name="NoHorizon"/>
+      </Fallback>
+    </Sequence>
+  </BehaviorTree>
+
+  <!-- Описание своих нод для Groot2 (редактор). -->
+  <TreeNodesModel>
+    <Condition ID="IsSafe">
+      <description>Нет аварийной остановки и нарушения защитного поля (state.safetyState)</description>
+    </Condition>
+    <Condition ID="IsAutomaticMode">
+      <description>operatingMode = AUTOMATIC или SEMIAUTOMATIC</description>
+    </Condition>
+    <Condition ID="IsPaused">
+      <description>Робот на паузе после instant action startPause</description>
+    </Condition>
+    <Condition ID="HasActiveOrder">
+      <description>Робот не idle: есть nodeStates/edgeStates или незавершённые action'ы</description>
+    </Condition>
+    <Condition ID="HasBaseAhead">
+      <description>Впереди робота есть released-узлы</description>
+    </Condition>
+    <Condition ID="AtDecisionPoint">
+      <description>Released-узлов впереди нет, но в nodeStates остался horizon</description>
+    </Condition>
+    <Action ID="HoldPosition">
+      <description>Стоять на месте, пока не снимут паузу (прерывается родителем)</description>
+    </Action>
+    <Action ID="WaitForOrder">
+      <description>RUNNING, пока у робота не появится активный order</description>
+    </Action>
+    <Action ID="DriveSegment">
+      <description>Доехать до ближайшей точки остановки; onHalted — плавная остановка</description>
+    </Action>
+    <Action ID="ExecuteNodeActions">
+      <description>Выполнить action'ы узла с учётом blockingType; без action'ов — SUCCESS сразу</description>
+    </Action>
+    <Action ID="WaitForBaseExtension">
+      <description>Ждать update, продлевающий base; на время ожидания newBaseRequest = true</description>
+    </Action>
+  </TreeNodesModel>
+
+</root>
