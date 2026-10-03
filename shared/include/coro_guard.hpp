@@ -15,7 +15,6 @@ public:
                 spdlog::error("[CoroGuard]Exception in cleanup callback: ", e.what());
             }
         }
-
     }
 
     CoroGuard(const CoroGuard&) = delete;

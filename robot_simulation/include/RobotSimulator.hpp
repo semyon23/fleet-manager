@@ -22,6 +22,8 @@ namespace asio = boost::asio;
 struct RobotMessage{
     std::string topic;
     std::string payload;
+    int qos = 0;
+    bool retained = false;
 };
 
 struct RobotConfig{
@@ -78,7 +80,7 @@ private:
         std::string description;
         std::vector<vda5050::ErrorReference> references;
     };
-
+    void init_factsheet();
     bool is_blocking(const vda5050::Node& node);
     //std::optional<vda5050::Order> parse_order(const std::string& json_order);
     std::expected<vda5050::Order, std::string> parse_order(const std::string& json_order);
@@ -102,6 +104,7 @@ private:
     void emit_state_changed();
 
     RobotMessage pub_state_topic();
+    RobotMessage pub_factsheet_topic();
     RobotMessage pub_visu_topic();
     RobotMessage pub_connection_topic();
 
@@ -133,6 +136,7 @@ private:
     vda5050::Order Order;
     vda5050::Connection Connection;
     vda5050::Visualization Visualization;
+    vda5050::Factsheet Factsheet;
 
     vda5050::Order Last_received_order;
     vda5050::State Last_sent_state;

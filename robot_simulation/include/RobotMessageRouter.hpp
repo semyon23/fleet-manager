@@ -8,7 +8,7 @@
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/experimental/concurrent_channel.hpp>
 #include "include/RobotSimulator.hpp"
-#include "../../fleet_dispatch/include/MqttClientHandler.hpp"
+#include "../shared/include/mqtt_client.hpp"
 
 
 

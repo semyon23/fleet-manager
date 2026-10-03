@@ -8,10 +8,11 @@ add_executable(robot_simulation
         src/RobotSimulator.cpp
         src/RobotDriveController.cpp
         src/RobotMessageRouter.cpp
-        ../fleet_dispatch/src/MqttClientHandler.cpp
+        ../shared/src/mqtt_client.cpp
         src/action_nodes.cpp
         src/RobotBehaviorImpl.cpp
         src/RoboticVehicleSimulator.cpp
+        src/RobotSimulatorFactsheet.cpp
         include/RoboticVehicleSimulator.hpp
 
 )
@@ -26,6 +27,7 @@ target_include_directories(robot_simulation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 # Линковка библиотек
 target_link_libraries(robot_simulation
         PRIVATE
+        mqtt_client
         yaml-cpp::yaml-cpp
         BT::behaviortree_cpp
         nlohmann_json::nlohmann_json

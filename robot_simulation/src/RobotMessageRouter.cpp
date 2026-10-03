@@ -57,7 +57,7 @@ asio::awaitable<void> RobotMessageRouter::publisher_loop(){
     while (true) {
         auto [ec, msg]  = co_await publisher_channel->async_receive(asio::as_tuple(asio::deferred));
         if (ec) co_return;
-        mqtt_client->publish_topic(msg.topic, msg.payload);
+        mqtt_client->publish_topic(msg.topic, msg.payload, msg.qos, msg.retained);
     }
 }
 

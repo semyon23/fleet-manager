@@ -9,7 +9,7 @@
 #include <boost/asio/detached.hpp>
 #include "include/RobotBehaviorImpl.hpp"
 #include <spdlog/spdlog.h>
-#include "../../utils/coro_guard.hpp"
+#include "../../shared/include/coro_guard.hpp"
 
 
 RobotSimulator::RobotSimulator(RobotConfig conf, Pub_channel_ptr channel)
@@ -17,6 +17,7 @@ RobotSimulator::RobotSimulator(RobotConfig conf, Pub_channel_ptr channel)
     pub_channel(std::move(channel)),
     drive_controller(conf.drive_params){
     this->init_state();
+    this->init_factsheet();
     spdlog::info("[{}] Robot creating", get_name());
 };
 
@@ -101,6 +102,7 @@ void RobotSimulator::init_state(){
         {
             this->on_node_reached(node_id);
         });
+
     spdlog::info("[{}] Robot initialized", get_name());
 
 }
@@ -281,8 +283,11 @@ asio::awaitable<void> RobotSimulator::run_simulation_loop(){
 
 void RobotSimulator::on_link_up(){
     if (!pub_channel->is_open()) return;
-    auto connect_packet = this->pub_connection_topic();
-    pub_channel->try_send(boost::system::error_code{}, connect_packet);
+    auto connect = this->pub_connection_topic();
+    pub_channel->try_send(boost::system::error_code{}, connect);
+
+    auto factsheet = this->pub_factsheet_topic();
+    pub_channel->try_send(boost::system::error_code{}, factsheet);
 }
 
 asio::awaitable<void> RobotSimulator::run_visu_publisher_loop()
@@ -290,7 +295,7 @@ asio::awaitable<void> RobotSimulator::run_visu_publisher_loop()
     asio::steady_timer timer(co_await asio::this_coro::executor);
     spdlog::info("[{}] Run visu publisher loop start", get_name());
     while (true) {
-        timer.expires_after(std::chrono::milliseconds(200000));
+        timer.expires_after(std::chrono::milliseconds(200));
         auto [ec] = co_await timer.async_wait(asio::as_tuple(asio::use_awaitable));
 
         if (ec) {
@@ -484,10 +489,16 @@ bool RobotSimulator::is_moving() const{
 RobotMessage RobotSimulator::pub_connection_topic(){
     Connection.header.header_id++;
     Connection.header.timestamp =  vda5050::make_timestamp();
-    RobotMessage msg{connection_topic, vda5050::json(Connection).dump()};
+    RobotMessage msg{connection_topic, vda5050::json(Connection).dump(), 1, true};
     return msg;
 }
 
+RobotMessage RobotSimulator::pub_factsheet_topic(){
+    Factsheet.header.header_id++;
+    Factsheet.header.timestamp = vda5050::make_timestamp();
+    RobotMessage msg{factsheet_topic, vda5050::json(Factsheet).dump(), 0, true};
+    return msg;
+}
 
 RobotMessage RobotSimulator::pub_visu_topic(){
     Visualization.header.header_id++;
@@ -495,6 +506,9 @@ RobotMessage RobotSimulator::pub_visu_topic(){
     RobotMessage msg{visu_topic, vda5050::json(Visualization).dump()};
     return msg;
 }
+
+
+
 
 RobotMessage RobotSimulator::pub_state_topic(){
     State.header.header_id++;

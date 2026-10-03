@@ -1,0 +1,3 @@
+test_connection.py::test_factsheet_declares_mandatory_actions
+-> отправлено роботу, <- получено от робота
+

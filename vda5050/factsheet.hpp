@@ -230,8 +230,8 @@ inline void from_json(const json& j, MaximumArrayLengths& v) {
 }
 
 struct Timing {
-    float minimum_order_interval = 0.0f;                 // [s] не слать order чаще
-    float minimum_state_interval = 0.0f;                 // [s]
+    double minimum_order_interval = 0.0f;                 // [s] не слать order чаще
+    double minimum_state_interval = 0.0f;                 // [s]
     std::optional<float> default_state_interval;         // [s], нет — 30 с из спецификации
     std::optional<float> visualization_interval;         // [s]
 };

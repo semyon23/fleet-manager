@@ -1,0 +1,52 @@
+test_connection.py::test_factsheet_state_interval_is_consistent
+-> отправлено роботу, <- получено от робота
+
+[   0.486s] <- state
+{
+  "actionStates": [],
+  "driving": false,
+  "edgeStates": [],
+  "errors": [],
+  "headerId": 3,
+  "instantActionStates": [],
+  "lastNodeId": "",
+  "lastNodeSequenceId": 0,
+  "manufacturer": "KTC",
+  "maps": [
+    {
+      "mapId": "office",
+      "mapStatus": "ENABLED",
+      "mapVersion": "1"
+    }
+  ],
+  "mobileRobotPosition": {
+    "localized": true,
+    "mapId": "office",
+    "theta": 0.0,
+    "x": 0.0,
+    "y": 0.0
+  },
+  "nodeStates": [],
+  "operatingMode": "AUTOMATIC",
+  "orderId": "",
+  "orderUpdateId": 0,
+  "powerSupply": {
+    "batteryCurrent": 0.0,
+    "batteryHealth": 100,
+    "batteryVoltage": 48.0,
+    "charging": false,
+    "stateOfCharge": 100.0
+  },
+  "safetyState": {
+    "activeEmergencyStop": "NONE",
+    "fieldViolation": false
+  },
+  "serialNumber": "amr1",
+  "timestamp": "2026-10-03T13:37:03.089Z",
+  "velocity": {
+    "omega": 0.0,
+    "vx": 0.0,
+    "vy": 0.0
+  },
+  "version": "3.0.0"
+}

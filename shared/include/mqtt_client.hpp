@@ -36,10 +36,10 @@ public:
     asio::awaitable<std::optional<MqttMessage>> get_message_received();
     void subscribe_topic(const std::string& topic);
     void unsubscribe_topic(const std::string& topic);
-    void publish_topic(const std::string& topic, const std::string& payload);
+    void publish_topic(const std::string& topic, const std::string& payload, int qos = 0, bool retained = false);
 
 private:
-
+    asio::awaitable<void> do_publish(std::string topic, std::string payload, int qos, bool retained);
     asio::awaitable<void> listen_loop();
     asio::awaitable<void> co_subscribe();
 

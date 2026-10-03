@@ -9,7 +9,7 @@
 #include "../vda5050/vda5050.hpp"
 #include "include/RobotDriveController.hpp"
 #include "include/action_nodes.hpp"
-#include "../../utils/logger.hpp"
+#include "../shared/include/logger.hpp"
 
 int main() {
     if (!Logger::init()) return 1;

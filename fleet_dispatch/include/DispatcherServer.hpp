@@ -2,7 +2,7 @@
 #ifndef FLEETSTREAMGATEWAY_HPP
 #define FLEETSTREAMGATEWAY_HPP
 
-#include "include/MqttClientHandler.hpp"
+#include "../../shared/include/mqtt_client.hpp"
 #include "include/GrpcDispatchService.hpp"
 #include "controllers/RobotTopicManager.hpp"
 #include "include/controllers/RobotController.hpp"

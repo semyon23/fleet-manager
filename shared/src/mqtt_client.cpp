@@ -1,5 +1,5 @@
 
-#include "../include/MqttClientHandler.hpp"
+#include "../include/mqtt_client.hpp"
 #include <boost/asio/as_tuple.hpp>
 #include <print>
 constexpr auto use_nothrow_awaitable = boost::asio::as_tuple(asio::deferred);
@@ -189,31 +189,85 @@ void MqttClientHandler::unsubscribe_topic(const std::string& topic){
     );
 }
 
-void MqttClientHandler::publish_topic(const std::string& topic_string, const std::string& payload_string) {
+void MqttClientHandler::publish_topic(const std::string& topic_string, const std::string& payload_string, int qos, bool retained) {
+
     boost::asio::co_spawn(network_strand,
-        [this, topic_string, payload_string]() -> asio::awaitable<void> {
-
-            auto&& [ec, rc, props] = co_await mqtt_client.async_publish<boost::mqtt5::qos_e::at_least_once>(
-                topic_string,
-                payload_string,
-                boost::mqtt5::retain_e::no,
-                boost::mqtt5::publish_props{},
-                use_nothrow_awaitable
-            );
-
-            if (ec) {
-                std::cerr << "[MQTT] Publish network error on topic [" << topic_string
-                          << "]: " << ec.message() << std::endl;
-            } else if (rc) {
-                std::cerr << "[MQTT] Broker rejected publish on topic [" << topic_string
-                          << "]. Reason: " << rc.message() << std::endl;
-            }
-            // else {
-            //     std::cout << "[MQTT] Successfully published message to: " << topic_string << std::endl;
-            // }
-
-            co_return;
-        },
-        boost::asio::detached
-    );
+                          do_publish(topic_string, payload_string, qos, retained),
+                          boost::asio::detached);
 }
+
+// QoS у async_publish — параметр шаблона, а от него зависит и результат операции:
+//   QoS 0 -> (error_code)                          брокер ничего не подтверждает
+//   QoS 1 -> (error_code, reason_code, puback_props)
+//   QoS 2 -> (error_code, reason_code, pubcomp_props)
+// Поэтому выбор QoS во время работы — через switch.
+asio::awaitable<void> MqttClientHandler::do_publish(std::string topic, std::string payload,
+                                                    int qos, bool retained) {
+    using boost::mqtt5::qos_e;
+    const auto retain = retained ? boost::mqtt5::retain_e::yes : boost::mqtt5::retain_e::no;
+
+    boost::system::error_code ec;
+    // Для QoS 0 брокер не отвечает — считаем успехом. reason_code{} по умолчанию — НЕ успех.
+    boost::mqtt5::reason_code rc = boost::mqtt5::reason_codes::success;
+
+    switch (qos) {
+        case 0: {
+            auto [e] = co_await mqtt_client.async_publish<qos_e::at_most_once>(
+                topic, payload, retain, boost::mqtt5::publish_props{}, use_nothrow_awaitable);
+            ec = e;
+            break;
+        }
+        case 1: {
+            auto [e, r, props] = co_await mqtt_client.async_publish<qos_e::at_least_once>(
+                topic, payload, retain, boost::mqtt5::publish_props{}, use_nothrow_awaitable);
+            ec = e;
+            rc = r;
+            break;
+        }
+        case 2: {
+            auto [e, r, props] = co_await mqtt_client.async_publish<qos_e::exactly_once>(
+                topic, payload, retain, boost::mqtt5::publish_props{}, use_nothrow_awaitable);
+            ec = e;
+            rc = r;
+            break;
+        }
+        default:
+            std::cerr << "[MQTT] Invalid QoS " << qos << " for topic [" << topic << "]" << std::endl;
+            co_return;
+    }
+
+    if (ec) {
+        std::cerr << "[MQTT] Publish network error on topic [" << topic << "]: " << ec.message() << std::endl;
+    } else if (rc) {
+        std::cerr << "[MQTT] Broker rejected publish on topic [" << topic << "]. Reason: " << rc.message()
+                  << std::endl;
+    }
+}
+
+// void MqttClientHandler::publish_topic(const std::string& topic_string, const std::string& payload_string, int qos, bool retained) {
+//     boost::asio::co_spawn(network_strand,
+//         [this, topic_string, payload_string, qos, retained]() -> asio::awaitable<void> {
+//             auto&& [ec, rc, props] = co_await mqtt_client.async_publish<boost::mqtt5::qos_e::at_least_once>(
+//                 topic_string,
+//                 payload_string,
+//                 boost::mqtt5::retain_e::no,
+//                 boost::mqtt5::publish_props{},
+//                 use_nothrow_awaitable
+//             );
+//
+//             if (ec) {
+//                 std::cerr << "[MQTT] Publish network error on topic [" << topic_string
+//                           << "]: " << ec.message() << std::endl;
+//             } else if (rc) {
+//                 std::cerr << "[MQTT] Broker rejected publish on topic [" << topic_string
+//                           << "]. Reason: " << rc.message() << std::endl;
+//             }
+//             // else {
+//             //     std::cout << "[MQTT] Successfully published message to: " << topic_string << std::endl;
+//             // }
+//
+//             co_return;
+//         },
+//         boost::asio::detached
+//     );
+// }

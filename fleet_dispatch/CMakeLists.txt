@@ -7,7 +7,7 @@ find_package(nlohmann_json CONFIG REQUIRED)
 find_package(behaviortree_cpp REQUIRED)
 
 add_executable(fleet_dispatch fd_main.cpp
-        src/MqttClientHandler.cpp
+        ../shared/src/mqtt_client.cpp
         src/GrpcDispatchService.cpp
         src/DispatcherServer.cpp
         src/controllers/RobotTopicManager.cpp
@@ -16,6 +16,7 @@ add_executable(fleet_dispatch fd_main.cpp
 
 target_link_libraries(fleet_dispatch
         PRIVATE
+        mqtt_client
         BT::behaviortree_cpp
         asio-grpc::asio-grpc
         nlohmann_json::nlohmann_json
