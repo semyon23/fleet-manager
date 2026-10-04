@@ -7,7 +7,7 @@
 #include <optional>
 #include <string>
 #include <vector>
-
+#include "include/robot_config.hpp"
 struct DriveWaypoint {
     double x = 0.0;
     double y = 0.0;
@@ -16,24 +16,12 @@ struct DriveWaypoint {
     std::optional<double> theta;
 };
 
-struct DiffDriveParams {
-   // double dt = 0.01;                // [s] шаг симуляции
-    double max_speed = 1.0;          // [m/s]
-    double max_omega = 1.5;          // [rad/s]
-    double max_accel = 0.5;          // [m/s^2] разгон и торможение
-    double switch_radius = 0.25;     // [m] радиус переключения на следующую вершину
-    double min_corner_speed = 0.1;   // [m/s] скорость в самом крутом повороте
-    double lin_tol = 0.02;           // [m] точность в вершине-остановке
-    double ang_tol = 0.01;           // [rad] точность ориентации
-    double k_omega = 3.0;            // коэффициент регулятора курса
-};
-
 class RobotDriveController {
 public:
     using NodeReachedCallback = std::function<void(const std::string& node_id)>;
 
     RobotDriveController() = default;
-    explicit RobotDriveController(const DiffDriveParams& params);
+    explicit RobotDriveController(const MotionConfig config);
 
     void set_path(std::vector<DriveWaypoint> wps);
     void append_path(std::vector<DriveWaypoint> wps);   // order update: дописать base
@@ -61,8 +49,8 @@ public:
     double omega() const;
     bool is_moving() const;
 
-    const DiffDriveParams& params() const { return p_; }
-    void set_params(const DiffDriveParams& params);
+    // const DiffDriveParams& params() const { return p_; }
+    // void set_params(const DiffDriveParams& params);
 
     static double normalize_angle(double a);
 
@@ -72,7 +60,7 @@ private:
     double corner_speed(std::size_t i) const;
     void pass_transit_nodes(std::vector<std::string>& reached);
 
-    DiffDriveParams p_;
+    MotionConfig config_;
 
     double x_ = 0.0;
     double y_ = 0.0;

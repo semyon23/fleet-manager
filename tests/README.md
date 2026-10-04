@@ -1,4 +1,5 @@
-# Тесты робота VDA 5050 v3 (без action'ов)
+.venv/bin/python -m pytest -v
+#Тесты робота VDA 5050 v3 (без action'ов)
 
 Тесты работают как «мини-fms»: подключаются к MQTT-брокеру, отправляют роботу
 order'а и проверяют, что он отвечает в `state`, `connection`, `factsheet`.

@@ -4,7 +4,7 @@
 #include <cmath>
 #include <numbers>
 
-RobotDriveController::RobotDriveController(const DiffDriveParams& params) : p_(params) {}
+RobotDriveController::RobotDriveController(const MotionConfig config) : config_(config) {}
 
 void RobotDriveController::set_path(std::vector<DriveWaypoint> wps){
     path_.assign(wps.begin(), wps.end());
@@ -89,14 +89,14 @@ double RobotDriveController::corner_speed(std::size_t i) const{
     const double turn = std::abs(normalize_angle(h_out - h_in));  // 0 — прямо, PI — разворот
 
     // прямо -> max_speed, 90° -> ~0.7 max_speed, разворот -> min_corner_speed
-    return std::max(p_.max_speed * std::cos(turn / 2.0), p_.min_corner_speed);
+    return std::max(config_.max_speed * std::cos(turn / 2.0), config_.min_corner_speed);
 }
 
 // Проезжаем транзитные вершины: вошли в радиус переключения — берём следующую
 void RobotDriveController::pass_transit_nodes(std::vector<std::string>& reached){
     while (!path_.empty() && !path_.front().stop) {
         const auto& wp = path_.front();
-        const double r = std::max(p_.switch_radius, speed_ * 0.5);  // на скорости раньше
+        const double r = std::max(config_.switch_radius, speed_ * 0.5);  // на скорости раньше
         if (std::hypot(wp.x - x_, wp.y - y_) > r)
             break;
         reached.push_back(wp.node_id);
@@ -127,23 +127,23 @@ void RobotDriveController::update_position(double dt){
 
         // Точка остановки достигнута: попали в допуск или чуть проскочили её
         const bool at_stop = wp.stop &&
-                (dist <= p_.lin_tol ||
-                 (dist < 3.0 * p_.lin_tol && std::abs(bearing) > std::numbers::pi / 2.0));
+                (dist <= config_.lin_tol ||
+                 (dist < 3.0 * config_.lin_tol && std::abs(bearing) > std::numbers::pi / 2.0));
 
         if (!at_stop) {
                 // --- едем к вершине ---
             const double angle_to_target = bearing;
 
                 // а) плавное торможение к ближайшей точке остановки
-            const double v_stop = std::sqrt(2.0 * p_.max_accel * remaining_to_stop());
+            const double v_stop = std::sqrt(2.0 * config_.max_accel * remaining_to_stop());
                 // б) не влететь в поворот быстрее допустимого
                 //    (к моменту переключения, т.е. на границе радиуса switch_radius)
             const double v_corner = corner_speed(0);
-            const double r = wp.stop ? 0.0 : std::max(p_.switch_radius, speed_ * 0.5);
+            const double r = wp.stop ? 0.0 : std::max(config_.switch_radius, speed_ * 0.5);
             const double d_corner = std::max(0.0, dist - r);
-            const double v_turn = std::sqrt(v_corner * v_corner + 2.0 * p_.max_accel * d_corner);
+            const double v_turn = std::sqrt(v_corner * v_corner + 2.0 * config_.max_accel * d_corner);
 
-                desired_speed = std::min({p_.max_speed, v_stop, v_turn});
+                desired_speed = std::min({config_.max_speed, v_stop, v_turn});
 
                 // в) смотрим не туда — замедляемся, сильно не туда — крутимся на месте
                 if (std::abs(angle_to_target) > std::numbers::pi / 2.0)
@@ -152,19 +152,19 @@ void RobotDriveController::update_position(double dt){
                     desired_speed *= std::cos(angle_to_target);
 
                 // рядом с точкой остановки не пытаемся резко довернуть на неё
-                if (wp.stop && dist < 3.0 * p_.lin_tol)
+                if (wp.stop && dist < 3.0 * config_.lin_tol)
                     desired_omega = 0.0;
                 else
-                    desired_omega = angle_to_target * p_.k_omega;
+                    desired_omega = angle_to_target * config_.k_omega;
             }
             else if (wp.theta) {
                 // --- вершина-остановка достигнута, доворачиваем ориентацию ---
                 const double angle_error = normalize_angle(*wp.theta - theta_);
-                if (std::abs(angle_error) <= p_.ang_tol) {
+                if (std::abs(angle_error) <= config_.ang_tol) {
                     reached.push_back(wp.node_id);
                     path_.pop_front();
                 } else {
-                    desired_omega = angle_error * p_.k_omega;
+                    desired_omega = angle_error * config_.k_omega;
                     if (std::abs(desired_omega) < 0.1)
                         desired_omega = (angle_error > 0.0) ? 0.1 : -0.1;
                     // Не перелететь нужный угол за один шаг.
@@ -180,12 +180,12 @@ void RobotDriveController::update_position(double dt){
         }
 
         // ограничение ускорения: скорость меняется плавно
-        const double max_dv = p_.max_accel * dt;
+        const double max_dv = config_.max_accel * dt;
         speed_ += std::clamp(desired_speed - speed_, -max_dv, max_dv);
         if (path_.empty() && std::abs(speed_) < 1e-3)
             speed_ = 0.0;
 
-        omega_ = std::clamp(desired_omega, -p_.max_omega, p_.max_omega);
+        omega_ = std::clamp(desired_omega, -config_.max_omega, config_.max_omega);
         vx_ = std::cos(theta_) * speed_;
         vy_ = std::sin(theta_) * speed_;
 
@@ -206,9 +206,9 @@ void RobotDriveController::set_pose(double x, double y, double theta){
     theta_ = normalize_angle(theta);
 }
 
-void RobotDriveController::set_params(const DiffDriveParams& params){
-    p_ = params;
-}
+// void RobotDriveController::set_params(const DiffDriveParams& params){
+//     p_ = params;
+// }
 
 double RobotDriveController::x() const      { return x_; }
 double RobotDriveController::y() const      { return y_; }

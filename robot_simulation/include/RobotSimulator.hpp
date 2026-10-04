@@ -33,7 +33,7 @@ struct RobotConfig{
     DiffDriveParams drive_params;
 
     std::chrono::milliseconds min_state_interval_{100};
-    std::chrono::seconds max_state_interval_{10};
+    std::chrono::seconds max_state_interval_{30};
 };
 
 using publishing_channel = asio::experimental::channel<void(boost::system::error_code, RobotMessage)>;

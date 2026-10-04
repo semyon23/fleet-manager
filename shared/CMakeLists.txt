@@ -1,4 +1,3 @@
-
 find_package(Boost REQUIRED COMPONENTS headers)
 add_library(mqtt_client STATIC
         include/mqtt_client.cpp

@@ -14,6 +14,12 @@ add_executable(robot_simulation
         src/RoboticVehicleSimulator.cpp
         src/RobotSimulatorFactsheet.cpp
         include/RoboticVehicleSimulator.hpp
+        src/OrderManager.cpp
+        include/OrderManager.hpp
+        src/StatePublisher.cpp
+        include/StatePublisher.hpp
+        include/vda_topics.hpp
+        src/factsheet_builder.cpp
 
 )
 
