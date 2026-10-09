@@ -3,14 +3,10 @@
 #define VDA_TOPICS_HPP
 #pragma once
 
-// Имена всех MQTT-топиков робота (VDA 5050 v3.0.0, 4.2, 4.3).
-// Схема: <interface>/<major_version>/<manufacturer>/<serial_number>/<topic>
-// Строится один раз из IdentityConfig: StatePublisher берёт исходящие,
-// транспорт через subscriptions() — входящие. Так они не могут разойтись.
+
 
 #include <string>
 #include <vector>
-
 #include "robot_config.hpp"
 
 struct VdaTopics {
@@ -35,7 +31,8 @@ struct VdaTopics {
         zone_set        = p + "zoneSet";
         responses       = p + "responses";
     }
-
+    std::string get_order_topic() const { return  order;};
+    std::string get_instant_actions_topic() const { return  instant_actions;};
     std::vector<std::string> subscriptions() const { return {order, instant_actions}; }
 };
 

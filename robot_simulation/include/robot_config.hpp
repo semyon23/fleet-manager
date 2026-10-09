@@ -25,7 +25,6 @@ struct IdentityConfig {
     }
 };
 
-// Подключение к брокеру. У каждого робота свой клиент: свой client_id и свой last will.
 struct MqttConfig {
     std::string host = "localhost";
     std::uint16_t port = 1883;
@@ -34,7 +33,6 @@ struct MqttConfig {
     std::string password;
 };
 
-// Состояние робота при старте симуляции.
 struct InitialStateConfig {
     std::string map_id = "map_1";
     std::string map_version = "1";
@@ -44,7 +42,6 @@ struct InitialStateConfig {
     double battery_soc = 100.0;           // [%]
 };
 
-// StatePublisher: интервалы отправки (они же уходят в factsheet.protocolLimits.timing).
 struct PublisherConfig {
     std::chrono::milliseconds min_state_interval{100};
     std::chrono::milliseconds max_state_interval{30'000};
@@ -91,7 +88,7 @@ struct PhysicalConfig {
 
 // Дерево поведения (BehaviorRunner).
 struct BehaviorTreeConfig {
-    std::string xml_path;
+    std::string xml_path{ROBOT_TREE_XML};
     bool groot_enabled = true;
     std::optional<std::uint16_t> groot_port;   // пусто — назначит загрузчик (1667, 1669, ...)
 };

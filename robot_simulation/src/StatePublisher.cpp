@@ -5,7 +5,7 @@
 #include "spdlog/spdlog.h"
 #include "../../shared/include/coro_guard.hpp"
 StatePublisher:: StatePublisher(asio::any_io_executor ex, ptrPublishingChannel channel, vda::State& state, VdaTopics topics, PublisherConfig config)
-    : channel_(channel), State_(state), topics_(topics), config_(config), state_trigger(ex, 1), visu_timer(ex), state_timer(ex), name_(State_.header.serial_number)
+    : channel_(channel), State_(state), topics_(topics), config_(config), state_trigger(ex, 1), visu_timer(ex), state_timer(ex)
 {}
 
 void StatePublisher::stop(){
@@ -20,14 +20,18 @@ void StatePublisher::on_link_up(){
     this->pub_factsheet_topic();
 }
 
+void StatePublisher::publish_factsheet(){
+    this->pub_factsheet_topic();
+}
+
 void StatePublisher::set_factsheet(vda5050::Factsheet factsheet){
     Factsheet_ = std::move(factsheet);
 }
 
 asio::awaitable<void> StatePublisher::run_state_publisher_loop() {
-    spdlog::info("[publisher][{}] Run state publisher loop start", name_);
-    CoroGuard guard([name = name_] {
-        spdlog::info("[publisher][{}] Run state publisher loop stopped", name);
+    spdlog::info("[publisher][{}] state publisher loop start", State_.header.serial_number);
+    CoroGuard guard([name = State_.header.serial_number] {
+        spdlog::info("[publisher][{}] state publisher loop stopped", name);
     });
 
     while (!stopping_) {
@@ -56,9 +60,9 @@ asio::awaitable<void> StatePublisher::run_state_publisher_loop() {
 
 asio::awaitable<void> StatePublisher::run_visu_publisher_loop(){
     asio::steady_timer timer(co_await asio::this_coro::executor);
-    spdlog::info("[publisher][{}] Run visu publisher loop start", name_);
-    CoroGuard guard([name = name_] {
-            spdlog::info("[publisher][{}] Run visu publisher loop stopped", name);
+    spdlog::info("[publisher][{}] visu publisher loop start", State_.header.serial_number);
+    CoroGuard guard([name = State_.header.serial_number] {
+            spdlog::info("[publisher][{}] visu publisher loop stopped", name);
         });
     while (!stopping_) {
         visu_timer.expires_after(config_.visualization_interval);
@@ -96,6 +100,7 @@ void StatePublisher::pub_connection_topic(){
     Connection_.connection_state = vda::ConnectionState::Online;
     PublishMessage msg{topics_.connection, vda5050::json(Connection_).dump(), 1, true};
     auto success = channel_->try_send(boost::system::error_code{}, msg);
+    spdlog::info("[publisher][{}] The message (Connection) has been published in the topic : {}",State_.header.serial_number, topics_.connection);
     if (!success){
         spdlog::error("[publisher] The message was not published in the topic : {}", topics_.connection);
     }

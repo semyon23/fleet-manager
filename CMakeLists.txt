@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.15)
 project(FleetManagerSystem CXX)
-#-DCMAKE_TOOLCHAIN_FILE=/home/ubuntu/.vcpkg-clion/vcpkg/scripts/buildsystems/vcpkg.cmake
-
+#-DCMAKE_TOOLCHAIN_FILE=/home/ubuntu/.vcpkg-clion/vcpkg/scripts/buildsystems/vcpkg.cmake  // home
+#-DCMAKE_TOOLCHAIN_FILE=/home/ubuntu/vcpkg/scripts/buildsystems/vcpkg.cmake               // work
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -25,7 +25,6 @@ add_library(mqtt_client STATIC
         shared/include/mqtt_client.hpp
 )
 
-# Делаем так, чтобы все подпроекты автоматически видели заголовки этого класса
 target_include_directories(mqtt_client PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/fleet_dispatch/include
 )

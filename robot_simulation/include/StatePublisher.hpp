@@ -27,6 +27,7 @@ public:
     void stop();
     void on_link_up();
     void emit_state_changed();
+    void publish_factsheet();
     asio::awaitable<void> run_visu_publisher_loop();
     asio::awaitable<void> run_state_publisher_loop();
 private:
@@ -34,7 +35,7 @@ private:
     void pub_factsheet_topic();
     void pub_visu_topic();
     void pub_connection_topic();
-    vda::Header StatePublisher::make_header(std::uint32_t& counter) const;
+    vda::Header make_header(std::uint32_t& counter) const;
 
     vda::State& State_;
     vda5050::State Last_sent_state;
@@ -48,7 +49,6 @@ private:
     asio::experimental::channel<void(boost::system::error_code, bool)> state_trigger;
     asio::steady_timer visu_timer;
     asio::steady_timer state_timer;
-    std::string name_;
     bool state_sent_once{false};
     bool stopping_{false};
 };

@@ -1,30 +1,23 @@
-
 #include "../include/mqtt_client.hpp"
 #include <boost/asio/as_tuple.hpp>
 #include <print>
+#include "spdlog/spdlog.h"
 constexpr auto use_nothrow_awaitable = boost::asio::as_tuple(asio::deferred);
 
-MqttClientHandler::MqttClientHandler(asio::io_context &ioc,  const MqttClientConfig &config)
-    : mqtt_client(ioc),
-    client_config(config),
-    network_strand(asio::make_strand(ioc)),
-    message_channel(ioc, 100){}
+MqttClientHandler::MqttClientHandler(asio::io_context& ioc, const MqttClientConfig& config)
+    : mqtt_client(ioc), client_config(config), network_strand(asio::make_strand(ioc)), message_channel(ioc, 100){
+}
 
 MqttClientHandler::~MqttClientHandler(){
-    stop();
+    spdlog::info("[mqtt_client] client stopped");
 }
 
 void MqttClientHandler::start(){
+    boost::mqtt5::will last_will("fms_client", "online", boost::mqtt5::qos_e::at_least_once,
+                                 boost::mqtt5::retain_e::no);
 
-    boost::mqtt5::will last_will( "fms_client",
-                    "online",
-                    boost::mqtt5::qos_e::at_least_once,
-                    boost::mqtt5::retain_e::no);
-
-    mqtt_client.brokers(client_config.host, client_config.port)
-        .will(std::move(last_will))
-        .credentials(client_config.client_id)
-        .async_run(boost::asio::detached);
+    mqtt_client.brokers(client_config.host, client_config.port).will(std::move(last_will)).
+                credentials(client_config.client_id).async_run(boost::asio::detached);
 
     asio::co_spawn(network_strand, listen_loop(), boost::asio::detached);
 
@@ -46,7 +39,7 @@ asio::awaitable<void> MqttClientHandler::co_subscribe(){
         topics_to_restore.assign(active_topics.begin(), active_topics.end());
     }
 
-    if (topics_to_restore.empty()) {
+    if (topics_to_restore.empty()){
         co_return;
     }
 
@@ -60,27 +53,24 @@ asio::awaitable<void> MqttClientHandler::co_subscribe(){
     options.retain_as_published = boost::mqtt5::retain_as_published_e::retain;
     options.retain_handling = boost::mqtt5::retain_handling_e::send;
 
-    for (const auto& topic_str : topics_to_restore) {
+    for (const auto& topic_str : topics_to_restore){
         mqtt_topics.emplace_back(topic_str, options);
     }
 
     std::cout << "[MQTT] Bulk resubscribing to " << mqtt_topics.size() << " topics..." << std::endl;
 
     auto&& [ec, sub_codes, props] = co_await mqtt_client.async_subscribe(
-        mqtt_topics,
-        boost::mqtt5::subscribe_props{},
-        use_nothrow_awaitable
-    );
+        mqtt_topics, boost::mqtt5::subscribe_props{}, use_nothrow_awaitable);
 
-    if (ec) {
+    if (ec){
         std::cerr << "[MQTT] Bulk subscribe network error: " << ec.message() << std::endl;
-    } else {
+    } else{
         std::cout << "[MQTT] Bulk subscribe completed successfully. Verifying reason codes..." << std::endl;
 
-        for (size_t i = 0; i < sub_codes.size(); ++i) {
-            if (sub_codes[i]) {
-                std::cerr << "[MQTT] Broker rejected topic [" << topics_to_restore[i]
-                          << "]. Reason: " << sub_codes[i].message() << std::endl;
+        for (size_t i = 0; i < sub_codes.size(); ++i){
+            if (sub_codes[i]){
+                std::cerr << "[MQTT] Broker rejected topic [" << topics_to_restore[i] << "]. Reason: " << sub_codes[i].
+                    message() << std::endl;
             }
         }
     }
@@ -95,19 +85,17 @@ asio::awaitable<std::optional<MqttMessage>> MqttClientHandler::get_message_recei
 }
 
 
-asio::awaitable<void> MqttClientHandler::listen_loop()
-{
-    while (true) {
-
+asio::awaitable<void> MqttClientHandler::listen_loop(){
+    while (true){
         auto [ec, topic, payload, props] = co_await mqtt_client.async_receive(use_nothrow_awaitable);
 
-        if (!ec)
-        {
-            if (!topic.empty()) {
+        if (!ec){
+            if (!topic.empty()){
                 //std::cout << "[MQTT] Topic : "<< topic << " Payload : "<< payload <<std::endl;
-                message_channel.try_send(boost::system::error_code{}, MqttMessage{std::move(topic), std::move(payload)});
+                message_channel.try_send(boost::system::error_code{},
+                                         MqttMessage{std::move(topic), std::move(payload)});
             }
-        }else if (ec == boost::mqtt5::client::error::session_expired){
+        } else if (ec == boost::mqtt5::client::error::session_expired){
             std::cerr << "[MQTT] Session expired on broker. Waiting before resubscribing..." << std::endl;
 
             asio::steady_timer timer(co_await asio::this_coro::executor);
@@ -117,8 +105,8 @@ asio::awaitable<void> MqttClientHandler::listen_loop()
             std::cout << "[MQTT] Attempting to restore active_topics..." << std::endl;
             co_await co_subscribe();
             continue;
-        }else {
-            if (ec == asio::error::operation_aborted) {
+        } else{
+            if (ec == asio::error::operation_aborted){
                 std::cout << "[MQTT] Listen loop stopped gracefully." << std::endl;
                 break;
             }
@@ -134,65 +122,53 @@ asio::awaitable<void> MqttClientHandler::listen_loop()
 
 void MqttClientHandler::subscribe_topic(const std::string& topic){
     active_topics.insert(topic);
-    boost::asio::co_spawn(network_strand,
-        [this, topic]() -> asio::awaitable<void> {
-
-            boost::mqtt5::subscribe_topic sub_topic = boost::mqtt5::subscribe_topic{
-                topic,
-                boost::mqtt5::subscribe_options{
-                    boost::mqtt5::qos_e::at_least_once, // QoS 1
-                    boost::mqtt5::no_local_e::no,
-                    boost::mqtt5::retain_as_published_e::retain,
-                    boost::mqtt5::retain_handling_e::send
-                }
-            };
-
-            std::cout << "[MQTT] Sending SUBSCRIBE for topic: " << topic << std::endl;
-
-            auto&& [ec, sub_codes, props] = co_await mqtt_client.async_subscribe(
-                sub_topic, boost::mqtt5::subscribe_props{}, use_nothrow_awaitable
-            );
-
-            if (ec) {
-                std::cerr << "[MQTT] Subscribe network error: " << ec.message() << std::endl;
-            } else if (!sub_codes.empty() && sub_codes[0]) {
-                std::cerr << "[MQTT] Broker rejected subscription. Reason: " << sub_codes[0].message() << std::endl;
-            } else {
-                std::cout << "[MQTT] Successfully subscribed to: " << topic << std::endl;
+    boost::asio::co_spawn(network_strand, [this, topic]() -> asio::awaitable<void>{
+        boost::mqtt5::subscribe_topic sub_topic = boost::mqtt5::subscribe_topic{
+            topic, boost::mqtt5::subscribe_options{
+                boost::mqtt5::qos_e::at_least_once, // QoS 1
+                boost::mqtt5::no_local_e::no, boost::mqtt5::retain_as_published_e::retain,
+                boost::mqtt5::retain_handling_e::send
             }
-            co_return;
-        },
-        boost::asio::detached
-    );
+        };
+
+        std::cout << "[MQTT] Sending SUBSCRIBE for topic: " << topic << std::endl;
+
+        auto&& [ec, sub_codes, props] = co_await mqtt_client.async_subscribe(
+            sub_topic, boost::mqtt5::subscribe_props{}, use_nothrow_awaitable);
+
+        if (ec){
+            std::cerr << "[MQTT] Subscribe network error: " << ec.message() << std::endl;
+        } else if (!sub_codes.empty() && sub_codes[0]){
+            std::cerr << "[MQTT] Broker rejected subscription. Reason: " << sub_codes[0].message() << std::endl;
+        } else{
+            std::cout << "[MQTT] Successfully subscribed to: " << topic << std::endl;
+        }
+        co_return;
+    }, boost::asio::detached);
 }
 
 void MqttClientHandler::unsubscribe_topic(const std::string& topic){
     active_topics.erase(topic);
-    boost::asio::co_spawn(network_strand,
-        [this, topic]() -> asio::awaitable<void> {
-            std::cout << "[MQTT] Sending UNSUBSCRIBE for topic: " << topic << std::endl;
+    boost::asio::co_spawn(network_strand, [this, topic]() -> asio::awaitable<void>{
+        std::cout << "[MQTT] Sending UNSUBSCRIBE for topic: " << topic << std::endl;
 
-            auto&& [ec, unsub_codes, props] = co_await mqtt_client.async_unsubscribe(
-                topic, boost::mqtt5::unsubscribe_props{}, use_nothrow_awaitable
-            );
+        auto&& [ec, unsub_codes, props] = co_await mqtt_client.async_unsubscribe(
+            topic, boost::mqtt5::unsubscribe_props{}, use_nothrow_awaitable);
 
-            if (ec) {
-                std::cerr << "[MQTT] Unsubscribe network error: " << ec.message() << std::endl;
-            } else if (!unsub_codes.empty() && unsub_codes[0]) {
-                std::cerr << "[MQTT] Broker rejected unsubscribe: " << unsub_codes[0].message() << std::endl;
-            } else {
-                std::cout << "[MQTT] Successfully unsubscribed from: " << topic << std::endl;
-            }
-            co_return;
-        },
-        boost::asio::detached
-    );
+        if (ec){
+            std::cerr << "[MQTT] Unsubscribe network error: " << ec.message() << std::endl;
+        } else if (!unsub_codes.empty() && unsub_codes[0]){
+            std::cerr << "[MQTT] Broker rejected unsubscribe: " << unsub_codes[0].message() << std::endl;
+        } else{
+            std::cout << "[MQTT] Successfully unsubscribed from: " << topic << std::endl;
+        }
+        co_return;
+    }, boost::asio::detached);
 }
 
-void MqttClientHandler::publish_topic(const std::string& topic_string, const std::string& payload_string, int qos, bool retained) {
-
-    boost::asio::co_spawn(network_strand,
-                          do_publish(topic_string, payload_string, qos, retained),
+void MqttClientHandler::publish_topic(const std::string& topic_string, const std::string& payload_string, int qos,
+                                      bool retained){
+    boost::asio::co_spawn(network_strand, do_publish(topic_string, payload_string, qos, retained),
                           boost::asio::detached);
 }
 
@@ -201,8 +177,7 @@ void MqttClientHandler::publish_topic(const std::string& topic_string, const std
 //   QoS 1 -> (error_code, reason_code, puback_props)
 //   QoS 2 -> (error_code, reason_code, pubcomp_props)
 // Поэтому выбор QoS во время работы — через switch.
-asio::awaitable<void> MqttClientHandler::do_publish(std::string topic, std::string payload,
-                                                    int qos, bool retained) {
+asio::awaitable<void> MqttClientHandler::do_publish(std::string topic, std::string payload, int qos, bool retained){
     using boost::mqtt5::qos_e;
     const auto retain = retained ? boost::mqtt5::retain_e::yes : boost::mqtt5::retain_e::no;
 
@@ -210,37 +185,36 @@ asio::awaitable<void> MqttClientHandler::do_publish(std::string topic, std::stri
     // Для QoS 0 брокер не отвечает — считаем успехом. reason_code{} по умолчанию — НЕ успех.
     boost::mqtt5::reason_code rc = boost::mqtt5::reason_codes::success;
 
-    switch (qos) {
-        case 0: {
-            auto [e] = co_await mqtt_client.async_publish<qos_e::at_most_once>(
-                topic, payload, retain, boost::mqtt5::publish_props{}, use_nothrow_awaitable);
-            ec = e;
-            break;
-        }
-        case 1: {
-            auto [e, r, props] = co_await mqtt_client.async_publish<qos_e::at_least_once>(
-                topic, payload, retain, boost::mqtt5::publish_props{}, use_nothrow_awaitable);
-            ec = e;
-            rc = r;
-            break;
-        }
-        case 2: {
-            auto [e, r, props] = co_await mqtt_client.async_publish<qos_e::exactly_once>(
-                topic, payload, retain, boost::mqtt5::publish_props{}, use_nothrow_awaitable);
-            ec = e;
-            rc = r;
-            break;
-        }
-        default:
-            std::cerr << "[MQTT] Invalid QoS " << qos << " for topic [" << topic << "]" << std::endl;
-            co_return;
+    switch (qos){
+    case 0: {
+        auto [e] = co_await mqtt_client.async_publish<qos_e::at_most_once>(
+            topic, payload, retain, boost::mqtt5::publish_props{}, use_nothrow_awaitable);
+        ec = e;
+        break;
+    }
+    case 1: {
+        auto [e, r, props] = co_await mqtt_client.async_publish<qos_e::at_least_once>(
+            topic, payload, retain, boost::mqtt5::publish_props{}, use_nothrow_awaitable);
+        ec = e;
+        rc = r;
+        break;
+    }
+    case 2: {
+        auto [e, r, props] = co_await mqtt_client.async_publish<qos_e::exactly_once>(
+            topic, payload, retain, boost::mqtt5::publish_props{}, use_nothrow_awaitable);
+        ec = e;
+        rc = r;
+        break;
+    }
+    default:
+        std::cerr << "[MQTT] Invalid QoS " << qos << " for topic [" << topic << "]" << std::endl;
+        co_return;
     }
 
-    if (ec) {
+    if (ec){
         std::cerr << "[MQTT] Publish network error on topic [" << topic << "]: " << ec.message() << std::endl;
-    } else if (rc) {
-        std::cerr << "[MQTT] Broker rejected publish on topic [" << topic << "]. Reason: " << rc.message()
-                  << std::endl;
+    } else if (rc){
+        std::cerr << "[MQTT] Broker rejected publish on topic [" << topic << "]. Reason: " << rc.message() << std::endl;
     }
 }
 

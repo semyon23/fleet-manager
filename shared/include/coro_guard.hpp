@@ -2,6 +2,7 @@
 #define FLEETMANAGERSYSTEM_CORO_GUARD_HPP
 
 #include <functional>
+#include <iostream>
 
 class CoroGuard {
 public:
@@ -12,7 +13,7 @@ public:
             try {
                 cleanup_();
             } catch (const std::exception& e) {
-                spdlog::error("[CoroGuard]Exception in cleanup callback: ", e.what());
+                std::cout << "[CoroGuard]Exception in cleanup callback: " << e.what() << std::endl;
             }
         }
     }

@@ -25,9 +25,6 @@ VDA5050_JSON_ENUM(BlockingType, {
     {BlockingType::Hard, "HARD"},
 })
 
-// Предопределённые actionType (таблица 4). actionType — расширяемый enum,
-// производитель может добавлять свои, поэтому в структурах это std::string.
-// cancelOrder, startPause, stopPause обязан поддерживать каждый робот.
 namespace action_type {
 inline constexpr const char* kStartPause = "startPause";
 inline constexpr const char* kStopPause = "stopPause";

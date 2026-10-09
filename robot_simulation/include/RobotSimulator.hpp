@@ -114,6 +114,7 @@ private:
 
     RobotConfig config;
     RobotDriveController drive_controller;
+
     BT::Tree tree;
     BT::Blackboard::Ptr blackboard;
 
@@ -138,7 +139,7 @@ private:
     vda5050::Visualization Visualization;
     vda5050::Factsheet Factsheet;
 
-    vda5050::Order Last_received_order;
+
     vda5050::State Last_sent_state;
     bool state_sent_once = false;
     std::uint32_t state_header_id_ = 0;
