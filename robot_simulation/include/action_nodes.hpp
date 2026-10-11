@@ -43,7 +43,7 @@ protected:
     RobotBehaviorApi& robot(const BT::TreeNode& node);
 
 private:
-    std::shared_ptr<RobotBehaviorApi> robot_;
+    RobotBehaviorApi* robot_ = nullptr;
 };
 
 class RobotCondition : public BT::ConditionNode, private RobotAccess {

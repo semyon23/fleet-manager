@@ -2,19 +2,19 @@ find_package(nlohmann_json CONFIG REQUIRED)
 find_package(behaviortree_cpp REQUIRED)
 find_package(yaml-cpp CONFIG REQUIRED)
 
-# Создаем исполняемый файл подпроекта
 add_executable(robot_simulation
         src/rs_main.cpp
         src/RobotDriveController.cpp
         src/RobotMessageRouter.cpp
-#        ../shared/src/mqtt_client.cpp
         src/action_nodes.cpp
         src/RoboticVehicleSimulator.cpp
         src/OrderManager.cpp
         src/StatePublisher.cpp
         src/factsheet_builder.cpp
         src/ActionManager.cpp
-        include/ActionManager.hpp
+        src/ActionExecutor.cpp
+        src/PickDropActions.cpp
+        src/SimulatedAction.cpp
 )
 
 target_compile_definitions(robot_simulation PRIVATE

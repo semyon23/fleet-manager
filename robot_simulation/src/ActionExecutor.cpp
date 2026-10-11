@@ -154,6 +154,10 @@ bool ActionExecutor::update(double dt) {
             if (e.running) {
                 continue;
             }
+            if (stops_driving(e.action.blocking_type) && state_.driving) {
+                break;   // SOFT/HARD — только стоя: стартует на следующем тике, когда робот встанет
+            }
+
             if (exclusive_running) {
                 break;
             }

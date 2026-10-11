@@ -6,8 +6,8 @@
 // меняет state.loads: pick добавляет груз, drop убирает.
 // Параметры action'а (все необязательные): lhd, loadId, loadType.
 
-#include "../../include/ActionExecutor.hpp"
-#include "RobotConfig.hpp"   // LoadHandlingConfig
+#include "../include/ActionExecutor.hpp"
+#include "../include/robot_config.hpp"   // LoadHandlingConfig
 
 // Регистрирует обработчики "pick" и "drop" в исполнителе.
 void register_pick_drop(ActionExecutor& executor, const LoadHandlingConfig& config);

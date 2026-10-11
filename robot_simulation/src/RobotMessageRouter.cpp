@@ -25,9 +25,8 @@ asio::awaitable<void> RobotMessageRouter::listener_loop()
     while (true){
         auto opt_msg = co_await mqtt_client->get_message_received();
 
-        if (!opt_msg.has_value())
-        {
-            spdlog::error("[message_router] MQTT client disconnected or error occurred. Exiting listener loop.");
+        if (!opt_msg.has_value()){
+            spdlog::warn("[message_router] MQTT client disconnected or error occurred. Exiting listener loop.");
             co_return;
         }
 

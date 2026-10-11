@@ -27,7 +27,7 @@ int main() {
     BT::BehaviorTreeFactory factory;
     register_action_nodes(factory);
 
-    const int number_robots = 3;
+    const int number_robots = 1;
     std::vector<std::shared_ptr<RoboticVehicleSimulator>> robots;
     robots.reserve(number_robots);
     for (int i = 0; i < number_robots; ++i) {
@@ -54,12 +54,12 @@ int main() {
             }
             mqtt_client->stop();
             publisher_channel->cancel();
-            io_ctx.stop();
+           // io_ctx.stop();
         }
     });
 
     io_ctx.run();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    // std::this_thread::sleep_for(std::chrono::milliseconds(50));
     return 0;
 }
 

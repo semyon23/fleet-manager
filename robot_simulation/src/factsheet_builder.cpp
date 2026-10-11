@@ -1,6 +1,6 @@
 #include "include/factsheet_builder.hpp"
 #include <chrono>
-
+#include "include/SimulatedAction.hpp"
 namespace {
 
 namespace v = vda5050;
@@ -108,6 +108,16 @@ v::ProtocolFeatures protocol_features(const std::set<std::string>& handlers) {
     actions.push_back(make_action(v::action_type::kFactsheetRequest, "Publish factsheet", {ActionScope::Instant}));
     actions.push_back(make_action(v::action_type::kStateRequest, "Publish state", {ActionScope::Instant}));
 
+
+    auto init = make_action(v::action_type::kInitializePosition, "Set robot pose and lastNodeId",
+                                {ActionScope::Instant});
+    init.action_parameters = std::vector{param("x", ValueDataType::Number, false),
+                                         param("y", ValueDataType::Number, false),
+                                         param("theta", ValueDataType::Number, false),
+                                         param("mapId", ValueDataType::String, false),
+                                         param("lastNodeId", ValueDataType::String, false)};
+    actions.push_back(init);
+
     // Action'ы из ActionExecutor: только те, для которых есть обработчик.
     const auto load_params = std::vector{param("lhd", ValueDataType::String, true),
                                          param("loadId", ValueDataType::String, true),
@@ -121,6 +131,15 @@ v::ProtocolFeatures protocol_features(const std::set<std::string>& handlers) {
             a.action_result = pick ? "loadId of the picked load" : "loadId of the dropped load";
             a.pause_allowed = true;
             a.cancel_allowed = false;   // груз в движении — прерывать нельзя
+            actions.push_back(std::move(a));
+        } else if (type == sim_action::kType) {
+            // Тестовый action: где угодно, с любым blockingType, пауза и отмена разрешены.
+            auto a = make_action(type, "Simulated action: lasts 'duration' seconds",
+                                 {ActionScope::Instant, ActionScope::Node, ActionScope::Edge},
+                                 {BlockingType::None, BlockingType::Soft, BlockingType::Hard});
+            a.action_parameters = std::vector{param("duration", ValueDataType::Number, true)};
+            a.pause_allowed = true;
+            a.cancel_allowed = true;
             actions.push_back(std::move(a));
         } else {
             // Свой action без описания параметров: на узле, блокирующий.

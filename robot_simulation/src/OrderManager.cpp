@@ -1,18 +1,44 @@
-//
-// Created by ubuntu on 10/3/26.
-//
-
 #include "../include/OrderManager.hpp"
-
 #include <spdlog/spdlog.h>
+
+namespace {
+    // Предупреждения о прошлых action'ах: актуальны до следующего принятого order'а.
+    const std::set<std::string> kActionWarnings = {
+        vda5050::error_type::kNoOrderToCancel,
+        vda5050::error_type::kInvalidInstantAction,
+        "ACTION_FAILED",   // ActionExecutor::report_failure
+    };
+}
 
 OrderManager::OrderManager(vda5050::State& State, vda5050::Order& Order) : State_{State}, Order_{Order}{
 };
 
+void OrderManager::cancel(){
+    order_canceled = true;
+
+    const auto last = State_.last_node_sequence_id;
+    Order_.nodes.erase(std::remove_if(Order_.nodes.begin(), Order_.nodes.end(),
+                                      [&](const auto& n){ return n.sequence_id > last; }),
+                       Order_.nodes.end());
+    Order_.edges.erase(std::remove_if(Order_.edges.begin(), Order_.edges.end(),
+                                      [&](const auto& e){ return e.sequence_id > last; }),
+                       Order_.edges.end());
+    State_.node_states.clear();
+    State_.edge_states.clear();
+    State_.new_base_request = false;
+}
+
+void OrderManager::set_supported_actions(const std::vector<vda5050::MobileRobotAction>& actions){
+    action_scopes_.clear();
+    for (const auto& a : actions){
+        action_scopes_[a.action_type].insert(a.action_scopes.begin(), a.action_scopes.end());
+    }
+}
+
 void OrderManager::reject(const Rejection& r, const vda5050::Order* order){
     using namespace vda5050;
 
-    spdlog::error("[order_manager][{}] Order rejected:", State_.header.serial_number, r.type, r.description);
+    spdlog::error("[order_manager][{}] Order rejected : type : {}, description :{}", State_.header.serial_number, r.type, r.description);
 
     Error err;
     err.error_type = r.type;
@@ -108,14 +134,19 @@ std::optional<OrderManager::Rejection> OrderManager::validate_structure(const vd
 std::optional<OrderManager::Rejection> OrderManager::validate_capabilities(const vda5050::Order& order) const{
     using namespace vda5050;
 
-    auto check_actions = [&](const std::vector<Action>& actions) -> std::optional<Rejection>{
-        if (supported_action_types_.empty()){
+    auto check_actions = [&](const std::vector<Action>& actions, ActionScope scope,
+                            const char* where) -> std::optional<Rejection>{
+        if (action_scopes_.empty()){
             return std::nullopt;
         }
         for (const auto& a : actions){
-            if (!supported_action_types_.count(a.action_type)){
+            const auto it = action_scopes_.find(a.action_type);
+            if (it == action_scopes_.end() || !it->second.count(scope)){
+                const std::string why = it == action_scopes_.end()
+                    ? "Unsupported action " + a.action_type
+                    : "Action " + a.action_type + " is not allowed on " + where;
                 return Rejection{
-                    error_type::kInvalidOrderAction, ErrorLevel::Warning, "Unsupported action " + a.action_type,
+                    error_type::kInvalidOrderAction, ErrorLevel::Warning, why,
                     {error_ref("actionId", a.action_id), error_ref("actionType", a.action_type)}
                 };
             }
@@ -124,7 +155,7 @@ std::optional<OrderManager::Rejection> OrderManager::validate_capabilities(const
     };
 
     for (const auto& node : order.nodes){
-        if (auto r = check_actions(node.actions)) return r;
+        if (auto r = check_actions(node.actions, ActionScope::Node, "node")) return r;
 
         if (node.node_position && State_.maps){
             const auto& maps = *State_.maps;
@@ -140,7 +171,7 @@ std::optional<OrderManager::Rejection> OrderManager::validate_capabilities(const
         }
     }
     for (const auto& edge : order.edges){
-        if (auto r = check_actions(edge.actions)) return r;
+        if (auto r = check_actions(edge.actions, ActionScope::Edge, "edge")) return r;
     }
     return std::nullopt;
 }
@@ -257,9 +288,10 @@ void OrderManager::drop_horizon(){
 }
 
 void OrderManager::clear_order_errors(){
-    State_.errors.erase(std::remove_if(State_.errors.begin(), State_.errors.end(), [](const vda5050::Error& e){
-        return kOrderRejectionErrors.count(e.error_type) > 0;
-    }), State_.errors.end());
+    auto& errs = State_.errors;
+    errs.erase(std::remove_if(errs.begin(), errs.end(), [](const vda5050::Error& e){
+        return kOrderRejectionErrors.count(e.error_type) > 0 || kActionWarnings.count(e.error_type) > 0;
+    }), errs.end());
 }
 
 void OrderManager::update(const std::string& json_order){

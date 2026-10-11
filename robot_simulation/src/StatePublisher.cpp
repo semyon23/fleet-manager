@@ -87,7 +87,7 @@ void StatePublisher::emit_state_changed(){
     bool success = state_trigger.try_send(boost::system::error_code{}, true);
 
     if (!success) {
-        spdlog::error("[publisher] Trigger did not activate (Buffer is full)");
+        spdlog::debug("[publisher] Trigger did not activate (Buffer is full)");
     }
 }
 

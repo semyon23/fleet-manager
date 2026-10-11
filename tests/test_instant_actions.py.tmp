@@ -1,0 +1,379 @@
+"""Instant action'ы (6.1.3, 6.2.3): cancelOrder, startPause/stopPause, stateRequest,
+factsheetRequest, initializePosition, неизвестные и битые сообщения.
+
+Тесты с pick/drop (пауза и отмена во время action'а на узле) запускаются, только если
+робот объявляет pick и drop в factsheet; иначе — SKIPPED.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import uuid
+
+import pytest
+
+from fms_client import is_idle
+from order_builder import Route, RouteNode, build_order, new_order_id
+from action_helpers import (
+    action, send_instant, send_instant_actions, status_of, order_action_status,
+    wait_instant, wait_failed_with, pause, unpause, wait_stopped, ensure_unpaused,
+    wait_order_action, assert_holds, assert_stands_while_running,
+)
+
+
+@pytest.fixture(autouse=True)
+def release_pause(helper):
+    ensure_unpaused(helper)
+    yield
+    ensure_unpaused(helper)
+
+
+# ------------------------------------------------------------- служебные action'ы
+
+def test_state_request_finishes(robot):
+    a = action("stateRequest")
+    mark = send_instant(robot, a)
+    wait_instant(robot, a, "FINISHED", mark, timeout=robot.t(2.0))
+
+
+def test_factsheet_request_publishes_factsheet(robot, fms):
+    a = action("factsheetRequest")
+    factsheet_mark = fms.mark("factsheet")
+    mark = send_instant(robot, a)
+    fs = fms.wait_message("factsheet", lambda m: True, robot.t(2.0), since=factsheet_mark,
+                          what="factsheet after factsheetRequest")
+    assert "protocolFeatures" in fs
+    wait_instant(robot, a, "FINISHED", mark)
+
+
+def test_several_actions_in_one_message_are_all_executed(robot):
+    actions = [action("stateRequest"), action("startPause"), action("stopPause")]
+    mark = send_instant(robot, *actions)
+    s = robot.fms.wait_state(
+        lambda s: all(status_of(s, a["actionId"]) == "FINISHED" for a in actions),
+        robot.t(3.0), since=mark, what="all instant actions of the message FINISHED")
+    assert not s.get("paused"), "startPause then stopPause in one message: robot must end unpaused"
+
+
+def test_unknown_instant_action_fails(robot):
+    a = action("flyToTheMoon")
+    mark = send_instant(robot, a)
+    wait_failed_with(robot, a, "INVALID_INSTANT_ACTION", mark)
+
+
+def test_repeated_action_id_is_not_executed_again(robot):
+    """Повтор того же actionId (fms не дождался state) не выполняется второй раз."""
+    first_pause = action("startPause")
+    mark = send_instant(robot, first_pause)
+    wait_instant(robot, first_pause, "FINISHED", mark)
+    unpause(robot)
+
+    send_instant_actions(robot.fms, [first_pause])   # тот же actionId, новый headerId
+    robot.assert_stays(lambda s: not s.get("paused"), 1.5,
+                       "repeated startPause with known actionId must be ignored")
+    s = robot.state()
+    count = sum(1 for x in s.get("instantActionStates", []) if x["actionId"] == first_pause["actionId"])
+    assert count == 1, f"actionId {first_pause['actionId']} appears {count} times in instantActionStates"
+
+
+@pytest.mark.parametrize("payload", [
+    "{not json",
+    json.dumps({"headerId": 1}),                                     # нет заголовка и actions
+    json.dumps({"headerId": 1, "timestamp": "2026-01-01T00:00:00.000Z", "version": "3.0.0",
+                "manufacturer": "x", "serialNumber": "y",
+                "actions": [{"actionType": "stateRequest"}]}),        # нет actionId / blockingType
+], ids=["broken_json", "missing_actions", "action_without_id"])
+def test_malformed_instant_actions_are_reported(robot, payload):
+    mark = robot.fms.mark()
+    robot.fms.send_raw("instantActions", payload)
+    robot.wait_error("VALIDATION_FAILURE", mark)
+
+    # Робот после этого продолжает принимать instant action'ы.
+    a = action("stateRequest")
+    mark = send_instant(robot, a)
+    wait_instant(robot, a, "FINISHED", mark)
+
+
+# --------------------------------------------------------------------- cancelOrder
+
+def test_cancel_order_without_order_fails(robot):
+    a = action("cancelOrder")
+    mark = send_instant(robot, a)
+    wait_failed_with(robot, a, "NO_ORDER_TO_CANCEL", mark)
+
+
+def test_cancel_order_with_other_order_id_fails(robot):
+    route = Route(robot.pose(), count=3)
+    order = build_order(new_order_id(), 0, route.nodes, released=4, map_id=route.map_id)
+    mark = robot.send(order)
+    robot.wait_accepted(order, mark)
+
+    a = action("cancelOrder", {"orderId": "not-this-order"})
+    mark = send_instant(robot, a)
+    wait_failed_with(robot, a, "NO_ORDER_TO_CANCEL", mark)
+
+    s = robot.wait_idle(robot.drive_timeout(3))
+    assert s["lastNodeId"] == route.node_id(3), "order must continue after a cancel for another order"
+
+
+def test_cancel_order_while_driving(robot):
+    route = Route(robot.pose(), count=4)
+    order = build_order(new_order_id(), 0, route.nodes, released=5, map_id=route.map_id)
+    mark = robot.send(order)
+    robot.wait_accepted(order, mark)
+    robot.wait_last_node(route.node_id(1), robot.drive_timeout(1), since=mark)
+
+    a = action("cancelOrder", {"orderId": order["orderId"]})
+    mark = send_instant(robot, a)
+    # Action'ов в order'е нет — отмена завершается сразу.
+    s = wait_instant(robot, a, "FINISHED", mark)
+    assert s["nodeStates"] == [] and s["edgeStates"] == [], "route must be cleared by cancelOrder"
+    # orderId / orderUpdateId остаются (6.6.7): fms видит, какой order отменён.
+    assert (s["orderId"], s["orderUpdateId"]) == (order["orderId"], 0)
+
+    s = wait_stopped(robot, mark)
+    stopped_at = s["lastNodeId"]
+    assert stopped_at != route.node_id(4), "robot reached the end, cancel came too late"
+    robot.assert_stays(lambda x: not x["driving"] and x["lastNodeId"] == stopped_at, 2.0,
+                       "robot must stay after cancelOrder")
+    assert is_idle(robot.state())
+
+    # Update отменённого order'а — ORDER_UPDATE_FOLLOWING_CANCEL (6.1.3).
+    s = robot.state()
+    i = [n.node_id for n in route.nodes].index(s["lastNodeId"])
+    update = build_order(order["orderId"], 1, route.nodes[i:i + 2], released=2,
+                         map_id=route.map_id, first_seq=s["lastNodeSequenceId"])
+    mark = robot.send(update)
+    robot.wait_error("ORDER_UPDATE_FOLLOWING_CANCEL", mark)
+    robot.assert_stays(lambda x: not x["driving"], 1.0, "update after cancel must not be executed")
+
+    # Новый order принимается.
+    robot.clear_order_errors()
+
+
+def test_cancel_order_at_decision_point_removes_horizon(robot):
+    route = Route(robot.pose(), count=3)
+    order = build_order(new_order_id(), 0, route.nodes, released=2, map_id=route.map_id)
+    mark = robot.send(order)
+    robot.wait_accepted(order, mark)
+    robot.fms.wait_state(lambda s: s["lastNodeId"] == route.node_id(1) and not s["driving"]
+                         and s.get("newBaseRequest"), robot.drive_timeout(1), since=mark,
+                         what="robot waits at decision point with newBaseRequest")
+
+    a = action("cancelOrder")
+    mark = send_instant(robot, a)
+    s = wait_instant(robot, a, "FINISHED", mark)
+    assert s["nodeStates"] == [] and s["edgeStates"] == [], "horizon must be removed by cancelOrder"
+    assert not s.get("newBaseRequest"), "newBaseRequest must be reset by cancelOrder"
+    assert is_idle(s)
+    robot.assert_stays(lambda x: not x["driving"], 1.5, "robot must not drive after cancelOrder")
+
+
+def test_cancel_order_while_paused(robot):
+    pause(robot)
+    route = Route(robot.pose(), count=2)
+    order = build_order(new_order_id(), 0, route.nodes, released=3, map_id=route.map_id)
+    mark = robot.send(order)
+    robot.wait_accepted(order, mark)
+
+    a = action("cancelOrder")
+    mark = send_instant(robot, a)
+    s = wait_instant(robot, a, "FINISHED", mark)
+    assert is_idle(s)
+    assert s.get("paused") is True, "cancelOrder must not release the pause"
+
+
+# ------------------------------------------------------------- startPause / stopPause
+
+def test_pause_while_driving_stops_and_resumes(robot):
+    route = Route(robot.pose(), count=4)
+    order = build_order(new_order_id(), 0, route.nodes, released=5, map_id=route.map_id)
+    mark = robot.send(order)
+    robot.wait_accepted(order, mark)
+    robot.wait_last_node(route.node_id(1), robot.drive_timeout(1), since=mark)
+
+    mark = robot.fms.mark()
+    pause(robot)
+    s = wait_stopped(robot, mark)
+    held_at = s["lastNodeId"]
+    assert held_at != route.node_id(4), "robot reached the end, pause came too late"
+    robot.assert_stays(lambda x: not x["driving"] and x["lastNodeId"] == held_at and x["nodeStates"],
+                       2.0, "paused robot must stand and keep its order")
+
+    mark = robot.fms.mark()
+    unpause(robot)
+    robot.fms.wait_state(lambda x: x["driving"], robot.t(3.0), since=mark,
+                         what="robot drives again after stopPause")
+    s = robot.wait_idle(robot.drive_timeout(4))
+    assert s["lastNodeId"] == route.node_id(4)
+
+
+def test_order_received_while_paused_starts_after_stop_pause(robot):
+    pause(robot)
+    route = Route(robot.pose(), count=2)
+    order = build_order(new_order_id(), 0, route.nodes, released=3, map_id=route.map_id)
+    mark = robot.send(order)
+    robot.wait_accepted(order, mark)
+    robot.assert_stays(lambda x: not x["driving"] and x["lastNodeId"] == route.node_id(0), 2.0,
+                       "paused robot must not start a new order")
+
+    unpause(robot)
+    s = robot.wait_idle(robot.drive_timeout(2))
+    assert s["lastNodeId"] == route.node_id(2)
+
+
+# ------------------------------------------------------------------ initializePosition
+
+def test_initialize_position_sets_pose_and_last_node(robot):
+    p = robot.pose()
+    node_id = f"init_{uuid.uuid4().hex[:6]}"
+    x, y, theta = p.x + 0.2, p.y - 0.1, p.theta
+    a = action("initializePosition",
+               {"x": x, "y": y, "theta": theta, "mapId": p.map_id, "lastNodeId": node_id})
+    mark = send_instant(robot, a)
+    s = wait_instant(robot, a, "FINISHED", mark)
+
+    pos = s["mobileRobotPosition"]
+    assert math.hypot(pos["x"] - x, pos["y"] - y) < 0.05, f"position not set: {pos}"
+    assert abs(pos["theta"] - theta) < 0.05
+    assert pos["mapId"] == p.map_id and pos["localized"]
+    assert s["lastNodeId"] == node_id
+    robot.assert_stays(lambda x_: not x_["driving"], 1.0, "robot must not move after initializePosition")
+
+
+@pytest.mark.parametrize("drop_key", ["x", "mapId", "lastNodeId"])
+def test_initialize_position_requires_parameters(robot, drop_key):
+    p = robot.pose()
+    params = {"x": p.x, "y": p.y, "theta": p.theta, "mapId": p.map_id, "lastNodeId": "init_missing"}
+    del params[drop_key]
+    a = action("initializePosition", params)
+    mark = send_instant(robot, a)
+    wait_failed_with(robot, a, "INVALID_INSTANT_ACTION", mark)
+
+
+def test_initialize_position_on_unknown_map_fails(robot):
+    p = robot.pose()
+    a = action("initializePosition", {"x": p.x, "y": p.y, "theta": p.theta,
+                                      "mapId": "no_such_map", "lastNodeId": "init_bad_map"})
+    mark = send_instant(robot, a)
+    s = wait_failed_with(robot, a, "INVALID_INSTANT_ACTION", mark)
+    assert s["mobileRobotPosition"]["mapId"] == p.map_id
+
+
+def test_initialize_position_with_active_order_fails(robot):
+    pause(robot)   # order принят, но робот стоит — позиция не уплывёт
+    route = Route(robot.pose(), count=2)
+    order = build_order(new_order_id(), 0, route.nodes, released=3, map_id=route.map_id)
+    mark = robot.send(order)
+    robot.wait_accepted(order, mark)
+
+    p = robot.pose()
+    a = action("initializePosition", {"x": p.x + 1.0, "y": p.y, "theta": p.theta,
+                                      "mapId": p.map_id, "lastNodeId": "init_busy"})
+    mark = send_instant(robot, a)
+    s = wait_failed_with(robot, a, "INVALID_INSTANT_ACTION", mark)
+    assert abs(s["mobileRobotPosition"]["x"] - p.x) < 0.05, "pose must not change"
+    assert s["lastNodeId"] == route.node_id(0)
+
+    c = action("cancelOrder")
+    mark = send_instant(robot, c)
+    wait_instant(robot, c, "FINISHED", mark)
+
+
+# ------------------------------------------------------- pause / cancel во время pick
+
+@pytest.fixture
+def load_handling(fms):
+    """Тайминги pick/drop из factsheet; без pick/drop в factsheet — тест пропускается."""
+    fs = fms.latest("factsheet") or fms.wait_message("factsheet", lambda m: True, 3.0)
+    types = {a["actionType"] for a in fs["protocolFeatures"]["mobileRobotActions"]}
+    if not {"pick", "drop"} <= types:
+        pytest.skip("robot does not declare pick/drop in factsheet")
+    sets = (fs.get("loadSpecification") or {}).get("loadSets") or [{}]
+    # Симулятор добавляет ±20 % разброса к длительности.
+    return {"pick": sets[0].get("pickTime", 5.0) * 1.2, "drop": sets[0].get("dropTime", 5.0) * 1.2}
+
+
+@pytest.fixture
+def no_load_after(robot, load_handling):
+    """После теста робот без груза: иначе следующий pick упадёт (грузозахват занят)."""
+    yield
+    if robot.state().get("paused"):   # release_pause снимет паузу позже, а pick на паузе не закончится
+        unpause(robot)
+    if not is_idle(robot.state()):
+        c = action("cancelOrder")
+        mark = send_instant(robot, c)
+        wait_instant(robot, c, "FINISHED", mark, timeout=robot.t(load_handling["pick"] + 5))
+    if robot.state().get("loads"):
+        p = robot.pose()
+        order = build_order(new_order_id("unload"), 0, [RouteNode(f"unload_{uuid.uuid4().hex[:6]}", p.x, p.y)],
+                            released=1, map_id=p.map_id)
+        order["nodes"][0]["actions"] = [action("drop", blocking="HARD")]
+        mark = robot.send(order)
+        robot.wait_accepted(order, mark)
+        robot.fms.wait_state(lambda x: is_idle(x) and not x.get("loads"),
+                             robot.t(load_handling["drop"] + 5), since=mark, what="load dropped")
+
+
+def pick_and_drop_order(robot):
+    """n0 -> n1 (pick, HARD) -> n2 (drop, HARD)."""
+    route = Route(robot.pose(), count=2)
+    order = build_order(new_order_id(), 0, route.nodes, released=3, map_id=route.map_id)
+    pick = action("pick", {"loadId": f"load_{uuid.uuid4().hex[:6]}"}, blocking="HARD")
+    drop = action("drop", blocking="HARD")
+    order["nodes"][1]["actions"] = [pick]
+    order["nodes"][2]["actions"] = [drop]
+    return route, order, pick, drop
+
+
+def test_pause_during_pick_freezes_it(robot, load_handling, no_load_after):
+    route, order, pick, drop = pick_and_drop_order(robot)
+    order_mark = robot.send(order)
+    robot.wait_accepted(order, order_mark)
+    wait_order_action(robot, pick, "RUNNING", order_mark, robot.drive_timeout(1))
+
+    mark = robot.fms.mark()
+    pause(robot)
+    wait_order_action(robot, pick, "PAUSED", mark, robot.t(3.0))
+    wait_stopped(robot, mark)
+    # Ждём дольше максимальной длительности pick: на паузе время action'а не идёт.
+    assert_holds(robot, load_handling["pick"] + 1.0,
+                 lambda s: order_action_status(s, pick["actionId"]) == "PAUSED" and not s["driving"],
+                 "pick must stay PAUSED and robot must stand while paused")
+
+    mark = robot.fms.mark()
+    unpause(robot)
+    wait_order_action(robot, pick, "FINISHED", mark, robot.t(load_handling["pick"] + 3))
+    assert_stands_while_running(robot, pick, order_mark)
+    s = robot.fms.wait_state(lambda x: is_idle(x), robot.drive_timeout(1) + load_handling["drop"],
+                             since=mark, what="order finished after stopPause")
+    assert order_action_status(s, drop["actionId"]) == "FINISHED"
+    assert s["lastNodeId"] == route.node_id(2)
+    assert not s.get("loads"), "load must be dropped at n2"
+
+
+def test_cancel_during_pick_waits_for_pick_to_finish(robot, load_handling, no_load_after):
+    route, order, pick, drop = pick_and_drop_order(robot)
+    order_mark = robot.send(order)
+    robot.wait_accepted(order, order_mark)
+    wait_order_action(robot, pick, "RUNNING", order_mark, robot.drive_timeout(1))
+
+    c = action("cancelOrder", {"orderId": order["orderId"]})
+    mark = send_instant(robot, c)
+    # pick отменить нельзя (cancelAllowed = false): cancelOrder RUNNING, пока pick не закончится.
+    s = robot.fms.wait_state(
+        lambda x: status_of(x, c["actionId"]) == "RUNNING"
+        and order_action_status(x, pick["actionId"]) == "RUNNING",
+        robot.t(3.0), since=mark, what="cancelOrder RUNNING while pick RUNNING")
+    assert s["nodeStates"] == [] and s["edgeStates"] == []
+    s = wait_order_action(robot, drop, "FAILED", mark, robot.t(3.0))
+
+    s = wait_instant(robot, c, "FINISHED", mark, timeout=robot.t(load_handling["pick"] + 3))
+    assert order_action_status(s, pick["actionId"]) == "FINISHED", \
+        "cancelOrder must finish only after the non-cancellable pick"
+    assert is_idle(s)
+    assert s["lastNodeId"] == route.node_id(1)
+    assert s.get("loads"), "pick finished, load must be on the robot"
+    assert_holds(robot, 1.5, lambda x: not x["driving"], "robot must not drive to n2 after cancelOrder")
+    assert_stands_while_running(robot, pick, order_mark)

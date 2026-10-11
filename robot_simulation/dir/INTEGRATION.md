@@ -28,10 +28,10 @@
 
 ```cmake
 target_sources(robot_simulator PRIVATE
-    src/ActionExecutor.cpp
-    src/PickDropActions.cpp
-    src/RoboticVehicleSimulatorInstantActions.cpp
-    src/action_nodes.cpp            # заменить существующий
+        src/ActionExecutor.cpp
+        ../src/PickDropActions.cpp
+        src/RoboticVehicleSimulatorInstantActions.cpp
+        src/action_nodes.cpp            # заменить существующий
 )
 ```
 

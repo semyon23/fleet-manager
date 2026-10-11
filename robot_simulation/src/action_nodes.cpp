@@ -5,7 +5,7 @@ RobotBehaviorApi& RobotAccess::robot(const BT::TreeNode& node){
     if (!robot_){
         if (!node.config().blackboard->get("@robot_api", robot_) || !robot_){
             throw BT::RuntimeError("[BT] ", node.name(),
-                                   ": 'robot_api' (std::shared_ptr<RobotBehaviorApi>) " "is not on the blackboard");
+                                   ": 'robot_api' (RobotBehaviorApi*) is not on the blackboard");
         }
     }
     return *robot_;

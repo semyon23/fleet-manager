@@ -4,13 +4,17 @@
 
 #include "../vda5050/vda5050.hpp"
 #include <optional>
-
+#include <map>
+#include <set>
 
 class OrderManager {
 public:
     OrderManager(vda5050::State& State, vda5050::Order& Order);
 
     void update(const std::string& json_order);
+
+    void cancel();
+    void set_supported_actions(const std::vector<vda5050::MobileRobotAction>& actions);
 private:
     bool is_idle() const;
     bool is_start_node_in_range(const vda5050::Node& node) const;
@@ -33,7 +37,7 @@ private:
 
     void reject(const Rejection& r, const vda5050::Order* order);
 
-    std::set<std::string> supported_action_types_;
+    std::map<std::string, std::set<vda5050::ActionScope>> action_scopes_;
     bool order_canceled{false};
 };
 
