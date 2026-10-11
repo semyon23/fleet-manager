@@ -4,21 +4,21 @@ find_package(yaml-cpp CONFIG REQUIRED)
 
 add_executable(robot_simulation
         src/rs_main.cpp
-        src/RobotDriveController.cpp
-        src/RobotMessageRouter.cpp
-        src/action_nodes.cpp
-        src/RoboticVehicleSimulator.cpp
-        src/OrderManager.cpp
-        src/StatePublisher.cpp
-        src/factsheet_builder.cpp
-        src/ActionManager.cpp
-        src/ActionExecutor.cpp
-        src/PickDropActions.cpp
-        src/SimulatedAction.cpp
+        src/motion/RobotDriveController.cpp
+        src/app/RobotMessageRouter.cpp
+        src/behavior/action_nodes.cpp
+        src/robot/RoboticVehicleSimulator.cpp
+        src/vda/OrderManager.cpp
+        src/vda/StatePublisher.cpp
+        src/vda/factsheet_builder.cpp
+        src/vda/ActionManager.cpp
+        src/actions/ActionExecutor.cpp
+        src/actions/PickDropActions.cpp
+        src/actions/SimulatedAction.cpp
 )
 
 target_compile_definitions(robot_simulation PRIVATE
-        ROBOT_TREE_XML="${CMAKE_CURRENT_SOURCE_DIR}/robot_tree.xml")
+        ROBOT_TREE_XML="trees/robot_tree.xml")
 
 target_include_directories(robot_simulation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 

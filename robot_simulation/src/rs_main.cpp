@@ -3,11 +3,11 @@
 #include "behaviortree_cpp/bt_factory.h"
 #include <boost/asio/signal_set.hpp>
 
-#include "include/RobotMessageRouter.hpp"
+#include "../include/app/RobotMessageRouter.hpp"
 #include <yaml-cpp/yaml.h>
 #include "../vda5050/vda5050.hpp"
 
-#include "include/action_nodes.hpp"
+#include "include/behavior/action_nodes.hpp"
 #include "../shared/include/logger.hpp"
 
 int main() {
