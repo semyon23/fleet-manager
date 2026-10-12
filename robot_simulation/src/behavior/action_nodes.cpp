@@ -125,7 +125,7 @@ BT::NodeStatus ExecuteNodeActions::onRunning(){
 }
 
 void ExecuteNodeActions::onHalted(){
-    robot(*this).cancel_node_actions();
+    spdlog::info("[behavior_tree][{}] execute actions on halted", robot(*this).name());
 }
 
 // ----------------------------------------------------------------------------

@@ -17,8 +17,10 @@ add_executable(robot_simulation
         src/actions/SimulatedAction.cpp
 )
 
-target_compile_definitions(robot_simulation PRIVATE
-        ROBOT_TREE_XML="/home/ubuntu/fleet-manager/robot_simulation/trees/robot_tree.xml")
+target_compile_definitions(robot_simulation PRIVATE ROBOT_TREE_XML="/home/ubuntu/fleet-manager/robot_simulation/trees/robot_tree.xml")
+
+
+
 
 target_include_directories(robot_simulation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 

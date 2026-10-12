@@ -65,7 +65,6 @@ private:
     void stop_driving() override;
     void start_node_actions() override;
     bool node_actions_done() const override;
-    void cancel_node_actions() override;
     void set_new_base_request(bool value) override;
 
 

@@ -33,7 +33,7 @@ public:
     // --- action'ы узла, на котором стоит робот ---
     virtual void start_node_actions() = 0;       // запустить ещё не начатые
     virtual bool node_actions_done() const = 0;  // все FINISHED или FAILED
-    virtual void cancel_node_actions() = 0;      // отменить то, что можно отменить
+
 
     virtual void set_new_base_request(bool value) = 0;
 };

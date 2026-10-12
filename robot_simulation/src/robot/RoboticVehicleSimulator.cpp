@@ -468,13 +468,17 @@ void RoboticVehicleSimulator::start_node_actions(){
 }
 
 bool RoboticVehicleSimulator::node_actions_done() const{
+    // Узел отработан, когда закончились его action'ы и ничего не мешает ехать дальше:
+    // SOFT/HARD action ребра, выходящего из узла, выполняется здесь же, стоя.
+    if (action_executor_.blocks_driving()) {
+        return false;
+    }
     const auto* n = current_node();
     return !n || action_executor_.is_done(n->actions);
+    // const auto* n = current_node();
+    // return !n || action_executor_.is_done(n->actions);
 }
 
-void RoboticVehicleSimulator::cancel_node_actions(){
-    if (const auto* n = current_node()) action_executor_.cancel(n->actions);
-}
 
 void RoboticVehicleSimulator::set_new_base_request(bool value){
     State_.new_base_request = value;
