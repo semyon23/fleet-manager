@@ -18,7 +18,7 @@ add_executable(robot_simulation
 )
 
 target_compile_definitions(robot_simulation PRIVATE
-        ROBOT_TREE_XML="trees/robot_tree.xml")
+        ROBOT_TREE_XML="/home/ubuntu/fleet-manager/robot_simulation/trees/robot_tree.xml")
 
 target_include_directories(robot_simulation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
@@ -31,3 +31,4 @@ target_link_libraries(robot_simulation
         spdlog::spdlog
         Boost::headers
 )
+#// /home/ubuntu/fleet-manager/robot_simulation/trees/robot_tree.xml

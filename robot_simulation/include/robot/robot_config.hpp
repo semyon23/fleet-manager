@@ -3,17 +3,11 @@
 
 #pragma once
 
-// Конфигурация симулируемого робота: по структуре на каждый компонент
-// и общий RobotConfig, который RobotSimulator раздаёт компонентам.
-// Загрузка из YAML — RobotConfigLoader.hpp.
-
 #include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
 
-// Кто робот и как он называется в топиках VDA 5050:
-// <interface>/<major_version>/<manufacturer>/<serial_number>/<topic>
 struct IdentityConfig {
     std::string serial_number;
     std::string manufacturer;
@@ -28,7 +22,7 @@ struct IdentityConfig {
 struct MqttConfig {
     std::string host = "localhost";
     std::uint16_t port = 1883;
-    std::string client_id;                // пусто — <manufacturer>_<serial_number>
+    std::string client_id;
     std::string username;
     std::string password;
 };

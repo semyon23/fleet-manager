@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <iostream>
+#include <spdlog/spdlog.h>
 
 using vda5050::ActionStatus;
 using vda5050::BlockingType;
@@ -12,7 +13,7 @@ bool is_terminal(ActionStatus s) {
     return s == ActionStatus::Finished || s == ActionStatus::Failed;
 }
 
-bool is_exclusive(BlockingType b) {  // SINGLE / HARD — только поодиночке
+bool is_exclusive(BlockingType b) {
     return b == BlockingType::Single || b == BlockingType::Hard;
 }
 
@@ -65,8 +66,7 @@ void ActionExecutor::set_status(Entry& e, ActionStatus status) {
 }
 
 void ActionExecutor::report_failure(const Entry& e, const std::string& reason) {
-    std::cerr << "[Actions] '" << e.action.action_type << "' (" << e.action.action_id
-              << ") failed: " << reason << '\n';
+    spdlog::error("[actions] type : {}, id : {}, failed : {}",  e.action.action_type, e.action.action_id, reason);
     vda5050::Error err;
     err.error_type = "ACTION_FAILED";  // свой тип: спецификация позволяет добавлять
     err.error_level = vda5050::ErrorLevel::Warning;
@@ -101,8 +101,8 @@ bool ActionExecutor::start(Entry& e) {
         return true;    // статус изменился
     }
     e.running = it->second(e.action, state_);
-    std::cout << "[Actions] '" << e.action.action_type << "' (" << e.action.action_id
-              << ") started\n";
+    spdlog::info("[actions] type : {}, id : {}, started",  e.action.action_type, e.action.action_id);
+
     set_status(e, ActionStatus::Running);
     if (paused_) {
         e.running->pause();
@@ -114,7 +114,6 @@ bool ActionExecutor::start(Entry& e) {
 bool ActionExecutor::update(double dt) {
     bool changed = false;
 
-    // 1. Продвинуть работающие.
     for (auto& e : queue_) {
         if (!e.running || paused_) {
             continue;
@@ -125,8 +124,7 @@ bool ActionExecutor::update(double dt) {
             if (s == ActionStatus::Failed) {
                 report_failure(e, e.running->failure_reason().value_or("action failed"));
             } else {
-                std::cout << "[Actions] '" << e.action.action_type << "' (" << e.action.action_id
-                          << ") finished\n";
+                spdlog::info("[actions] type : {}, id : {}, finished",  e.action.action_type, e.action.action_id);
             }
             e.running.reset();
             e.done = true;

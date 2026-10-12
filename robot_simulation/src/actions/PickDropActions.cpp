@@ -33,7 +33,6 @@ std::vector<vda5050::Load>::iterator find_load(std::vector<vda5050::Load>& loads
     });
 }
 
-// Общая часть pick и drop: отсчёт времени, пауза, запрет отмены.
 class TimedLoadAction : public RunningAction {
 public:
     TimedLoadAction(vda5050::State& state, const vda5050::Action& action, double duration,
