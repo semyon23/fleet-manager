@@ -14,7 +14,7 @@ find_package(protobuf CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 
 #add_subdirectory(shared/mqtt_client)
-
+add_subdirectory(vda5050)
 add_subdirectory(proto)
 add_subdirectory(fleet_control)
 add_subdirectory(fleet_dispatch)

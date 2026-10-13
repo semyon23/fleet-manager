@@ -94,8 +94,8 @@
   </g>
 
   <!-- title -->
-  <text x="56" y="132" fill="#ffffff" font-size="46" font-weight="700">robot_simulation</text>
-  <text x="58" y="172" fill="#a0c4e8" font-size="21">Mobile robot simulator</text>
+  <text x="56" y="132" fill="#ffffff" font-size="46" font-weight="700">Robot_simulation</text>
+  <text x="58" y="172" fill="#a0c4e8" font-size="21">mobile robot simulator</text>
   <text x="58" y="200" fill="#a0c4e8" font-size="21">speaking VDA 5050 v3 over MQTT</text>
   <g font-size="14" font-weight="600">
     <rect x="58" y="226" width="120" height="28" rx="14" fill="#4fd1c5" fill-opacity="0.15" stroke="#4fd1c5"/>

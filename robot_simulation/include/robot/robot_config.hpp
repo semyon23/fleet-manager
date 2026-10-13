@@ -10,7 +10,7 @@
 
 struct IdentityConfig {
     std::string serial_number;
-    std::string manufacturer;
+    std::string manufacturer = "ktc";
     std::string interface_name = "amr";
     std::string major_version = "v3";
 
@@ -22,9 +22,9 @@ struct IdentityConfig {
 struct MqttConfig {
     std::string host = "localhost";
     std::uint16_t port = 1883;
-    std::string client_id;
-    std::string username;
-    std::string password;
+    std::string client_id{""};
+    std::string username{""};
+    std::string password{""};
 };
 
 struct InitialStateConfig {
@@ -42,7 +42,6 @@ struct PublisherConfig {
     std::chrono::milliseconds visualization_interval{200};
 };
 
-// Контроллер движения (RobotDriveController).
 struct MotionConfig {
     double max_speed = 1.0;               // [m/s]
     double max_accel = 0.5;               // [m/s^2] разгон и торможение
@@ -66,7 +65,6 @@ struct LoadHandlingConfig {
     double max_load_mass = 500.0;         // [kg]
 };
 
-// Физика и геометрия для factsheet (build_factsheet).
 struct PhysicalConfig {
     std::string series_name = "MecanumBot";
     std::string series_description = "Simulated robot";
@@ -80,11 +78,12 @@ struct PhysicalConfig {
     std::string software_version = "0.1.0";
 };
 
-// Дерево поведения (BehaviorRunner).
+#ifndef ROBOT_TREE_XML
+#define ROBOT_TREE_XML "default_tree.xml"
+#endif
+
 struct BehaviorTreeConfig {
     std::string xml_path{ROBOT_TREE_XML};
-    bool groot_enabled = true;
-    std::optional<std::uint16_t> groot_port;   // пусто — назначит загрузчик (1667, 1669, ...)
 };
 
 // Цикл симуляции.
@@ -95,7 +94,6 @@ struct SimulationConfig {
 
 struct RobotConfig {
     IdentityConfig identity;
-    MqttConfig mqtt;
     InitialStateConfig initial_state;
     PublisherConfig publisher;
     MotionConfig motion;
@@ -105,6 +103,12 @@ struct RobotConfig {
     SimulationConfig simulation;
 
     const std::string& name() const { return identity.serial_number; }
+};
+
+// Глобальная конфигурация приложения
+struct AppConfig {
+    MqttConfig mqtt;
+    std::vector<RobotConfig> robots;
 };
 
 #endif //ROBOT_CONFIG_HPP

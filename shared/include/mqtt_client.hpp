@@ -14,9 +14,11 @@ namespace asio = boost::asio;
 
 struct MqttClientConfig
 {
-    std::string host = "0.0.0.0";
-    uint port = 1883;
-    std::string client_id = "fleet_manager";
+    std::string host{"0.0.0.0"};
+    uint port{1883};
+    std::string client_id{"fleet_manager"};
+    std::string username{""};
+    std::string password{""};
 };
 
 struct MqttMessage {

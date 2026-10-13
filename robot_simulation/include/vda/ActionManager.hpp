@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "../vda5050/vda5050.hpp"
+#include "vda5050.hpp"
 #include "include/actions/ActionExecutor.hpp"
 #include "OrderManager.hpp"
 #include "include/motion/RobotDriveController.hpp"

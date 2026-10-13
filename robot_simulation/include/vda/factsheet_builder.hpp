@@ -6,7 +6,7 @@
 #include <string>
 
 #include "include/robot/robot_config.hpp"
-#include "../vda5050/vda5050.hpp"
+#include "vda5050.hpp"
 
 // supported_actions — action'ы, для которых у робота есть обработчик
 // (ActionExecutor::supported_types()). Обязательные cancelOrder/startPause/stopPause

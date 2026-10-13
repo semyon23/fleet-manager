@@ -1,7 +1,6 @@
 #include "include/actions/ActionExecutor.hpp"
 
 #include <algorithm>
-#include <iostream>
 #include <spdlog/spdlog.h>
 
 using vda5050::ActionStatus;

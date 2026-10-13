@@ -5,17 +5,35 @@
 
 #include "../include/app/RobotMessageRouter.hpp"
 #include <yaml-cpp/yaml.h>
-#include "../vda5050/vda5050.hpp"
 
 #include "include/behavior/action_nodes.hpp"
 #include "../shared/include/logger.hpp"
+#include "include/app/config_loader.hpp"
 
-int main() {
+
+int main(){
     if (!Logger::init()) return 1;
     spdlog::info("[system] Robot simulation started");
+    AppConfig app_config{};
+    try{
+        app_config = ConfigLoader::load("/home/ubuntu/fleet-manager/robot_simulation/config/config.yaml");
+        spdlog::info("[System][config] Mqtt broker address: "
+                     "host {}:{}, (username = {}, password = {}) ", app_config.mqtt.host, app_config.mqtt.port, app_config.mqtt.username, app_config.mqtt.password);
+        spdlog::info("[System][config] Total robots : {}", app_config.robots.size());
+
+        for (auto& robot : app_config.robots){
+            robot.identity.serial_number = robot.identity.interface_name + robot.identity.serial_number;
+            spdlog::info("[System][config] Robot name: {}, "
+                         "(initial pos x:{}, y:{}, t:{})", robot.identity.serial_number, robot.initial_state.x, robot.initial_state.y, robot.initial_state.theta);
+        }
+    } catch (const std::exception& e){
+        spdlog::error("[System] Initialization failed: {}", e.what());
+        return 1;
+    }
+
     asio::io_context io_ctx;
 
-    MqttClientConfig mqtt_config{ "0.0.0.0", 1883, "sim_client"};
+    MqttClientConfig mqtt_config{ app_config.mqtt.host, app_config.mqtt.port, app_config.mqtt.client_id, app_config.mqtt.username, app_config.mqtt.password };
 
     auto mqtt_client = std::make_shared<MqttClientHandler>(io_ctx, mqtt_config);
     mqtt_client->start();
@@ -27,14 +45,13 @@ int main() {
     BT::BehaviorTreeFactory factory;
     register_action_nodes(factory);
 
-    const int number_robots = 1;
+    const size_t number_robots{app_config.robots.size()};
     std::vector<std::shared_ptr<RoboticVehicleSimulator>> robots;
     robots.reserve(number_robots);
+
     for (int i = 0; i < number_robots; ++i) {
         std::string robot_name = std::format("amr{}", i + 1);
-        RobotConfig robot_config;
-        robot_config.identity.serial_number = robot_name;
-        robot_config.identity.manufacturer = "ktc";
+        RobotConfig robot_config{app_config.robots[i]};
         auto robot = std::make_shared<RoboticVehicleSimulator>(io_ctx.get_executor(), robot_config, publisher_channel);
         robot->init_behavior_tree(factory);
         robot->on_link_up();
@@ -59,7 +76,7 @@ int main() {
     });
 
     io_ctx.run();
-    // std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
     return 0;
 }
 

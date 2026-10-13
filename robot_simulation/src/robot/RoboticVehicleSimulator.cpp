@@ -31,16 +31,9 @@ RoboticVehicleSimulator::RoboticVehicleSimulator(asio::any_io_executor ex, Robot
     action_manager_(State_, action_executor_, driver_, order_manager_, publisher_),
     simulation_timer_(executor){
 
-    // register_pick_drop(action_executor_, config_.load_handling);
-    // const auto action_types = action_executor_.supported_types();
-    // publisher_.set_factsheet(build_factsheet(config_, action_types));
-    // order_manager_.set_supported_actions(action_types);
-
     register_pick_drop(action_executor_, config_.load_handling);
     register_simulated_action(action_executor_);
 
-    // Factsheet — единственный источник того, какие action'ы и где робот принимает:
-    // по нему же OrderManager проверяет order (тип и область: узел / ребро).
     auto factsheet = build_factsheet(config_, action_executor_.supported_types());
     order_manager_.set_supported_actions(factsheet.protocol_features.mobile_robot_actions);
     publisher_.set_factsheet(std::move(factsheet));
@@ -222,7 +215,6 @@ void RoboticVehicleSimulator::on_node_reached(const std::string& node_id){
                             [&](const auto& e) { return e.sequence_id < seq; }),
              es.end());
 
-    // 2. Узел пройден: убрать из nodeStates, обновить lastNodeId / lastNodeSequenceId.
     auto& ns = State_.node_states;
     ns.erase(std::remove_if(ns.begin(), ns.end(),
                             [&](const auto& n) { return n.sequence_id <= seq; }),
@@ -233,9 +225,9 @@ void RoboticVehicleSimulator::on_node_reached(const std::string& node_id){
     action_executor_.enqueue(node->actions);
 
     if (const auto* edge_out = find_edge(seq + 1); edge_out && edge_out->released) {
-        action_executor_.enqueue(edge_out->actions); // было trigger_actions(edge_out->actions)
+        action_executor_.enqueue(edge_out->actions);
     }
-    spdlog::info("[{}] node : {}, seq : {}", name(), node_id, seq);
+    spdlog::info("[simulator][{}] node : {}, seq : {}", name(), node_id, seq);
 }
 
 const vda5050::Node* RoboticVehicleSimulator::find_next_node(const std::string& node_id) const{

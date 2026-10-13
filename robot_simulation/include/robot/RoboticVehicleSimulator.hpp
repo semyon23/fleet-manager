@@ -4,7 +4,7 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/experimental/channel.hpp>
-#include "../vda5050/vda5050.hpp"
+#include "vda5050.hpp"
 #include "behaviortree_cpp/bt_factory.h"
 #include "include/vda/StatePublisher.hpp"
 #include "include/vda/OrderManager.hpp"

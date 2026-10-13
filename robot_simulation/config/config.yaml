@@ -1,10 +1,67 @@
-project_name: "Super App"
-version: 2.5
-enabled: False
-database:
-  host: "0.0.0.0"
-  port: 5432
-tags:
-  - cxx
-  - yaml
-  - vcpkg
+mqtt:
+  host: "127.0.0.1"
+  port: 1883
+  client_id: "simulator"
+  username: "user"
+  password: "11111111"
+
+initial_state:
+  map_id: "map_1"
+  map_version: "1"
+  x: 0.0
+  y: 0.0
+  theta: 0.0
+  battery_soc: 100.0
+
+publisher:
+  min_state_interval_ms: 100
+  max_state_interval_ms: 30000
+  visualization_interval_ms: 200
+
+motion:
+  max_speed: 1.0
+  max_accel: 0.5
+  max_omega: 1.0
+  k_omega: 3.0
+  switch_radius: 0.25
+  min_corner_speed: 0.1
+  lin_tol: 0.02
+  ang_tol: 0.01
+
+load_handling:
+  pick_time: 5.0
+  drop_time: 5.0
+  time_jitter: 0.2
+  failure_probability: 0.0
+  seed: 42
+  lhd: "LHD1"
+  load_type: "EPAL"
+  max_load_mass: 500.0
+
+physical:
+  series_name: "MecanumBot"
+  series_description: "Simulated robot"
+  kinematics: "DIFFERENTIAL"
+  robot_class: "CARRIER"
+  navigation_type: "VIRTUAL_LINE_GUIDED"
+  length: 0.8
+  width: 0.6
+  min_height: 0.25
+  max_height: 0.4
+  software_version: "0.1.0"
+
+behavior_tree:
+  xml_path: "/home/ubuntu/fleet-manager/robot_simulation/trees/robot_tree.xml"
+
+simulation:
+  tick_period_ms: 100
+  battery_drain_per_meter: 0.01
+
+robots:
+  - serial_number: 1
+    initial_state:
+      x: 1.0
+      y: 2.0
+  - serial_number: 2
+  - serial_number: 3
+  - serial_number: 4
