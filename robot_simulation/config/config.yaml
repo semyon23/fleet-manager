@@ -11,7 +11,7 @@ initial_state:
   x: 0.0
   y: 0.0
   theta: 0.0
-  battery_soc: 100.0
+  battery_soc: 80.0
 
 publisher:
   min_state_interval_ms: 100
@@ -51,16 +51,14 @@ physical:
   software_version: "0.1.0"
 
 behavior_tree:
-  xml_path: "/home/ubuntu/fleet-manager/robot_simulation/trees/robot_tree.xml"
+  xml_path: "/home/ubuntu/CLionProjects/fleet-manager/robot_simulation/trees/robot_tree.xml"
 
 simulation:
   tick_period_ms: 100
-  battery_drain_per_meter: 0.01
 
 robots:
   - serial_number: 1
-    initial_state:
-      x: 1.0
-      y: 2.0
-  - serial_number: 2
+
+
+
 

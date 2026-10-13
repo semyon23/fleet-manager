@@ -8,6 +8,14 @@
 #include <optional>
 #include <string>
 
+struct MqttConfig {
+    std::string host = "localhost";
+    std::uint32_t port = 1883;
+    std::string client_id{""};
+    std::string username{""};
+    std::string password{""};
+};
+
 struct IdentityConfig {
     std::string serial_number;
     std::string manufacturer = "ktc";
@@ -19,21 +27,13 @@ struct IdentityConfig {
     }
 };
 
-struct MqttConfig {
-    std::string host = "localhost";
-    std::uint32_t port = 1883;
-    std::string client_id{""};
-    std::string username{""};
-    std::string password{""};
-};
-
 struct InitialStateConfig {
     std::string map_id = "map_1";
     std::string map_version = "1";
     double x = 0.0;                       // [m]
     double y = 0.0;                       // [m]
     double theta = 0.0;                   // [rad]
-    double battery_soc = 100.0;           // [%]
+    double battery_soc = 80.0;           // [%]
 };
 
 struct PublisherConfig {
@@ -86,14 +86,26 @@ struct BehaviorTreeConfig {
     std::string xml_path{ROBOT_TREE_XML};
 };
 
-// Цикл симуляции.
+
 struct SimulationConfig {
     std::chrono::milliseconds tick_period{100};
-    double battery_drain_per_meter = 0.01;     // [% / m]
+};
+
+struct BatteryConfig {
+    double drain_per_meter = 0.01;     // [% / m] расход в движении
+    double drain_idle_per_s = 0.001;   // [% / s] расход стоя
+    double charge_per_s = 0.5;         // [% / s] 0 → 100 % примерно за 3 минуты, удобно для тестов
+    double charging_start_time = 2.0;  // [s] startCharging в RUNNING ("стыковка")
+    double voltage = 48.0;             // [V]
+    // Уровни для factsheet (batteryCharging): по ним fms решает, когда заряжать.
+    double critical_low_level = 10.0;     // [%]
+    double minimum_desired_level = 30.0;  // [%]
+    double maximum_desired_level = 90.0;  // [%]
 };
 
 struct RobotConfig {
     IdentityConfig identity;
+    BatteryConfig battery;
     InitialStateConfig initial_state;
     PublisherConfig publisher;
     MotionConfig motion;

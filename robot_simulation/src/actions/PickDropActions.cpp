@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <memory>
 #include <random>
-
+#include "vda5050.hpp"
 namespace {
 
 std::optional<std::string> string_param(const vda5050::Action& action, const std::string& key) {

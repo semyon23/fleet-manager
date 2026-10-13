@@ -15,6 +15,7 @@ add_executable(robot_simulation
         src/actions/ActionExecutor.cpp
         src/actions/PickDropActions.cpp
         src/actions/SimulatedAction.cpp
+        src/actions/ChargingActions.cpp
 )
 
 target_compile_definitions(robot_simulation PRIVATE ROBOT_TREE_XML="/home/ubuntu/fleet-manager/robot_simulation/trees/robot_tree.xml")

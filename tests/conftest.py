@@ -8,7 +8,7 @@ import re
 import time
 import uuid
 from pathlib import Path
-
+from action_helpers import send_instant_actions
 import pytest
 
 from fms_client import FmsClient, RobotTarget
@@ -45,7 +45,9 @@ def fms(target: RobotTarget, invariants: InvariantChecker):
     client = FmsClient(target, client_id=f"vda-robot-tests-{uuid.uuid4().hex[:6]}")
     client.add_listener(invariants)
     client.connect()
-    # Первый state: робот шлёт его при подключении и не реже раза в 30 с.
+    # Стоящий робот присылает state раз в 30 с; не ждём — просим сразу.
+    send_instant_actions(client, [{"actionId": f"stateRequest-{uuid.uuid4().hex[:8]}",
+                               "actionType": "stateRequest", "blockingType": "NONE"}])
     try:
         client.wait_message("state", lambda s: True, timeout=35.0, what="first state")
     except TimeoutError:

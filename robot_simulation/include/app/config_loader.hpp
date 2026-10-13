@@ -155,8 +155,6 @@ private:
         if (!node) return c;
         if (node["tick_period_ms"])
             c.tick_period = std::chrono::milliseconds(node["tick_period_ms"].as<int64_t>());
-        if (node["battery_drain_per_meter"])
-            c.battery_drain_per_meter = node["battery_drain_per_meter"].as<double>();
         return c;
     }
 

@@ -2,7 +2,7 @@
 #include "include/robot/RoboticVehicleSimulator.hpp"
 #include "include/vda/factsheet_builder.hpp"
 #include "include/actions/SimulatedAction.hpp"
-
+#include "include/actions/ChargingActions.hpp"
 #include "../../shared/include/coro_guard.hpp"
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -33,6 +33,8 @@ RoboticVehicleSimulator::RoboticVehicleSimulator(asio::any_io_executor ex, Robot
 
     register_pick_drop(action_executor_, config_.load_handling);
     register_simulated_action(action_executor_);
+    register_charging_actions(action_executor_, config_.battery);
+
 
     auto factsheet = build_factsheet(config_, action_executor_.supported_types());
     order_manager_.set_supported_actions(factsheet.protocol_features.mobile_robot_actions);
@@ -68,9 +70,13 @@ void RoboticVehicleSimulator::init_state(){
     vda5050::MobileRobotPosition position;
     position.localized = true;
     position.map_id = config_.initial_state.map_id;
-    position.x = 0.0;
-    position.y = 0.0;
-    position.theta = 0.0;
+    position.x = config_.initial_state.x;
+    position.y = config_.initial_state.y;
+    position.theta = config_.initial_state.theta;
+
+    State_.power_supply.state_of_charge = config_.initial_state.battery_soc;
+    State_.power_supply.battery_voltage = config_.battery.voltage;
+    State_.power_supply.charging = false;
 
     State_.mobile_robot_position = position;
 
@@ -179,7 +185,7 @@ void RoboticVehicleSimulator::simulation_tick(double dt){
     vel.omega = driver_.omega();
 
     State_.driving = std::fabs(vel.vx.value()) > 1e-3 || std::abs(vel.omega.value()) > 1e-3;
-
+    update_battery(dt);
     action_executor_.update(dt);
     action_manager_.update_pending_cancel();
 
@@ -260,39 +266,21 @@ const vda5050::Node* RoboticVehicleSimulator::current_node() const{
     return nullptr;
 }
 
-
-// void RoboticVehicleSimulator::finish_edge_actions(const vda5050::Edge& edge){
-//     using vda5050::ActionStatus;
-//     for (const auto& action : edge.actions) {
-//         auto* st = find_action_state(action.action_id);
-//         if (!st || st->action_status == ActionStatus::Finished ||
-//             st->action_status == ActionStatus::Failed) {
-//             continue;
-//             }
-//         // Запускался — завершён; так и не начался — не выполнен.
-//         st->action_status = st->action_status == ActionStatus::Waiting ? ActionStatus::Failed: ActionStatus::Finished;
-//     }
-// }
-
-// vda5050::ActionState* RoboticVehicleSimulator::find_action_state(const std::string& action_id){
-//     for (auto& a : State_.action_states) {
-//         if (a.action_id == action_id) {
-//             return &a;
-//         }
-//     }
-//     return nullptr;
-// }
-
-// void RoboticVehicleSimulator::trigger_actions(const std::vector<vda5050::Action>& actions){
-//     for (const auto& action : actions) {
-//         auto* st = find_action_state(action.action_id);
-//         if (!st || st->action_status != vda5050::ActionStatus::Waiting) {
-//             continue;
-//         }
-//         spdlog::info("[{}] action : {}, ({}) executed", name(), action.action_type , action.action_id);
-//         st->action_status = vda5050::ActionStatus::Finished;
-//     }
-// }
+void RoboticVehicleSimulator::update_battery(double dt){
+    auto& ps = State_.power_supply;
+    const auto& b = config_.battery;
+    if (ps.charging && State_.driving) {
+        ps.charging = false;
+        spdlog::info("[simulator][{}] charging stopped: robot started driving", name());
+    }
+    if (ps.charging) {
+        ps.state_of_charge += b.charge_per_s * dt;
+    } else {
+        const double meters = std::fabs(driver_.speed()) * dt;
+        ps.state_of_charge -= b.drain_per_meter * meters + b.drain_idle_per_s * dt;
+    }
+    ps.state_of_charge = std::clamp(ps.state_of_charge, 0.0, 100.0);   // <algorithm>
+}
 
 bool RoboticVehicleSimulator::is_blocking(const vda5050::Node& node){
     if (has_blocking(node.actions)) {
@@ -300,15 +288,6 @@ bool RoboticVehicleSimulator::is_blocking(const vda5050::Node& node){
     }
     const auto* edge_out = find_edge(node.sequence_id + 1);
     return edge_out && edge_out->released && has_blocking(edge_out->actions);
-    // for (auto it = node.actions.begin(); it != node.actions.end(); ++it) {
-    //     const vda5050::Action& a = *it;
-    //
-    //     if (a.blocking_type == vda5050::BlockingType::Soft ||
-    //         a.blocking_type == vda5050::BlockingType::Hard) {
-    //         return true;
-    //         }
-    // }
-    // return false;
 }
 
 std::vector<DriveWaypoint> RoboticVehicleSimulator::build_segment(std::uint32_t after_seq){
@@ -398,16 +377,6 @@ bool RoboticVehicleSimulator::start_segment(){
     }
     driver_.set_path(std::move(wps));
     return true;
-    // if (action_executor_.blocks_driving()) {
-    //     return false;   // SOFT/HARD в работе или в очереди — стоим
-    // }
-    // std::vector<DriveWaypoint> wps = build_segment(this->State_.last_node_sequence_id);
-    //
-    // if (wps.empty()) {
-    //     return false;
-    // }
-    // driver_.set_path(std::move(wps));
-    // return true;
 }
 
 bool RoboticVehicleSimulator::extend_segment(){

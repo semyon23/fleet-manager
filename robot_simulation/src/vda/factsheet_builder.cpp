@@ -141,6 +141,14 @@ v::ProtocolFeatures protocol_features(const std::set<std::string>& handlers) {
             a.pause_allowed = true;
             a.cancel_allowed = true;
             actions.push_back(std::move(a));
+        } else if (type == v::action_type::kStartCharging || type == v::action_type::kStopCharging) {
+            const bool start = type == v::action_type::kStartCharging;
+            auto a = make_action(type,
+                                 start ? "Start charging; finishes when charging has started" : "Stop charging",
+                                 {ActionScope::Instant, ActionScope::Node}, {BlockingType::Hard});
+            a.pause_allowed = false;
+            a.cancel_allowed = false;
+            actions.push_back(std::move(a));
         } else {
             // Свой action без описания параметров: на узле, блокирующий.
             actions.push_back(make_action(type, "Custom action", {ActionScope::Node},
@@ -205,6 +213,12 @@ vda5050::Factsheet build_factsheet(const RobotConfig& config,
 
     v::MobileRobotConfiguration rc;
     rc.versions = std::vector<v::VersionInfo>{{"softwareVersion", config.physical.software_version}};
+    v::BatteryCharging charging;
+    charging.critical_low_charging_level = config.battery.critical_low_level;
+    charging.minimum_desired_charging_level = config.battery.minimum_desired_level;
+    charging.maximum_desired_charging_level = config.battery.maximum_desired_level;
+    rc.battery_charging = charging;
+
     f.mobile_robot_configuration = rc;
     return f;
 }

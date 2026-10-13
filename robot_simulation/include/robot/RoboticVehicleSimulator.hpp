@@ -41,12 +41,10 @@ private:
     void init_state();
     asio::awaitable<void> run_simulation_loop();
     void simulation_tick(double dt);
+    void update_battery(double dt);
     void on_node_reached(const std::string& node_id);
     const vda5050::Node* find_next_node(const std::string& node_id) const;
     const vda5050::Edge* find_edge(std::uint32_t sequence_id);
-    //void finish_edge_actions(const vda5050::Edge& edge);
-    //vda5050::ActionState* find_action_state(const std::string& action_id);
-    //void trigger_actions(const std::vector<vda5050::Action>& actions);
     const vda5050::Node* current_node() const;
     std::vector<DriveWaypoint> build_segment(std::uint32_t after_seq);
     bool is_blocking(const vda5050::Node& node);
