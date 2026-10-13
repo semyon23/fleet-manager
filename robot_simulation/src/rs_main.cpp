@@ -32,8 +32,8 @@ int main(){
     }
 
     asio::io_context io_ctx;
-
-    MqttClientConfig mqtt_config{ app_config.mqtt.host, app_config.mqtt.port, app_config.mqtt.client_id, app_config.mqtt.username, app_config.mqtt.password };
+    auto& [host, port, id, user, pass] = app_config.mqtt;
+    MqttClientConfig mqtt_config{host, port, id, user, pass};
 
     auto mqtt_client = std::make_shared<MqttClientHandler>(io_ctx, mqtt_config);
     mqtt_client->start();
@@ -50,7 +50,6 @@ int main(){
     robots.reserve(number_robots);
 
     for (int i = 0; i < number_robots; ++i) {
-        std::string robot_name = std::format("amr{}", i + 1);
         RobotConfig robot_config{app_config.robots[i]};
         auto robot = std::make_shared<RoboticVehicleSimulator>(io_ctx.get_executor(), robot_config, publisher_channel);
         robot->init_behavior_tree(factory);
@@ -76,7 +75,6 @@ int main(){
     });
 
     io_ctx.run();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
     return 0;
 }
 

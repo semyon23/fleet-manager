@@ -21,7 +21,7 @@ struct IdentityConfig {
 
 struct MqttConfig {
     std::string host = "localhost";
-    std::uint16_t port = 1883;
+    std::uint32_t port = 1883;
     std::string client_id{""};
     std::string username{""};
     std::string password{""};
