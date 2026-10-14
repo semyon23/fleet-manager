@@ -10,27 +10,47 @@
 #include "../shared/include/logger.hpp"
 #include "include/app/config_loader.hpp"
 
+void validateAndFilterRobots(AppConfig& config) {
+    std::unordered_set<std::string> seen_serials;
+
+    for (auto it = config.robots.begin(); it != config.robots.end(); /* шаг пустой */) {
+
+        it->identity.serial_number = it->identity.interface_name + it->identity.serial_number;
+        if (seen_serials.count(it->identity.serial_number) > 0) {
+            spdlog::warn("[System][config] Duplicate robot serial number detected: {}. Removing from config.",
+                         it->identity.serial_number);
+            it = config.robots.erase(it);
+        } else {
+            seen_serials.insert(it->identity.serial_number);
+
+            spdlog::trace("[System][config] Robot name: {}, (initial pos x:{}, y:{}, t:{}) (battery voltage:{})",
+                          it->identity.serial_number,
+                          it->initial_state.x,
+                          it->initial_state.y,
+                          it->initial_state.theta,
+                          it->battery.voltage);
+
+            ++it;
+        }
+    }
+}
 
 int main(){
     if (!Logger::init()) return 1;
     spdlog::info("[system] Robot simulation started");
     AppConfig app_config{};
     try{
-        app_config = ConfigLoader::load("/home/ubuntu/CLionProjects/fleet-manager/robot_simulation/config/config.yaml");
+        app_config = ConfigLoader::load("/home/ubuntu/fleet-manager/robot_simulation/config/config.yaml");
 
-        spdlog::info("[System][config] Mqtt broker address: "
+        spdlog::trace("[System][config] Mqtt broker address: "
                      "host {}:{}, (username = {}, password = {}) ", app_config.mqtt.host, app_config.mqtt.port, app_config.mqtt.username, app_config.mqtt.password);
-        spdlog::info("[System][config] Total robots : {}", app_config.robots.size());
-
-        for (auto& robot : app_config.robots){
-            robot.identity.serial_number = robot.identity.interface_name + robot.identity.serial_number;
-            spdlog::info("[System][config] Robot name: {}, "
-                         "(initial pos x:{}, y:{}, t:{})", robot.identity.serial_number, robot.initial_state.x, robot.initial_state.y, robot.initial_state.theta);
-        }
+        spdlog::trace("[System][config] Total robots : {}", app_config.robots.size());
     } catch (const std::exception& e){
         spdlog::error("[System] Initialization failed: {}", e.what());
         return 1;
     }
+    validateAndFilterRobots(app_config);
+    spdlog::trace("[System][config] Total robots : {}", app_config.robots.size());
 
     asio::io_context io_ctx;
     auto& [host, port, id, user, pass] = app_config.mqtt;
@@ -71,7 +91,6 @@ int main(){
             }
             mqtt_client->stop();
             publisher_channel->cancel();
-           // io_ctx.stop();
         }
     });
 

@@ -27,7 +27,7 @@ public:
         PhysicalConfig common_physical = parse_physical(config["physical"]);
         BehaviorTreeConfig common_behavior_tree = parse_behavior_tree(config["behavior_tree"]);
         SimulationConfig common_simulation = parse_simulation(config["simulation"]);
-
+        BatteryConfig common_battery_config = parse_battery_config(config["battery_config"]);
         if (!config["robots"]) {
             throw std::runtime_error("Configuration error: Top-level key 'robots' is missing in YAML file.");
         }
@@ -56,13 +56,16 @@ public:
             rc.physical      = parse_section_or_default(robot_node, "physical",      common_physical,      parse_physical);
             rc.behavior_tree = parse_section_or_default(robot_node, "behavior_tree", common_behavior_tree, parse_behavior_tree);
             rc.simulation    = parse_section_or_default(robot_node, "simulation",    common_simulation,    parse_simulation);
-
+            rc.battery       = parse_section_or_default(robot_node, "battery_config",common_battery_config,parse_battery_config);
             app_config.robots.push_back(rc);
         }
 
         return app_config;
     }
 
+
+
+private:
     static MqttConfig parse_mqtt(const YAML::Node& node) {
         MqttConfig c;
         if (!node) return c;
@@ -74,7 +77,6 @@ public:
         return c;
     }
 
-private:
     static InitialStateConfig parse_initial_state(const YAML::Node& node) {
         InitialStateConfig c;
         if (!node) return c;
@@ -84,6 +86,20 @@ private:
         if (node["y"])            c.y = node["y"].as<double>();
         if (node["theta"])        c.theta = node["theta"].as<double>();
         if (node["battery_soc"])  c.battery_soc = node["battery_soc"].as<double>();
+        return c;
+    }
+
+    static BatteryConfig parse_battery_config(const YAML::Node& node){
+        BatteryConfig c;
+        if (!node) return c;
+        if (node["drain_per_meter"])        c.drain_per_meter = node["drain_per_meter"].as<double>();
+        if (node["drain_idle_per_s"])       c.drain_idle_per_s = node["drain_idle_per_s"].as<double>();
+        if (node["charge_per_s"])           c.charge_per_s = node["charge_per_s"].as<double>();
+        if (node["charging_start_time"])    c.charging_start_time = node["charging_start_time"].as<double>();
+        if (node["voltage"])                c.voltage = node["voltage"].as<double>();
+        if (node["critical_low_level"])     c.critical_low_level = node["critical_low_level"].as<double>();
+        if (node["minimum_desired_level"])  c.minimum_desired_level = node["minimum_desired_level"].as<double>();
+        if (node["maximum_desired_level"])  c.maximum_desired_level = node["maximum_desired_level"].as<double>();
         return c;
     }
 

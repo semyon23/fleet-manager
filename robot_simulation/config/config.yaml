@@ -13,6 +13,18 @@ initial_state:
   theta: 0.0
   battery_soc: 80.0
 
+battery_config:
+  drain_per_meter: 0.01       #[% / m] расход в движении
+  drain_idle_per_s: 0.001     #[% / s] расход стоя
+  charge_per_s: 0.5           #[% / s] 0 → 100 % примерно за 3 минуты, удобно для тестов
+  charging_start_time: 2.0    #[s] startCharging в RUNNING ("стыковка")
+  voltage: 48.0               #[V]
+ #(batteryCharging): по ним fms решает, когда заряжать.
+  critical_low_level: 10.0    #[%]
+  minimum_desired_level: 30.0 #[%]
+  maximum_desired_level: 90.0 #[%]
+
+
 publisher:
   min_state_interval_ms: 100
   max_state_interval_ms: 30000
@@ -51,14 +63,16 @@ physical:
   software_version: "0.1.0"
 
 behavior_tree:
-  xml_path: "/home/ubuntu/CLionProjects/fleet-manager/robot_simulation/trees/robot_tree.xml"
+  xml_path: "/home/ubuntu/fleet-manager/robot_simulation/trees/robot_tree.xml"
 
 simulation:
   tick_period_ms: 100
 
 robots:
   - serial_number: 1
-
-
+  - serial_number: 2
+  - serial_number: 2
+  - serial_number: 4
+  - serial_number: 4
 
 
