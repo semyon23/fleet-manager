@@ -6,6 +6,7 @@
 #include <yaml-cpp/yaml.h>
 #include "include/robot/robot_config.hpp"
 class ConfigLoader {
+
 public:
     static AppConfig load(const std::string& file_path) {
         YAML::Node config;
