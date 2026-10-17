@@ -1,0 +1,221 @@
+// fleet_control <-> fleet_dispatch.
+//
+// Унарные вызовы: control -> dispatch (роботы, миссии, пауза).
+// Серверные стримы: dispatch -> control (статусы роботов, статусы миссий).
+//
+// Ошибки — через gRPC status code, без полей success/message в ответах:
+//   INVALID_ARGUMENT     — запрос некорректен (пустой id, пустая миссия, неизвестный action_type, ...)
+//   NOT_FOUND            — нет такого робота / миссии
+//   ALREADY_EXISTS       — тот же id, но другие данные
+//   FAILED_PRECONDITION  — нельзя сейчас (робот занят, offline, не в AUTOMATIC, ...)
+//   UNAVAILABLE          — dispatch останавливается
+// Текст ошибки — в status message.
+//
+// Все изменяющие вызовы идемпотентны по id: повтор того же запроса (например, после
+// переподключения control) возвращает OK и ничего не меняет.
+//
+// Проверка живости — стандартный grpc.health.v1.Health (grpc::EnableDefaultHealthCheckService),
+// в этом файле не описывается.
+//
+// Версия v1 — зафиксирована 2026-10-17 для начала реализации. Дальше только совместимые изменения:
+// новые поля — с новыми номерами; номера не переиспользуются; удалённое поле — в `reserved`;
+// смысл существующих полей не меняется. Несовместимое — только в новом пакете (…v2).
+
+syntax = "proto3";
+
+package fms.dispatch.v1;
+
+import "fms_types.proto";
+
+service FleetDispatch {
+  // ---------------------------------------------------------------- роботы
+
+  // Начать вести робота: подписка на его state/connection/factsheet, создание RobotSession.
+  rpc AddRobot(AddRobotRequest) returns (AddRobotResponse);
+
+  // Перестать вести робота. Активная миссия отменяется (cancelOrder), retained
+  // connection/factsheet робота очищаются, сессия удаляется.
+  rpc RemoveRobot(RemoveRobotRequest) returns (RemoveRobotResponse);
+
+  // ---------------------------------------------------------------- миссии
+
+  // Принять миссию для назначенного робота и сразу начать выполнять.
+  // У робота максимум одна активная миссия: занят — FAILED_PRECONDITION.
+  // Ответ значит "принято и дерево построено", а не "робот принял order":
+  // дальнейшее — в StreamMissionStatus.
+  rpc AddMission(AddMissionRequest) returns (AddMissionResponse);
+
+  // Отменить миссию. Асинхронно: ответ сразу, статус CANCELING -> CANCELED придёт в стриме,
+  // когда робот подтвердит cancelOrder.
+  rpc CancelMission(CancelMissionRequest) returns (CancelMissionResponse);
+
+  // Изменить маршрут текущего шага MoveStep (трафик):
+  //   - выдать роботу следующие узлы (расширить base);
+  //   - и/или заменить невыданную часть маршрута (horizon) — объезд, другая цель.
+  // Превращается в VDA order update: тот же orderId, orderUpdateId + 1, первый узел — последний
+  // узел base (stitching). Released-часть не меняется никогда: по VDA её нельзя отозвать.
+  // Ответ — после отправки update'а роботу; принял ли робот — MoveProgress.confirmed_revision
+  // и update_rejected в StreamMissionStatus.
+  // Работает, пока шаг RUNNING, в том числе на паузе.
+  rpc ExtendMission(ExtendMissionRequest) returns (ExtendMissionResponse);
+
+  // ---------------------------------------------------------------- робот
+
+  // VDA startPause / stopPause. Действует на робота, а не на миссию.
+  rpc PauseRobot(PauseRobotRequest) returns (PauseRobotResponse);
+  rpc ResumeRobot(ResumeRobotRequest) returns (ResumeRobotResponse);
+
+  // VDA initializePosition: задать роботу позу и узел графа. Для подключения робота к графу
+  // (оператор поставил робота на узел) и после смены карты. Только когда у робота нет
+  // активной миссии, иначе FAILED_PRECONDITION. Ответ — после подтверждения роботом
+  // (instantActionStates FINISHED); FAILED — FAILED_PRECONDITION с текстом ошибки робота.
+  rpc InitializePosition(InitializePositionRequest) returns (InitializePositionResponse);
+
+  // ---------------------------------------------------------------- стримы
+  //
+  // Первое сообщение — полный снимок, дальше изменения. При обрыве control просто
+  // переподписывается и снова получает снимок — отдельный GetSnapshot не нужен.
+  // У каждого подписчика своя очередь: два клиента получают каждый все сообщения.
+
+  rpc StreamRobotStatus(StreamRobotStatusRequest) returns (stream RobotStatusUpdate);
+  rpc StreamMissionStatus(StreamMissionStatusRequest) returns (stream MissionStatusUpdate);
+
+  // ---------------------------------------------------------------- позже
+  // rpc SignalMission(SignalMissionRequest) returns (SignalMissionResponse);  // WaitStep.signal
+}
+
+// =================================================================== роботы
+
+message AddRobotRequest {
+  string robot_id = 1;        // id в fms
+  string manufacturer = 2;    // VDA manufacturer  -> топик amr/v3/{manufacturer}/{serial_number}/...
+  string serial_number = 3;   // VDA serialNumber
+}
+message AddRobotResponse {
+  fms.v1.RobotStatus status = 1;   // что dispatch уже знает о роботе (retained connection/factsheet)
+}
+
+message RemoveRobotRequest {
+  string robot_id = 1;
+}
+message RemoveRobotResponse {}
+
+// =================================================================== миссии
+
+message AddMissionRequest {
+  fms.v1.Mission mission = 1;
+}
+message AddMissionResponse {
+  fms.v1.MissionStatus status = 1;  // начальный статус: RUNNING, все шаги PENDING, action_id заполнены
+}
+
+message CancelMissionRequest {
+  string mission_id = 1;
+}
+message CancelMissionResponse {}
+
+// Индексы ниже — в текущем маршруте шага: MoveStep.nodes с учётом всех прошлых замен хвоста.
+// Маршрут: route[0] — стартовый узел шага, route[0 .. released_nodes-1] — base, остальное — horizon.
+message ExtendMissionRequest {
+  string mission_id = 1;
+  string move_node_id = 2;   // MissionNode.id шага MoveStep; должен быть текущим (RUNNING) шагом
+
+  // Номер правки этого шага: первая — 1, дальше +1. Защищает от повторов и гонок:
+  //   == последней применённой и те же данные — OK, ничего не делаем (повтор после обрыва);
+  //   == последней применённой, но данные другие — ALREADY_EXISTS;
+  //   <  последней применённой — FAILED_PRECONDITION (устаревшая правка);
+  //   >  последней + 1 — INVALID_ARGUMENT (пропущена правка).
+  uint32 revision = 3;
+
+  // Новый хвост маршрута — применяется до released_nodes. Не задан — маршрут прежний.
+  optional RouteTail replace_tail = 4;
+
+  // Сколько узлов маршрута (после замены хвоста) должно быть released — абсолютное число,
+  // считая route[0]. Не меньше текущего (base не отзывается), не больше длины маршрута.
+  // Не задано — не меняется.
+  optional uint32 released_nodes = 5;
+}
+
+// Замена невыданной части маршрута.
+message RouteTail {
+  // Индекс узла, после которого маршрут заменяется. Узлы с индексом > from_index отбрасываются,
+  // вместо них — nodes. Нельзя трогать выданное: from_index >= текущий released_nodes - 1.
+  uint32 from_index = 1;
+  repeated fms.v1.RouteNode nodes = 2;   // новые узлы после route[from_index]; пусто — маршрут кончается на from_index
+  repeated fms.v1.RouteEdge edges = 3;   // edges[0]: route[from_index] -> nodes[0], edges[i]: nodes[i-1] -> nodes[i];
+                                         // размер = размер nodes
+  // Action'ы на конечном узле (pick, drop, startCharging) — в nodes последнего узла, как в MoveStep.
+  // Цель шага при этом может поменяться: решает control.
+}
+
+message ExtendMissionResponse {
+  fms.v1.MoveProgress progress = 1;   // после применения: revision, released_nodes, total_nodes
+}
+
+// =================================================================== пауза
+
+message PauseRobotRequest {
+  string robot_id = 1;
+}
+message PauseRobotResponse {}
+
+message ResumeRobotRequest {
+  string robot_id = 1;
+}
+message ResumeRobotResponse {}
+
+message InitializePositionRequest {
+  string robot_id = 1;
+  fms.v1.Pose pose = 2;          // x, y, theta, map_id
+  string last_node_id = 3;       // узел графа, на котором стоит робот (VDA lastNodeId)
+}
+message InitializePositionResponse {
+  fms.v1.RobotStatus status = 1;   // статус после применения
+}
+
+// =================================================================== стрим роботов
+
+message StreamRobotStatusRequest {
+  repeated string robot_ids = 1;   // пусто — все роботы
+}
+
+message RobotSnapshot {
+  repeated fms.v1.RobotStatus robots = 1;
+}
+
+message RobotStatusUpdate {
+  oneof update {
+    RobotSnapshot snapshot = 1;        // только первое сообщение: все роботы
+    fms.v1.RobotStatus status = 2;     // один робот изменился; статус целиком, а не разница
+    string removed_robot_id = 3;       // робот удалён (RemoveRobot)
+  }
+}
+
+// =================================================================== стрим миссий
+
+message StreamMissionStatusRequest {
+  repeated string robot_ids = 1;   // пусто — все роботы
+}
+
+// Активные миссии + завершённые за последние N минут (настройка dispatch).
+// Нужно, чтобы control, переподключившись, узнал итог миссии, завершившейся, пока его не было.
+message MissionSnapshot {
+  repeated fms.v1.MissionStatus missions = 1;
+}
+
+// NotifyStep миссии.
+message MissionNotification {
+  string mission_id = 1;
+  string robot_id = 2;
+  string node_id = 3;              // MissionNode.id шага Notify
+  string topic = 4;
+  map<string, string> data = 5;
+}
+
+message MissionStatusUpdate {
+  oneof update {
+    MissionSnapshot snapshot = 1;          // только первое сообщение
+    fms.v1.MissionStatus status = 2;       // миссия изменилась; статус целиком
+    MissionNotification notification = 3;
+  }
+}

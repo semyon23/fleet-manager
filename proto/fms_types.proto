@@ -1,0 +1,359 @@
+// Общие типы fms: используются в fleet_dispatch.proto и позже в fleet_database.proto.
+//
+// Правила:
+//  - только типизированные поля, никакого JSON внутри строк;
+//  - enum'ы с префиксом и значением 0 = UNSPECIFIED (требование proto3: 0 — значение по умолчанию);
+//  - "optional" там, где важно отличить "не задано" от нуля (theta, отклонения, скорость).
+//
+// Имена полей VDA 5050 v3 указаны в комментариях, чтобы было видно, что во что превращается.
+//
+// Версия v1 — зафиксирована 2026-10-17 для начала реализации. Дальше только совместимые изменения:
+// новые поля — с новыми номерами; номера не переиспользуются; удалённое поле — в `reserved`;
+// смысл существующих полей не меняется. Несовместимое — только в новом пакете (…v2).
+
+syntax = "proto3";
+
+package fms.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+// =================================================================== геометрия
+
+message Pose {
+  double x = 1;       // м
+  double y = 2;       // м
+  double theta = 3;   // рад, [-pi, pi]
+  string map_id = 4;
+}
+
+// =================================================================== действия
+
+enum BlockingType {
+  BLOCKING_TYPE_UNSPECIFIED = 0;  // не задано — AddMission вернёт INVALID_ARGUMENT
+  BLOCKING_TYPE_NONE = 1;
+  BLOCKING_TYPE_SOFT = 2;
+  BLOCKING_TYPE_SINGLE = 3;
+  BLOCKING_TYPE_HARD = 4;
+}
+
+// VDA actionParameter: значение может быть любым JSON (число, строка, массив, объект),
+// поэтому google.protobuf.Value, а не string.
+message ActionParameter {
+  string key = 1;
+  google.protobuf.Value value = 2;
+}
+
+message Action {
+  string action_type = 1;                   // "pick", "drop", "simulatedAction", ...
+  string action_id = 2;                     // пусто — сгенерирует dispatch; в статусе миссии придёт уже заполненным
+  BlockingType blocking_type = 3;
+  repeated ActionParameter parameters = 4;  // VDA actionParameters
+  string descriptor = 5;                    // VDA actionDescriptor, текст для людей
+  bool retriable = 6;                       // VDA retriable: может уйти в RETRIABLE вместо FAILED
+}
+
+// =================================================================== маршрут по графу
+
+// Узел графа карты. Координаты присылает control: граф живёт у него, dispatch графа не знает.
+message RouteNode {
+  string node_id = 1;                         // id узла графа -> VDA nodeId
+  double x = 2;                               // -> nodePosition.x
+  double y = 3;                               // -> nodePosition.y
+  optional double theta = 4;                  // не задано — робот сам выбирает ориентацию
+  string map_id = 5;                          // -> nodePosition.mapId
+  optional double allowed_deviation_xy = 6;   // -> nodePosition.allowedDeviationXY
+  optional double allowed_deviation_theta = 7;
+  repeated Action actions = 8;                // действия на этом узле -> node.actions
+}
+
+enum OrientationType {
+  ORIENTATION_TYPE_UNSPECIFIED = 0;   // = TANGENTIAL (по умолчанию в VDA)
+  ORIENTATION_TYPE_TANGENTIAL = 1;    // orientation — относительно касательной к ребру (π — ехать задом)
+  ORIENTATION_TYPE_GLOBAL = 2;        // orientation — абсолютный угол на карте
+}
+
+// Ребро между двумя соседними узлами маршрута.
+message RouteEdge {
+  string edge_id = 1;                         // id ребра графа -> VDA edgeId
+  optional double maximum_speed = 2;          // м/с -> edge.maximumSpeed
+  optional double orientation = 3;            // рад -> edge.orientation
+  repeated Action actions = 4;                // действия на ребре -> edge.actions
+  OrientationType orientation_type = 5;       // -> edge.orientationType; задаётся вместе с orientation
+  // Позже: trajectory (NURBS), corridor, maximumMobileRobotHeight и т.п.
+}
+
+// =================================================================== миссия
+//
+// Миссия — дерево узлов, как в NVIDIA Mission Dispatch: плоский список, связь через parent_id.
+// v1: поддерживаются только листья (move/action/wait/notify) с пустым parent_id,
+//     выполняются по порядку в списке — то есть линейная последовательность шагов.
+// Позже: составные узлы (sequence/fallback/retry) — у шагов появится непустой parent_id,
+//     формат сообщения при этом не меняется.
+
+// Ехать по маршруту. Превращается в один VDA order; ExtendMission — в его order update'ы.
+// Шаг завершён, когда робот доехал до последнего узла маршрута (с учётом замен хвоста) и
+// action'ы на нём закончились. Конец base — это не конец шага: робот стоит и ждёт
+// (MoveProgress.waiting_for_release).
+message MoveStep {
+  repeated RouteNode nodes = 1;   // nodes[0] — узел, где робот уже стоит (или его lastNodeId)
+  repeated RouteEdge edges = 2;   // edges[i] соединяет nodes[i] и nodes[i+1]; размер = nodes - 1
+  // Сколько узлов (считая nodes[0]) отдать в base (released), когда шаг начнётся.
+  // Не задано — весь маршрут released. Остальное уходит роботу как horizon и выдаётся
+  // позже через ExtendMission.
+  // 1 — выдан только узел, где робот стоит: робот не тронется, пока control не вызовет
+  // ExtendMission. Так удобно для шагов, которые начнутся нескоро: ресурсы трафика
+  // control выдаст, когда шаг станет RUNNING.
+  optional uint32 released_nodes = 3;
+}
+
+// Действия на месте, без движения. Превращается в order из одного узла (текущего) с этими действиями.
+message ActionStep {
+  repeated Action actions = 1;
+}
+
+// Ждать. Время или сигнал извне (двери, лифты, оператор).
+message WaitStep {
+  oneof until {
+    google.protobuf.Duration duration = 1;
+    string signal = 2;            // ждать SignalMission(mission_id, signal) — этап позже
+  }
+}
+
+// Отправить уведомление в control (придёт в стриме миссий как MissionNotification).
+message NotifyStep {
+  string topic = 1;
+  map<string, string> data = 2;
+}
+
+enum FailureAction {
+  FAILURE_ACTION_UNSPECIFIED = 0;   // = FAIL_MISSION
+  FAILURE_ACTION_FAIL_MISSION = 1;  // шаг не удался — вся миссия FAILED
+  FAILURE_ACTION_SKIP = 2;          // шаг не удался — идём к следующему
+  FAILURE_ACTION_RETRY = 3;         // повторить до max_retries раз, потом FAIL_MISSION
+}
+
+message MissionNode {
+  string id = 1;          // уникален внутри миссии; на него ссылаются статусы шагов
+  string parent_id = 2;   // v1: всегда пусто
+  string name = 3;        // для людей и логов
+
+  oneof kind {
+    MoveStep move = 10;
+    ActionStep action = 11;
+    WaitStep wait = 12;
+    NotifyStep notify = 13;
+    // Позже: SequenceNode sequence = 20; FallbackNode fallback = 21;
+  }
+
+  FailureAction on_failure = 4;
+  uint32 max_retries = 5;                 // только для FAILURE_ACTION_RETRY
+  optional google.protobuf.Duration timeout = 6;  // не задано — без таймаута
+}
+
+message Mission {
+  string mission_id = 1;               // id из control; ключ во всех вызовах и событиях
+  string robot_id = 2;                 // робот уже назначен control'ом
+  repeated MissionNode nodes = 3;
+  optional google.protobuf.Duration timeout = 4;  // на всю миссию
+}
+
+// =================================================================== статус робота
+
+enum ConnectionState {
+  CONNECTION_STATE_UNSPECIFIED = 0;
+  CONNECTION_STATE_UNKNOWN = 1;            // добавлен, но от робота ещё ничего не было
+  CONNECTION_STATE_ONLINE = 2;             // VDA connection ONLINE и state приходит вовремя
+  CONNECTION_STATE_OFFLINE = 3;            // VDA OFFLINE (штатно отключился)
+  CONNECTION_STATE_HIBERNATING = 4;        // VDA HIBERNATING
+  CONNECTION_STATE_CONNECTION_BROKEN = 5;  // VDA CONNECTION_BROKEN (last will)
+  CONNECTION_STATE_STALE = 6;              // connection ONLINE, но state не приходит дольше таймаута
+}
+
+enum OperatingMode {
+  OPERATING_MODE_UNSPECIFIED = 0;
+  OPERATING_MODE_STARTUP = 1;
+  OPERATING_MODE_AUTOMATIC = 2;
+  OPERATING_MODE_SEMIAUTOMATIC = 3;
+  OPERATING_MODE_INTERVENED = 4;
+  OPERATING_MODE_MANUAL = 5;
+  OPERATING_MODE_SERVICE = 6;
+  OPERATING_MODE_TEACH_IN = 7;
+}
+
+enum ErrorLevel {
+  ERROR_LEVEL_UNSPECIFIED = 0;
+  ERROR_LEVEL_WARNING = 1;
+  ERROR_LEVEL_URGENT = 2;
+  ERROR_LEVEL_CRITICAL = 3;
+  ERROR_LEVEL_FATAL = 4;
+}
+
+message RobotError {
+  string error_type = 1;
+  ErrorLevel level = 2;
+  string description = 3;
+  string hint = 4;
+  map<string, string> references = 5;  // VDA errorReferences: referenceKey -> referenceValue
+}
+
+message PowerSupply {
+  double state_of_charge = 1;   // %, 0..100
+  bool charging = 2;
+  optional double voltage = 3;  // В
+  optional double range = 4;    // м
+}
+
+enum EmergencyStop {
+  EMERGENCY_STOP_UNSPECIFIED = 0;
+  EMERGENCY_STOP_NONE = 1;
+  EMERGENCY_STOP_MANUAL = 2;
+  EMERGENCY_STOP_REMOTE = 3;
+}
+
+message SafetyState {
+  EmergencyStop emergency_stop = 1;   // VDA activeEmergencyStop
+  bool field_violation = 2;
+}
+
+message Load {
+  string load_id = 1;
+  string load_type = 2;
+}
+
+// Сколько сообщений робота dispatch отбросил и почему (ARCHITECTURE.md, раздел 11).
+// По этим данным control решает, поднимать ли тревогу ROBOT_PROTOCOL_ERROR.
+message ProtocolHealth {
+  uint32 invalid_messages = 1;                   // отброшено с момента подключения робота
+  string last_error = 2;                         // «state.nodeStates: missing», «serialNumber mismatch»
+  google.protobuf.Timestamp last_error_at = 3;   // не задано — ошибок не было
+}
+
+message RobotStatus {
+  string robot_id = 1;
+  ConnectionState connection = 2;
+  OperatingMode operating_mode = 3;
+
+  // Позиция. Отправляется при изменении не чаще ~1 раза в секунду или при смене узла.
+  // Для живой картинки UI берёт VDA visualization напрямую из брокера.
+  optional Pose pose = 4;            // нет — робот ещё не присылал позицию
+  bool localized = 5;
+  string last_node_id = 6;           // последний пройденный узел графа
+
+  bool driving = 7;
+  bool paused = 8;
+  PowerSupply power = 9;
+  SafetyState safety = 10;
+  repeated RobotError errors = 11;
+  repeated Load loads = 12;
+
+  string mission_id = 13;            // активная миссия; пусто — свободен (с точки зрения dispatch)
+  // Factsheet в стрим не передаётся. Dispatch сохраняет его целиком в fleet_database
+  // (сначала запись в базу, потом это событие), control читает его оттуда, когда нужно.
+  // Поле меняется, когда пришёл новый factsheet — сигнал control перечитать его из базы.
+  // Нет — factsheet от робота ещё не приходил.
+  optional google.protobuf.Timestamp factsheet_received_at = 14;
+
+  google.protobuf.Timestamp last_state_at = 15;  // время получения последнего state от робота
+  ProtocolHealth protocol = 16;
+}
+
+// =================================================================== статус миссии
+
+enum MissionState {
+  MISSION_STATE_UNSPECIFIED = 0;
+  MISSION_STATE_RUNNING = 1;     // дерево создано и выполняется
+  MISSION_STATE_PAUSED = 2;      // робот на паузе (PauseRobot или сам робот)
+  MISSION_STATE_CANCELING = 3;   // CancelMission принят, ждём подтверждения от робота
+  MISSION_STATE_COMPLETED = 4;   // финальное
+  MISSION_STATE_FAILED = 5;      // финальное
+  MISSION_STATE_CANCELED = 6;    // финальное
+}
+
+enum StepState {
+  STEP_STATE_UNSPECIFIED = 0;
+  STEP_STATE_PENDING = 1;
+  STEP_STATE_RUNNING = 2;
+  STEP_STATE_COMPLETED = 3;
+  STEP_STATE_FAILED = 4;
+  STEP_STATE_SKIPPED = 5;
+  STEP_STATE_CANCELED = 6;
+}
+
+enum ActionStatus {
+  ACTION_STATUS_UNSPECIFIED = 0;
+  ACTION_STATUS_WAITING = 1;
+  ACTION_STATUS_INITIALIZING = 2;
+  ACTION_STATUS_RUNNING = 3;
+  ACTION_STATUS_PAUSED = 4;
+  ACTION_STATUS_RETRIABLE = 5;
+  ACTION_STATUS_FINISHED = 6;
+  ACTION_STATUS_FAILED = 7;
+}
+
+message ActionProgress {
+  string action_id = 1;
+  string action_type = 2;
+  string node_id = 3;              // на каком узле (или edge_id для действия на ребре)
+  ActionStatus status = 4;
+  string result = 5;               // VDA actionResult
+}
+
+// Где робот внутри MoveStep.
+message MoveProgress {
+  string last_node_id = 1;
+  uint32 last_node_index = 2;      // индекс в текущем маршруте шага (после всех ExtendMission)
+  uint32 released_nodes = 3;       // сколько узлов сейчас released (для трафика)
+  bool waiting_for_release = 4;    // дошёл до конца base и ждёт ExtendMission (VDA newBaseRequest)
+
+  // Правки маршрута через ExtendMission (ExtendMissionRequest.revision).
+  uint32 revision = 5;             // последняя правка, которую dispatch применил и отправил роботу
+  uint32 confirmed_revision = 6;   // последняя правка, которую робот принял (orderUpdateId в state)
+  // Робот отклонил order update с правкой `revision`: он продолжает по старому маршруту
+  // и остановится в конце старой base. Текст — errorType и описание из state.
+  // Пусто — отказа не было. Сбрасывается следующей принятой правкой.
+  string update_rejected = 7;
+  uint32 total_nodes = 8;          // сколько узлов в маршруте шага сейчас (меняется при замене хвоста)
+}
+
+enum MissionErrorCode {
+  MISSION_ERROR_CODE_UNSPECIFIED = 0;
+  MISSION_ERROR_CODE_ORDER_REJECTED = 1;   // робот отклонил order (ошибки валидации в state)
+  MISSION_ERROR_CODE_ACTION_FAILED = 2;
+  MISSION_ERROR_CODE_ROBOT_OFFLINE = 3;
+  MISSION_ERROR_CODE_ROBOT_ERROR = 4;      // FATAL/CRITICAL ошибка робота
+  MISSION_ERROR_CODE_TIMEOUT = 5;
+  MISSION_ERROR_CODE_ROBOT_REMOVED = 6;
+  MISSION_ERROR_CODE_INTERNAL = 7;
+  MISSION_ERROR_CODE_NODE_UNREACHABLE = 8; // робот сообщил NODE_UNREACHABLE (препятствие на линии и т.п.)
+}
+
+message MissionError {
+  MissionErrorCode code = 1;
+  string message = 2;
+  string node_id = 3;                      // какой шаг (MissionNode.id)
+  repeated RobotError robot_errors = 4;    // ошибки робота на момент сбоя
+}
+
+message StepStatus {
+  string node_id = 1;                      // MissionNode.id
+  StepState state = 2;
+  uint32 attempts = 3;
+  optional MoveProgress move = 4;          // только для MoveStep
+  repeated ActionProgress actions = 5;     // действия этого шага (узлы, рёбра, ActionStep)
+  google.protobuf.Timestamp started_at = 6;
+  google.protobuf.Timestamp finished_at = 7;
+}
+
+message MissionStatus {
+  string mission_id = 1;
+  string robot_id = 2;
+  MissionState state = 3;
+  repeated StepStatus steps = 4;           // в том же порядке, что Mission.nodes
+  string current_node_id = 5;              // текущий шаг; пусто, если миссия завершена
+  optional MissionError error = 6;         // только при FAILED
+  google.protobuf.Timestamp started_at = 7;
+  google.protobuf.Timestamp updated_at = 8;
+  google.protobuf.Timestamp finished_at = 9;
+}

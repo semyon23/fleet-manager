@@ -1,0 +1,179 @@
+// fleet_database: сервис над Postgres. Хранилище, а не шина: сервисы друг другу пишут по gRPC
+// напрямую, а сюда — то, что нужно сохранить и прочитать после перезапуска.
+//
+// Один писатель на каждое поле, поэтому сервисы разделены по владельцу:
+//   RobotRegistry   — пишет fleet_control: робот как сущность (spec), его жизненный цикл;
+//   DispatchStorage — пишет fleet_dispatch: статус робота, factsheet, выполнение миссий, headerId.
+// Читать может любой сервис. Позже: ControlStorage (миссии control, карты, граф, зоны, резервации,
+// аварии) — отдельным сервисом, когда дойдём до control.
+//
+// Ошибки — через gRPC status code, как в fleet_dispatch.proto:
+//   NOT_FOUND           — нет такого робота / записи
+//   ALREADY_EXISTS      — CreateRobot с занятым robot_id или парой manufacturer+serial_number
+//   FAILED_PRECONDITION — например, DeleteRobot без SetRobotDeleting
+//   UNAVAILABLE         — база недоступна; вызывающий повторяет позже
+//
+// Версия v1 — зафиксирована 2026-10-17 для начала реализации. Дальше только совместимые изменения:
+// новые поля — с новыми номерами; номера не переиспользуются; удалённое поле — в `reserved`;
+// смысл существующих полей не меняется. Несовместимое — только в новом пакете (…v2).
+
+syntax = "proto3";
+
+package fms.database.v1;
+
+import "google/protobuf/timestamp.proto";
+import "fms_types.proto";
+
+// =================================================================== робот (пишет control)
+
+enum RobotLifecycle {
+  ROBOT_LIFECYCLE_UNSPECIFIED = 0;
+  ROBOT_LIFECYCLE_ACTIVE = 1;
+  // Мягкое удаление: control пометил, dispatch отменяет миссию, отписывается,
+  // чистит retained connection/factsheet и подтверждает (RemoveRobot), после этого — DeleteRobot.
+  ROBOT_LIFECYCLE_PENDING_DELETE = 2;
+}
+
+message RobotSpec {
+  string robot_id = 1;          // id в fms
+  string manufacturer = 2;      // VDA manufacturer
+  string serial_number = 3;     // VDA serialNumber; пара manufacturer+serial_number уникальна
+  string name = 4;              // для людей
+  map<string, string> labels = 5;
+  RobotLifecycle lifecycle = 6;
+  google.protobuf.Timestamp created_at = 7;   // ставит база
+  google.protobuf.Timestamp updated_at = 8;   // ставит база
+  // Позже: класс робота в fms, разрешённые карты/зоны, зарядная станция по умолчанию, ...
+}
+
+// Всё, что известно о роботе: spec (control) + статус и factsheet (dispatch).
+message RobotRecord {
+  RobotSpec spec = 1;
+  optional fms.v1.RobotStatus status = 2;   // нет — dispatch ещё ничего не записал
+}
+
+service RobotRegistry {
+  rpc CreateRobot(CreateRobotRequest) returns (CreateRobotResponse);
+  rpc UpdateRobot(UpdateRobotRequest) returns (UpdateRobotResponse);   // name, labels; не id/manufacturer/serial
+  rpc SetRobotDeleting(SetRobotDeletingRequest) returns (SetRobotDeletingResponse);
+  rpc DeleteRobot(DeleteRobotRequest) returns (DeleteRobotResponse);   // только из PENDING_DELETE
+
+  rpc GetRobot(GetRobotRequest) returns (GetRobotResponse);
+  rpc ListRobots(ListRobotsRequest) returns (ListRobotsResponse);
+
+  // Factsheet целиком, в исходном виде VDA. Control читает его, когда в стриме от dispatch
+  // изменилось RobotStatus.factsheet_received_at.
+  rpc GetFactsheet(GetFactsheetRequest) returns (GetFactsheetResponse);
+}
+
+message CreateRobotRequest { RobotSpec spec = 1; }   // lifecycle, created_at, updated_at игнорируются
+message CreateRobotResponse { RobotSpec spec = 1; }
+
+message UpdateRobotRequest { RobotSpec spec = 1; }
+message UpdateRobotResponse { RobotSpec spec = 1; }
+
+message SetRobotDeletingRequest { string robot_id = 1; }
+message SetRobotDeletingResponse {}
+
+message DeleteRobotRequest { string robot_id = 1; }
+message DeleteRobotResponse {}
+
+message GetRobotRequest { string robot_id = 1; }
+message GetRobotResponse { RobotRecord robot = 1; }
+
+message ListRobotsRequest {
+  bool include_deleting = 1;    // по умолчанию только ACTIVE
+}
+message ListRobotsResponse { repeated RobotRecord robots = 1; }
+
+message GetFactsheetRequest { string robot_id = 1; }
+message GetFactsheetResponse {
+  // Исходный JSON factsheet VDA 5050 v3 (topic factsheet). Исключение из правила "без JSON в proto":
+  // это готовый документ VDA со своей схемой, разбирается общей библиотекой vda5050.
+  string factsheet_json = 1;
+  google.protobuf.Timestamp received_at = 2;
+}
+
+// =================================================================== dispatch (пишет dispatch)
+
+// Состояние VDA order'а, который dispatch отправил для шага MoveStep / ActionStep.
+message VdaOrderState {
+  string order_id = 1;
+  uint64 order_update_id = 2;
+  string mission_node_id = 3;   // какой шаг миссии породил order (MissionNode.id)
+  // Робот прислал в state этот order_id + order_update_id (принял). false — отправлен, но не подтверждён:
+  // после перезапуска dispatch отправит sent_order_json повторно.
+  bool confirmed = 4;
+  // Последний отправленный order целиком (VDA JSON): для повторной отправки и разбора проблем.
+  string sent_order_json = 5;
+  google.protobuf.Timestamp sent_at = 6;
+}
+
+// Выполнение одной миссии в dispatch. Это его собственные данные:
+// миссия в терминах control (тип, назначение, приоритет) хранится у control отдельно,
+// здесь — ровно то, что пришло в AddMission, и как оно исполняется.
+message MissionExecution {
+  fms.v1.Mission mission = 1;        // как пришла в AddMission — чтобы после перезапуска построить дерево заново
+  fms.v1.MissionStatus status = 2;   // статусы шагов — какие шаги пропустить при восстановлении
+  optional VdaOrderState order = 3;  // текущий order; нет — шаг без order'а (Wait/Notify) или миссия завершена
+}
+
+// Всё, что нужно dispatch после перезапуска.
+message DispatchSnapshot {
+  repeated RobotRecord robots = 1;               // ACTIVE и PENDING_DELETE (удаление надо довести до конца)
+  repeated MissionExecution active_missions = 2; // status.state не финальный
+}
+
+service DispatchStorage {
+  // При старте dispatch: роботы, их последний статус и незавершённые миссии.
+  rpc LoadDispatchSnapshot(LoadDispatchSnapshotRequest) returns (LoadDispatchSnapshotResponse);
+
+  // Статус робота целиком (последний, не история). Dispatch пишет важные изменения сразу,
+  // позу и батарею — не чаще раза в несколько секунд.
+  rpc SaveRobotStatus(SaveRobotStatusRequest) returns (SaveRobotStatusResponse);
+
+  // Новый factsheet. Сначала эта запись, потом событие в стрим control'у.
+  rpc SaveFactsheet(SaveFactsheetRequest) returns (SaveFactsheetResponse);
+
+  // Создать или обновить выполнение миссии (по mission.mission_id). Пишется при смене статуса шага,
+  // отправке/подтверждении order'а, смене статуса action'а — не на каждый state.
+  rpc SaveMissionExecution(SaveMissionExecutionRequest) returns (SaveMissionExecutionResponse);
+
+  // Получить блок headerId для топика робота. База атомарно выдаёт [first, first + count) и сдвигает счётчик.
+  // Dispatch берёт блок (например, 1000) и расходует в памяти; после перезапуска берёт новый блок —
+  // номера идут только вперёд, пропуски допустимы. Так не нужно писать в базу на каждое сообщение.
+  rpc ReserveHeaderIds(ReserveHeaderIdsRequest) returns (ReserveHeaderIdsResponse);
+}
+
+message LoadDispatchSnapshotRequest {}
+message LoadDispatchSnapshotResponse { DispatchSnapshot snapshot = 1; }
+
+message SaveRobotStatusRequest {
+  fms.v1.RobotStatus status = 1;   // robot_id внутри
+}
+message SaveRobotStatusResponse {}
+
+message SaveFactsheetRequest {
+  string robot_id = 1;
+  string factsheet_json = 2;       // как пришёл от робота
+  google.protobuf.Timestamp received_at = 3;
+}
+message SaveFactsheetResponse {}
+
+message SaveMissionExecutionRequest { MissionExecution execution = 1; }
+message SaveMissionExecutionResponse {}
+
+enum VdaTopic {
+  VDA_TOPIC_UNSPECIFIED = 0;
+  VDA_TOPIC_ORDER = 1;
+  VDA_TOPIC_INSTANT_ACTIONS = 2;
+}
+
+message ReserveHeaderIdsRequest {
+  string robot_id = 1;
+  VdaTopic topic = 2;
+  uint32 count = 3;
+}
+message ReserveHeaderIdsResponse {
+  uint64 first = 1;
+}
