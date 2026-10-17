@@ -32,9 +32,7 @@ void GrpcDispatchService::stop(){
     status_robot.close();
     visu_robot.close();
 
-    // 2. Штатно останавливаем gRPC сервер
     if (server) {
-        // Устанавливаем дедлайн для завершения активных RPC (например, 2 секунды)
         auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(2);
         server->Shutdown(deadline);
 
