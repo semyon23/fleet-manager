@@ -8,7 +8,7 @@
 
 #include <agrpc/asio_grpc.hpp>
 #include <boost/asio/awaitable.hpp>
-
+#include "FleetRegistry.hpp"
 #include "fleet_dispatch.grpc.pb.h"
 
 namespace asio = boost::asio;
@@ -16,7 +16,7 @@ namespace dv1 = fms::dispatch::v1;
 
 class DispatchService {
 public:
-    explicit DispatchService(agrpc::GrpcContext& grpc_context);
+    explicit DispatchService(agrpc::GrpcContext& grpc_context, FleetRegistry& registry);
     grpc::Service& grpc_service();
     void start();
 
@@ -31,6 +31,7 @@ private:
     asio::awaitable<grpc::Status> initialize_position(const dv1::InitializePositionRequest& request, dv1::InitializePositionResponse& response);
 
     agrpc::GrpcContext& grpc_context_;
+    FleetRegistry& fleet_registry_;
     dv1::FleetDispatch::AsyncService service_;
 };
 

@@ -12,9 +12,9 @@ int main() {
         GrpcServer grpc_server{"0.0.0.0:5001"};
         agrpc::GrpcContext grpc_context{grpc_server.add_completion_queue()};
 
-        DispatchService dispatch_service{grpc_context};
+        FleetRegistry registry{io_context};
+        DispatchService dispatch_service{grpc_context, registry};
         grpc_server.add_service(dispatch_service.grpc_service());
-
 
         grpc_server.start();
         dispatch_service.start();
@@ -23,6 +23,7 @@ int main() {
         asio::signal_set signals{io_context, SIGINT, SIGTERM};
         signals.async_wait([&](const boost::system::error_code&, int signal) {
             spdlog::info("signal {} received, stopping", signal);
+            registry.stop_all();
             grpc_server.shutdown();
         });
 

@@ -9,6 +9,10 @@ find_package(behaviortree_cpp REQUIRED)
 add_executable(fleet_dispatch fd_main.cpp
         src/GrpcServer.cpp
         src/DispatchService.cpp
+        src/RobotSession.cpp
+        include/RobotSession.hpp
+        src/FleetRegistry.cpp
+        include/FleetRegistry.hpp
 )
 
 target_link_libraries(fleet_dispatch

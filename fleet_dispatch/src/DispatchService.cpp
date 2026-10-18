@@ -1,6 +1,3 @@
-//
-// Created by ubuntu on 10/17/26.
-//
 
 #include "../include/DispatchService.hpp"
 #include "spdlog/spdlog.h"
@@ -29,7 +26,8 @@ grpc::Status unimplemented(const char* name) {
     return {grpc::StatusCode::UNIMPLEMENTED, std::string(name) + ": not implemented yet"};
 }
 
-DispatchService::DispatchService(agrpc::GrpcContext& grpc_context) : grpc_context_(grpc_context){}
+DispatchService::DispatchService(agrpc::GrpcContext& grpc_context, FleetRegistry& registry)
+    : grpc_context_(grpc_context), fleet_registry_(registry){}
 
 grpc::Service& DispatchService::grpc_service(){
      return service_;
@@ -125,13 +123,29 @@ void DispatchService::start() {
         on_handler_done);
 }
 
-asio::awaitable<grpc::Status> DispatchService::add_robot(const dv1::AddRobotRequest& request, dv1::AddRobotResponse&) {
-    spdlog::info("[dispatch_service] AddRobot {}", request.robot_id());
-    co_return unimplemented("AddRobot");
+asio::awaitable<grpc::Status> DispatchService::add_robot(const dv1::AddRobotRequest& request, dv1::AddRobotResponse& response) {
+    if (request.robot_id().empty() || request.manufacturer().empty() || request.serial_number().empty()) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT,
+                               "robot_id, manufacturer and serial_number are required"};
+    }
+
+    AddResult result = fleet_registry_.add(request.robot_id(), request.manufacturer(), request.serial_number());
+    if (result == AddResult::Conflict) {
+        co_return grpc::Status{grpc::StatusCode::ALREADY_EXISTS,
+                               "robot " + request.robot_id() + " or " + request.manufacturer() + "/" +
+                                   request.serial_number() + " is already registered with other data"};
+    }
+
+    *response.mutable_status() = fleet_registry_.find(request.robot_id())->status();
+    co_return grpc::Status::OK;
+
 }
 
-asio::awaitable<grpc::Status> DispatchService::remove_robot(const dv1::RemoveRobotRequest&, dv1::RemoveRobotResponse&) {
-    co_return unimplemented("RemoveRobot");
+asio::awaitable<grpc::Status> DispatchService::remove_robot(const dv1::RemoveRobotRequest& request, dv1::RemoveRobotResponse&) {
+    if (!fleet_registry_.remove(request.robot_id())) {
+        co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "robot " + request.robot_id() + " not found"};
+    }
+    co_return grpc::Status::OK;
 }
 
 asio::awaitable<grpc::Status> DispatchService::add_mission(const dv1::AddMissionRequest&, dv1::AddMissionResponse&) {
