@@ -3,31 +3,23 @@
 #define ROBOTSESSION_HPP
 
 #pragma once
-
 #include <boost/asio/awaitable.hpp>
-#include <boost/asio/experimental/channel.hpp>
 #include <boost/asio/io_context.hpp>
 #include <memory>
 #include <string>
 
+#include "RobotMessages.hpp"
 #include "fms_types.pb.h"
 
-namespace asio = boost::asio;
-
-struct RobotMessage {
-    std::string topic;
-    std::string payload;
-};
-
-class RobotSession : public std::enable_shared_from_this<RobotSession>{
+class RobotSession : public std::enable_shared_from_this<RobotSession> {
 public:
-    RobotSession(asio::io_context& io_context, std::string robot_id,
+    RobotSession(asio::io_context& io_context, Outbox& outbox, std::string robot_id,
                  std::string manufacturer, std::string serial_number);
 
     void start();
     void stop();
 
-    bool post(RobotMessage message);
+    bool post(VdaMessage message);
 
     const std::string& robot_id() const { return robot_id_; }
     const std::string& manufacturer() const { return manufacturer_; }
@@ -36,16 +28,21 @@ public:
 
 private:
     asio::awaitable<void> run();
+    void handle(const VdaMessage& message);
+    bool send(const std::string& kind, std::string payload);
+    bool request(MqttAction action, const std::string& topic, std::string payload = {});
 
-    using Inbox = asio::experimental::channel<void(boost::system::error_code, RobotMessage)>;
+    using Inbox = asio::experimental::channel<void(boost::system::error_code, VdaMessage)>;
 
     asio::io_context& io_context_;
+    Outbox& outbox_;
     std::string robot_id_;
     std::string manufacturer_;
     std::string serial_number_;
+    std::string state_topic_;
+    std::string connection_topic_;
+    std::string factsheet_topic_;
     Inbox inbox_;
     fms::v1::RobotStatus status_;
-
 };
-
 #endif //ROBOTSESSION_HPP

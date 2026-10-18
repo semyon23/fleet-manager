@@ -8,6 +8,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "RobotMessages.hpp"
 #include "RobotSession.hpp"
 
 enum class AddResult {
@@ -18,17 +19,20 @@ enum class AddResult {
 
 class FleetRegistry {
 public:
-    explicit FleetRegistry(asio::io_context& io_context);
+    FleetRegistry(asio::io_context& io_context, Outbox& outbox);
 
     AddResult add(const std::string& robot_id, const std::string& manufacturer, const std::string& serial_number);
     bool remove(const std::string& robot_id);
     void stop_all();
 
     RobotSession* find(const std::string& robot_id);
-    RobotSession* find_by_vda(const std::string& manufacturer, const std::string& serial_number);
+    bool post(const std::string& manufacturer, const std::string& serial_number, VdaMessage message);
 
 private:
+    RobotSession* find_by_vda(const std::string& manufacturer, const std::string& serial_number);
+
     asio::io_context& io_context_;
+    Outbox& outbox_;
     std::unordered_map<std::string, std::shared_ptr<RobotSession>> sessions_;
 };
 

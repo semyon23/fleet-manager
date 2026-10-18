@@ -13,6 +13,9 @@ add_executable(fleet_dispatch fd_main.cpp
         include/RobotSession.hpp
         src/FleetRegistry.cpp
         include/FleetRegistry.hpp
+        include/VdaTopics.hpp
+        src/RobotMessageRouter.cpp
+        include/RobotMessageRouter.hpp
 )
 
 target_link_libraries(fleet_dispatch

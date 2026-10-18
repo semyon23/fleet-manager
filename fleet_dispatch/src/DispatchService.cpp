@@ -123,7 +123,8 @@ void DispatchService::start() {
         on_handler_done);
 }
 
-asio::awaitable<grpc::Status> DispatchService::add_robot(const dv1::AddRobotRequest& request, dv1::AddRobotResponse& response) {
+asio::awaitable<grpc::Status> DispatchService::add_robot(const dv1::AddRobotRequest& request,
+                                                         dv1::AddRobotResponse& response) {
     if (request.robot_id().empty() || request.manufacturer().empty() || request.serial_number().empty()) {
         co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT,
                                "robot_id, manufacturer and serial_number are required"};
@@ -138,10 +139,10 @@ asio::awaitable<grpc::Status> DispatchService::add_robot(const dv1::AddRobotRequ
 
     *response.mutable_status() = fleet_registry_.find(request.robot_id())->status();
     co_return grpc::Status::OK;
-
 }
 
-asio::awaitable<grpc::Status> DispatchService::remove_robot(const dv1::RemoveRobotRequest& request, dv1::RemoveRobotResponse&) {
+asio::awaitable<grpc::Status> DispatchService::remove_robot(const dv1::RemoveRobotRequest& request,
+                                                            dv1::RemoveRobotResponse&) {
     if (!fleet_registry_.remove(request.robot_id())) {
         co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "robot " + request.robot_id() + " not found"};
     }
