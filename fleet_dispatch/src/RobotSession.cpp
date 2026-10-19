@@ -5,7 +5,9 @@
 
 #include "spdlog/spdlog.h"
 #include "VdaTopics.hpp"
-
+#include "RobotStatusBuilder.hpp"
+#include <google/protobuf/util/time_util.h>
+using google::protobuf::util::TimeUtil;
 
 RobotSession::RobotSession(asio::io_context& io_context, Outbox& outbox, std::string robot_id,
                            std::string manufacturer, std::string serial_number)
@@ -62,12 +64,30 @@ asio::awaitable<void> RobotSession::run() {
 }
 
 void RobotSession::handle(const VdaMessage& message) {
-    if (message.topic == state_topic_) {
-        spdlog::info("[{}] state ({} bytes)", robot_id_, message.payload.size());
-    } else if (message.topic == connection_topic_) {
-        spdlog::info("[{}] connection ({} bytes)", robot_id_, message.payload.size());
-    } else if (message.topic == factsheet_topic_) {
-        spdlog::info("[{}] factsheet ({} bytes)", robot_id_, message.payload.size());
+
+    if (message.payload.empty()) {
+        return;
+    }
+
+    try {
+        auto json = nlohmann::json::parse(message.payload);
+
+        if (message.topic == state_topic_) {
+            auto state = json.get<vda5050::State>();
+            fill_status(state, status_);
+            *status_.mutable_last_state_at() = TimeUtil::GetCurrentTime();
+            log_status();
+        } else if (message.topic == connection_topic_) {
+            auto connection = json.get<vda5050::Connection>();
+            status_.set_connection(to_proto(connection.connection_state));
+            log_status();
+        } else if (message.topic == factsheet_topic_) {
+            factsheet_ = json.get<vda5050::Factsheet>();
+            *status_.mutable_factsheet_received_at() = TimeUtil::GetCurrentTime();
+            spdlog::info("[{}] factsheet received", robot_id_);
+        }
+    } catch (const std::exception& e) {
+        count_invalid_message(message.topic, e.what());
     }
 }
 
@@ -81,4 +101,24 @@ bool RobotSession::request(MqttAction action, const std::string& topic, std::str
         spdlog::warn("[{}] mqtt queue full or closed, request for {} dropped", robot_id_, topic);
     }
     return ok;
+}
+
+void RobotSession::log_status() const{
+    spdlog::info("[{}] {} {} node={} battery={:.0f}% driving={} errors={}",
+                     robot_id_,
+                     fms::v1::ConnectionState_Name(status_.connection()),
+                     fms::v1::OperatingMode_Name(status_.operating_mode()),
+                     status_.last_node_id(),
+                     status_.power().state_of_charge(),
+                     status_.driving(),
+                     status_.errors_size());
+}
+
+
+void RobotSession::count_invalid_message(const std::string& topic, const std::string& error){
+    auto* protocol = status_.mutable_protocol();
+    protocol->set_invalid_messages(protocol->invalid_messages() + 1);
+    protocol->set_last_error(error);
+    *protocol->mutable_last_error_at() = TimeUtil::GetCurrentTime();
+    spdlog::warn("[{}] invalid message on {}: {}", robot_id_, topic, error);
 }

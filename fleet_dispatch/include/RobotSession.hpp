@@ -10,6 +10,7 @@
 
 #include "RobotMessages.hpp"
 #include "fms_types.pb.h"
+#include "vda5050.hpp"
 
 class RobotSession : public std::enable_shared_from_this<RobotSession> {
 public:
@@ -29,6 +30,9 @@ public:
 private:
     asio::awaitable<void> run();
     void handle(const VdaMessage& message);
+    void count_invalid_message(const std::string& topic, const std::string& error);   // 3a
+    void log_status() const;                                                          // 3a
+
     bool send(const std::string& kind, std::string payload);
     bool request(MqttAction action, const std::string& topic, std::string payload = {});
 
@@ -44,5 +48,6 @@ private:
     std::string factsheet_topic_;
     Inbox inbox_;
     fms::v1::RobotStatus status_;
+    std::optional<vda5050::Factsheet> factsheet_;
 };
 #endif //ROBOTSESSION_HPP

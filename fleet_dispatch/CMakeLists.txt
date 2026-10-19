@@ -16,10 +16,13 @@ add_executable(fleet_dispatch fd_main.cpp
         include/VdaTopics.hpp
         src/RobotMessageRouter.cpp
         include/RobotMessageRouter.hpp
+        include/RobotStatusBuilder.cpp
+        include/RobotStatusBuilder.hpp
 )
 
 target_link_libraries(fleet_dispatch
         PRIVATE
+        vda5050
         spdlog::spdlog
         mqtt_client
         BT::behaviortree_cpp
