@@ -2,8 +2,8 @@
 #include "spdlog/spdlog.h"
 #include "VdaTopics.hpp"
 
-FleetRegistry::FleetRegistry(asio::io_context& io_context, Outbox& outbox)
-    : io_context_(io_context), outbox_(outbox) {}
+FleetRegistry::FleetRegistry(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub)
+    : io_context_(io_context), outbox_(outbox),  status_hub_(status_hub) {}
 
 AddResult FleetRegistry::add(const std::string& robot_id, const std::string& manufacturer,
                              const std::string& serial_number) {
@@ -14,10 +14,10 @@ AddResult FleetRegistry::add(const std::string& robot_id, const std::string& man
         return AddResult::Conflict;
     }
     if (find_by_vda(manufacturer, serial_number)) {
-        return AddResult::Conflict;   // этот физический робот уже зарегистрирован под другим id
+        return AddResult::Conflict;
     }
 
-    auto session = std::make_shared<RobotSession>(io_context_, outbox_, robot_id, manufacturer, serial_number);
+    auto session = std::make_shared<RobotSession>(io_context_, outbox_, status_hub_, robot_id, manufacturer, serial_number);
     sessions_[robot_id] = session;
     session->start();
     spdlog::info("[registry] robot {} added, total {}", robot_id, sessions_.size());
@@ -31,6 +31,7 @@ bool FleetRegistry::remove(const std::string& robot_id) {
     }
     it->second->stop();
     sessions_.erase(it);
+    status_hub_.remove(robot_id);
     spdlog::info("[registry] robot {} removed, total {}", robot_id, sessions_.size());
     return true;
 }

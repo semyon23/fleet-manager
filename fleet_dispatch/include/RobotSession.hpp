@@ -9,12 +9,15 @@
 #include <string>
 
 #include "RobotMessages.hpp"
+#include "RobotStatusHub.hpp"
 #include "fms_types.pb.h"
 #include "vda5050.hpp"
 
+
+
 class RobotSession : public std::enable_shared_from_this<RobotSession> {
 public:
-    RobotSession(asio::io_context& io_context, Outbox& outbox, std::string robot_id,
+    RobotSession(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, std::string robot_id,
                  std::string manufacturer, std::string serial_number);
 
     void start();
@@ -40,6 +43,7 @@ private:
 
     asio::io_context& io_context_;
     Outbox& outbox_;
+    RobotStatusHub& status_hub_;
     std::string robot_id_;
     std::string manufacturer_;
     std::string serial_number_;
@@ -49,5 +53,6 @@ private:
     Inbox inbox_;
     fms::v1::RobotStatus status_;
     std::optional<vda5050::Factsheet> factsheet_;
+    bool stopped_ = false;     
 };
 #endif //ROBOTSESSION_HPP

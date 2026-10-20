@@ -19,7 +19,7 @@ enum class AddResult {
 
 class FleetRegistry {
 public:
-    FleetRegistry(asio::io_context& io_context, Outbox& outbox);
+    FleetRegistry(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub);
 
     AddResult add(const std::string& robot_id, const std::string& manufacturer, const std::string& serial_number);
     bool remove(const std::string& robot_id);
@@ -33,6 +33,7 @@ private:
 
     asio::io_context& io_context_;
     Outbox& outbox_;
+    RobotStatusHub& status_hub_;
     std::unordered_map<std::string, std::shared_ptr<RobotSession>> sessions_;
 };
 

@@ -7,8 +7,8 @@
 #include "RobotMessageRouter.hpp"
 #include "spdlog/spdlog.h"
 
-int main() {
-     try {
+int main(){
+    try{
         asio::io_context io_context{1};
 
         MqttClientConfig mqtt_config;
@@ -18,12 +18,14 @@ int main() {
         MqttClientHandler mqtt{io_context, mqtt_config};
         Outbox outbox{io_context, 1000};
 
+        RobotStatusHub status_hub{io_context};
+
         GrpcServer grpc_server{"0.0.0.0:5001"};
         agrpc::GrpcContext grpc_context{grpc_server.add_completion_queue()};
 
-        FleetRegistry registry{io_context, outbox};
+        FleetRegistry registry{io_context, outbox, status_hub};
         RobotMessageRouter message_router{io_context, mqtt, registry, outbox};
-        DispatchService dispatch_service{grpc_context, registry};
+        DispatchService dispatch_service{grpc_context, registry, status_hub};
         grpc_server.add_service(dispatch_service.grpc_service());
 
 
@@ -35,9 +37,11 @@ int main() {
 
 
         asio::signal_set signals{io_context, SIGINT, SIGTERM};
-        signals.async_wait([&](const boost::system::error_code&, int signal) {
+        signals.async_wait([&](const boost::system::error_code&, int signal)
+        {
             spdlog::info("signal {} received, stopping", signal);
             grpc_server.shutdown();
+            status_hub.close_all();
             registry.stop_all();
             outbox.close();
             mqtt.stop();
@@ -50,8 +54,10 @@ int main() {
 
         grpc_server.destroy();
         spdlog::info("fleet_dispatch stopped");
-         return EXIT_SUCCESS;
-    } catch (const std::exception& e) {
+        return EXIT_SUCCESS;
+    }
+    catch (const std::exception& e)
+    {
         spdlog::error("fleet_dispatch failed: {}", e.what());
         return EXIT_FAILURE;
     }

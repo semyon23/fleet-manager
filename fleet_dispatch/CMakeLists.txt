@@ -16,8 +16,10 @@ add_executable(fleet_dispatch fd_main.cpp
         include/VdaTopics.hpp
         src/RobotMessageRouter.cpp
         include/RobotMessageRouter.hpp
-        include/RobotStatusBuilder.cpp
+        src/RobotStatusBuilder.cpp
         include/RobotStatusBuilder.hpp
+        src/RobotStatusHub.cpp
+        include/RobotStatusHub.hpp
 )
 
 target_link_libraries(fleet_dispatch

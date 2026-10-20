@@ -9,10 +9,11 @@
 #include <google/protobuf/util/time_util.h>
 using google::protobuf::util::TimeUtil;
 
-RobotSession::RobotSession(asio::io_context& io_context, Outbox& outbox, std::string robot_id,
+RobotSession::RobotSession(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, std::string robot_id,
                            std::string manufacturer, std::string serial_number)
     : io_context_(io_context),
       outbox_(outbox),
+      status_hub_(status_hub),
       robot_id_(std::move(robot_id)),
       manufacturer_(std::move(manufacturer)),
       serial_number_(std::move(serial_number)),
@@ -29,6 +30,8 @@ void RobotSession::start() {
     request(MqttAction::Subscribe, connection_topic_);
     request(MqttAction::Subscribe, factsheet_topic_);
 
+    status_hub_.publish(status_);
+
     asio::co_spawn(io_context_, [self = shared_from_this()] { return self->run(); },
                    [id = robot_id_](std::exception_ptr error) {
                        if (!error) return;
@@ -41,6 +44,7 @@ void RobotSession::start() {
 }
 
 void RobotSession::stop() {
+    stopped_ = true;
     request(MqttAction::Unsubscribe, state_topic_);
     request(MqttAction::Unsubscribe, connection_topic_);
     request(MqttAction::Unsubscribe, factsheet_topic_);
@@ -55,7 +59,7 @@ asio::awaitable<void> RobotSession::run() {
     spdlog::info("[{}] session started ({} / {})", robot_id_, manufacturer_, serial_number_);
     while (true) {
         auto [ec, message] = co_await inbox_.async_receive(asio::as_tuple(asio::use_awaitable));
-        if (ec) {
+        if (ec || stopped_) {
             break;
         }
         handle(message);
@@ -89,6 +93,8 @@ void RobotSession::handle(const VdaMessage& message) {
     } catch (const std::exception& e) {
         count_invalid_message(message.topic, e.what());
     }
+
+    status_hub_.publish(status_);
 }
 
 bool RobotSession::send(const std::string& kind, std::string payload) {

@@ -16,7 +16,7 @@ namespace dv1 = fms::dispatch::v1;
 
 class DispatchService {
 public:
-    explicit DispatchService(agrpc::GrpcContext& grpc_context, FleetRegistry& registry);
+    explicit DispatchService(agrpc::GrpcContext& grpc_context, FleetRegistry& registry, RobotStatusHub& status_hub);
     grpc::Service& grpc_service();
     void start();
 
@@ -32,6 +32,7 @@ private:
 
     agrpc::GrpcContext& grpc_context_;
     FleetRegistry& fleet_registry_;
+    RobotStatusHub& status_hub_;
     dv1::FleetDispatch::AsyncService service_;
 };
 
