@@ -15,7 +15,6 @@
 #include "vda5050.hpp"
 
 
-
 class RobotSession : public std::enable_shared_from_this<RobotSession> {
 public:
     RobotSession(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, std::string robot_id,

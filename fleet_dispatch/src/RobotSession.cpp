@@ -105,7 +105,7 @@ void RobotSession::handle(const VdaMessage& message) {
 
             last_state_time_ = std::chrono::steady_clock::now();
             if (status_.connection() == fms::v1::CONNECTION_STATE_STALE) {
-                status_.set_connection(fms::v1::CONNECTION_STATE_ONLINE);        /
+                status_.set_connection(fms::v1::CONNECTION_STATE_ONLINE);
             }
             log_status();
         } else if (message.topic == connection_topic_) {
