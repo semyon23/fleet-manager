@@ -1,0 +1,248 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" width="1200" height="360" font-family="'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f1b2d"/>
+      <stop offset="1" stop-color="#16324f"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#ffffff" stroke-opacity="0.05" stroke-width="1"/>
+    </pattern>
+    <radialGradient id="scan" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#4fd1c5" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#4fd1c5" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="wordmark" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#bfdbfe"/>
+      <stop offset="1" stop-color="#60a5fa"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#a0c4e8"/>
+    </marker>
+    <marker id="arrow-mqtt" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#f6ad55"/>
+    </marker>
+    <marker id="arrow-move" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0L10 5L0 10z" fill="#f6ad55"/>
+    </marker>
+
+    <!-- AMR with differential drive, top view, centered at (0, 0), heading +x -->
+    <g id="robot">
+      <circle r="58" fill="url(#scan)"/>
+      <!-- two drive wheels on one axle in the middle of the body -->
+      <g fill="#334155" stroke="#cbd5e1" stroke-width="1.5">
+        <rect x="-11" y="-29" width="22" height="9" rx="3"/>
+        <rect x="-11" y="20" width="22" height="9" rx="3"/>
+      </g>
+      <g stroke="#94a3b8" stroke-width="1.2" stroke-linecap="round">
+        <path d="M-6 -27V-22M0 -27V-22M6 -27V-22"/>
+        <path d="M-6 22V27M0 22V27M6 22V27"/>
+      </g>
+      <rect x="-34" y="-22" width="68" height="44" rx="10" fill="#e2e8f0" stroke="#4fd1c5" stroke-width="2"/>
+      <!-- caster wheels in the corners -->
+      <g fill="#94a3b8" stroke="#64748b" stroke-width="1">
+        <circle cx="-27" cy="-15" r="3"/>
+        <circle cx="-27" cy="15" r="3"/>
+        <circle cx="27" cy="-15" r="3"/>
+        <circle cx="27" cy="15" r="3"/>
+      </g>
+      <rect x="-24" y="-8" width="30" height="16" rx="3" fill="#cbd5e1"/>
+      <!-- lidar at the front -->
+      <circle cx="20" cy="0" r="7" fill="#2d3748"/>
+      <circle cx="20" cy="0" r="3" fill="#4fd1c5"/>
+    </g>
+  </defs>
+
+  <rect width="1200" height="360" rx="18" fill="url(#bg)"/>
+  <rect width="1200" height="360" rx="18" fill="url(#grid)"/>
+
+  <!-- ============================ services ============================ -->
+
+  <!-- fleet_ui: browser window with a map -->
+  <g transform="translate(540 48)">
+    <circle r="30" fill="url(#glow)"/>
+    <rect x="-21" y="-17" width="42" height="34" rx="5" fill="#97266d" fill-opacity="0.35" stroke="#f687b3" stroke-width="2"/>
+    <path d="M-21 -9H21" stroke="#f687b3" stroke-width="2"/>
+    <g fill="#f687b3">
+      <circle cx="-16" cy="-13" r="1.6"/>
+      <circle cx="-11" cy="-13" r="1.6"/>
+      <circle cx="-6" cy="-13" r="1.6"/>
+    </g>
+    <path d="M-13 11V0H2V-4H13" fill="none" stroke="#e2e8f0" stroke-width="1.8" stroke-linejoin="round"/>
+    <circle cx="2" cy="0" r="3" fill="#4fd1c5" stroke="#e2e8f0" stroke-width="1.2"/>
+  </g>
+
+  <!-- fleet_control: gear -->
+  <g transform="translate(660 48)">
+    <circle r="30" fill="url(#glow)"/>
+    <circle r="16" fill="none" stroke="#63b3ed" stroke-width="7" stroke-dasharray="5.03 7.54"/>
+    <circle r="14" fill="#2b6cb0" stroke="#63b3ed" stroke-width="2"/>
+    <circle r="5" fill="#0f1b2d" stroke="#63b3ed" stroke-width="2"/>
+  </g>
+
+  <!-- fleet_dispatch: clipboard with an order route -->
+  <g transform="translate(860 48)">
+    <circle r="30" fill="url(#glow)"/>
+    <rect x="-15" y="-19" width="30" height="40" rx="5" fill="#2c7a7b" fill-opacity="0.5" stroke="#4fd1c5" stroke-width="2"/>
+    <rect x="-7" y="-23" width="14" height="8" rx="2.5" fill="#4fd1c5"/>
+    <path d="M-7 13V2H6V-8" fill="none" stroke="#e2e8f0" stroke-width="2" stroke-linejoin="round"/>
+    <g fill="#4fd1c5" stroke="#e2e8f0" stroke-width="1.5">
+      <circle cx="-7" cy="13" r="3"/>
+      <circle cx="-7" cy="2" r="3"/>
+      <circle cx="6" cy="2" r="3"/>
+    </g>
+    <circle cx="6" cy="-8" r="3.5" fill="#f6ad55" stroke="#e2e8f0" stroke-width="1.5"/>
+  </g>
+
+  <!-- MQTT broker: hub with clients -->
+  <g transform="translate(1060 48)">
+    <circle r="30" fill="url(#glow)"/>
+    <g stroke="#f6ad55" stroke-width="2" stroke-opacity="0.7">
+      <path d="M0 0L0 -18M0 0L15.6 -9M0 0L15.6 9M0 0L0 18M0 0L-15.6 9M0 0L-15.6 -9"/>
+    </g>
+    <g fill="#c05621" stroke="#f6ad55" stroke-width="1.5">
+      <circle cy="-18" r="4.5"/>
+      <circle cx="15.6" cy="-9" r="4.5"/>
+      <circle cx="15.6" cy="9" r="4.5"/>
+      <circle cy="18" r="4.5"/>
+      <circle cx="-15.6" cy="9" r="4.5"/>
+      <circle cx="-15.6" cy="-9" r="4.5"/>
+    </g>
+    <circle r="8" fill="#f6ad55" stroke="#0f1b2d" stroke-width="2"/>
+  </g>
+
+  <!-- service names -->
+  <g font-size="15" font-weight="600" text-anchor="middle">
+    <text x="540" y="98" fill="#f687b3">fleet_ui</text>
+    <text x="660" y="98" fill="#63b3ed">fleet_control</text>
+    <text x="860" y="98" fill="#4fd1c5">fleet_dispatch</text>
+    <text x="1060" y="98" fill="#f6ad55">MQTT broker</text>
+  </g>
+
+  <!-- links between services -->
+  <g stroke="#a0c4e8" stroke-width="2" fill="none" marker-start="url(#arrow)" marker-end="url(#arrow)">
+    <path d="M572 48H628"/>
+    <path d="M694 48H826"/>
+    <path d="M894 48H1028"/>
+    <path d="M690 108L736 118"/>
+    <path d="M830 108L784 118"/>
+  </g>
+  <g font-size="12" font-weight="600" fill="#a0c4e8" text-anchor="middle">
+    <text x="600" y="40">REST</text>
+    <text x="760" y="40">gRPC</text>
+    <text x="961" y="40">MQTT</text>
+  </g>
+
+  <!-- fleet_database: cylinder -->
+  <g transform="translate(760 114)">
+    <path d="M-20 0V24A20 6 0 0 0 20 24V0" fill="#553c9a" fill-opacity="0.45" stroke="#b794f4" stroke-width="1.5"/>
+    <ellipse cx="0" cy="0" rx="20" ry="6" fill="#6b46c1" stroke="#b794f4" stroke-width="1.5"/>
+    <path d="M-20 12A20 6 0 0 0 20 12" fill="none" stroke="#b794f4" stroke-opacity="0.6" stroke-width="1.2"/>
+  </g>
+  <text x="760" y="162" fill="#b794f4" font-size="13" font-weight="600" text-anchor="middle">fleet_database</text>
+
+  <!-- broker ↔ robots -->
+  <path d="M1060 110V146" stroke="#f6ad55" stroke-opacity="0.7" stroke-width="2" stroke-dasharray="4 4" marker-start="url(#arrow-mqtt)" marker-end="url(#arrow-mqtt)"/>
+  <g font-size="12" font-weight="600" text-anchor="middle">
+    <rect x="986" y="114" width="62" height="22" rx="11" fill="#2b6cb0"/>
+    <text x="1017" y="129" fill="#ffffff">order</text>
+    <rect x="1072" y="114" width="58" height="22" rx="11" fill="#2f855a"/>
+    <text x="1101" y="129" fill="#ffffff">state</text>
+  </g>
+
+  <!-- ============================ warehouse ============================ -->
+  <!-- racks with pallets -->
+  <g fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.12">
+    <rect x="630" y="318" width="140" height="22" rx="4"/>
+    <rect x="810" y="318" width="140" height="22" rx="4"/>
+    <rect x="990" y="318" width="140" height="22" rx="4"/>
+  </g>
+  <g fill="#f6ad55" fill-opacity="0.5">
+    <rect x="642" y="322" width="18" height="14" rx="2"/>
+    <rect x="666" y="322" width="18" height="14" rx="2"/>
+    <rect x="738" y="322" width="18" height="14" rx="2"/>
+    <rect x="846" y="322" width="18" height="14" rx="2"/>
+    <rect x="1002" y="322" width="18" height="14" rx="2"/>
+    <rect x="1026" y="322" width="18" height="14" rx="2"/>
+    <rect x="1098" y="322" width="18" height="14" rx="2"/>
+  </g>
+
+  <!-- graph: edges -->
+  <g stroke="#8fb3d9" stroke-opacity="0.35" stroke-width="3" fill="none" stroke-linecap="round">
+    <path d="M620 240H1140"/>
+    <path d="M700 240V180M880 240V180M1060 240V180"/>
+    <path d="M700 240V296M880 240V296M1060 240V296"/>
+  </g>
+
+  <!-- order of robot 1: base and horizon -->
+  <path d="M760 240H970" stroke="#4fd1c5" stroke-width="5" stroke-linecap="round"/>
+  <path d="M970 240H1060V180" stroke="#4fd1c5" stroke-width="4" stroke-dasharray="10 10" stroke-linecap="round" fill="none" stroke-opacity="0.8"/>
+
+  <!-- nodes -->
+  <g stroke="#0f1b2d" stroke-width="3">
+    <circle cx="880" cy="240" r="8" fill="#4fd1c5"/>
+    <circle cx="970" cy="240" r="8" fill="#4fd1c5"/>
+    <circle cx="1060" cy="240" r="8" fill="#8fb3d9"/>
+    <circle cx="1060" cy="180" r="8" fill="#8fb3d9"/>
+    <circle cx="620" cy="240" r="6" fill="#5a7898"/>
+    <circle cx="700" cy="240" r="6" fill="#5a7898"/>
+    <circle cx="790" cy="240" r="6" fill="#5a7898"/>
+    <circle cx="1140" cy="240" r="6" fill="#5a7898"/>
+    <circle cx="700" cy="180" r="6" fill="#5a7898"/>
+    <circle cx="880" cy="180" r="6" fill="#5a7898"/>
+    <circle cx="700" cy="296" r="6" fill="#5a7898"/>
+    <circle cx="880" cy="296" r="6" fill="#5a7898"/>
+    <circle cx="1060" cy="296" r="6" fill="#5a7898"/>
+  </g>
+
+  <!-- pallet waiting at the pick node -->
+  <g transform="translate(1076 170)">
+    <rect width="24" height="18" rx="2" fill="#f6ad55"/>
+    <path d="M0 6H24M0 12H24" stroke="#c97b26" stroke-width="2"/>
+  </g>
+  <text x="1110" y="185" fill="#f6ad55" font-size="13" font-weight="600">pick</text>
+
+  <!-- robot 1: driving along its order -->
+  <g transform="translate(752 240)">
+    <use href="#robot" transform="scale(0.6)"/>
+    <path d="M24 0H42" stroke="#f6ad55" stroke-width="3" marker-end="url(#arrow-move)"/>
+  </g>
+
+  <!-- robot 2: carrying a load -->
+  <g transform="translate(700 210) rotate(-90) scale(0.6)">
+    <use href="#robot"/>
+    <rect x="-22" y="-13" width="34" height="26" rx="3" fill="#f6ad55"/>
+    <path d="M-22 -4H12M-22 4H12" stroke="#c97b26" stroke-width="2.5"/>
+  </g>
+
+  <!-- robot 3: parked -->
+  <g transform="translate(880 288) rotate(90) scale(0.6)">
+    <use href="#robot"/>
+  </g>
+
+  <!-- ============================ title ============================ -->
+  <g id="brand">
+    <text x="56" y="64" fill="url(#wordmark)" font-size="24" font-weight="700" letter-spacing="4.5">COMPASS</text>
+    <rect x="219" y="42" width="3" height="26" rx="1.5" fill="#f97316"/>
+    <g fill="#94a3b8" font-size="11" font-weight="600" letter-spacing="2.2">
+      <text x="232" y="53">FLEET</text>
+      <text x="232" y="67">SERVER</text>
+    </g>
+  </g>
+  <text x="56" y="140" fill="#ffffff" font-size="50" font-weight="700">fleet manager</text>
+  <text x="58" y="182" fill="#a0c4e8" font-size="21">fms — fleet management system</text>
+  <text x="58" y="210" fill="#a0c4e8" font-size="21">for VDA 5050 v3 mobile robots</text>
+  <g font-size="14" font-weight="600" text-anchor="middle">
+    <rect x="58" y="236" width="120" height="28" rx="14" fill="#4fd1c5" fill-opacity="0.15" stroke="#4fd1c5"/>
+    <text x="118" y="255" fill="#4fd1c5">VDA 5050 v3</text>
+    <rect x="188" y="236" width="72" height="28" rx="14" fill="#f6ad55" fill-opacity="0.15" stroke="#f6ad55"/>
+    <text x="224" y="255" fill="#f6ad55">MQTT</text>
+    <rect x="270" y="236" width="70" height="28" rx="14" fill="#63b3ed" fill-opacity="0.15" stroke="#63b3ed"/>
+    <text x="305" y="255" fill="#63b3ed">gRPC</text>
+    <rect x="350" y="236" width="76" height="28" rx="14" fill="#a0c4e8" fill-opacity="0.15" stroke="#a0c4e8"/>
+    <text x="388" y="255" fill="#a0c4e8">C++23</text>
+  </g>
+</svg>
