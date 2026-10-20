@@ -5,6 +5,7 @@
 #pragma once
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <memory>
 #include <string>
 
@@ -32,6 +33,8 @@ public:
 
 private:
     asio::awaitable<void> run();
+    asio::awaitable<void> watchdog();
+
     void handle(const VdaMessage& message);
     void count_invalid_message(const std::string& topic, const std::string& error);   // 3a
     void log_status() const;                                                          // 3a
@@ -42,6 +45,7 @@ private:
     using Inbox = asio::experimental::channel<void(boost::system::error_code, VdaMessage)>;
 
     asio::io_context& io_context_;
+
     Outbox& outbox_;
     RobotStatusHub& status_hub_;
     std::string robot_id_;
@@ -53,6 +57,9 @@ private:
     Inbox inbox_;
     fms::v1::RobotStatus status_;
     std::optional<vda5050::Factsheet> factsheet_;
-    bool stopped_ = false;     
+
+    asio::steady_timer watchdog_timer_;
+    std::chrono::steady_clock::time_point last_state_time_;
+    bool stopped_ = false;
 };
 #endif //ROBOTSESSION_HPP

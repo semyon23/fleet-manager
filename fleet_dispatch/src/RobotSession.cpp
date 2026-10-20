@@ -20,7 +20,8 @@ RobotSession::RobotSession(asio::io_context& io_context, Outbox& outbox, RobotSt
       state_topic_(robot_topic(manufacturer_, serial_number_, "state")),
       connection_topic_(robot_topic(manufacturer_, serial_number_, "connection")),
       factsheet_topic_(robot_topic(manufacturer_, serial_number_, "factsheet")),
-      inbox_(io_context, 100) {
+      inbox_(io_context, 100),
+      watchdog_timer_(io_context){
     status_.set_robot_id(robot_id_);
     status_.set_connection(fms::v1::CONNECTION_STATE_UNKNOWN);
 }
@@ -31,16 +32,17 @@ void RobotSession::start() {
     request(MqttAction::Subscribe, factsheet_topic_);
 
     status_hub_.publish(status_);
+    auto log_if_failed = [id = robot_id_](std::exception_ptr error) {
+        if (!error) return;
+        try {
+            std::rethrow_exception(error);
+        } catch (const std::exception& e) {
+            spdlog::error("[{}] session coroutine failed: {}", id, e.what());
+        }
+    };
 
-    asio::co_spawn(io_context_, [self = shared_from_this()] { return self->run(); },
-                   [id = robot_id_](std::exception_ptr error) {
-                       if (!error) return;
-                       try {
-                           std::rethrow_exception(error);
-                       } catch (const std::exception& e) {
-                           spdlog::error("[{}] session failed: {}", id, e.what());
-                       }
-                   });
+    asio::co_spawn(io_context_, [self = shared_from_this()] { return self->run(); }, log_if_failed);
+    asio::co_spawn(io_context_, [self = shared_from_this()] { return self->watchdog(); }, log_if_failed);
 }
 
 void RobotSession::stop() {
@@ -49,6 +51,7 @@ void RobotSession::stop() {
     request(MqttAction::Unsubscribe, connection_topic_);
     request(MqttAction::Unsubscribe, factsheet_topic_);
     inbox_.close();
+    watchdog_timer_.cancel();
 }
 
 bool RobotSession::post(VdaMessage message) {
@@ -67,6 +70,25 @@ asio::awaitable<void> RobotSession::run() {
     spdlog::info("[{}] session stopped", robot_id_);
 }
 
+asio::awaitable<void> RobotSession::watchdog() {
+    while (true) {
+        watchdog_timer_.expires_after(std::chrono::seconds(5));
+        co_await watchdog_timer_.async_wait(asio::as_tuple(asio::use_awaitable));
+        if (stopped_) {
+            break;
+        }
+
+        bool online = status_.connection() == fms::v1::CONNECTION_STATE_ONLINE;
+        bool silent = std::chrono::steady_clock::now() - last_state_time_ > std::chrono::seconds(60);
+        if (online && silent) {
+            status_.set_connection(fms::v1::CONNECTION_STATE_STALE);
+            spdlog::warn("[{}] no state for 60 s, robot is STALE", robot_id_);
+            status_hub_.publish(status_);
+        }
+    }
+}
+
+
 void RobotSession::handle(const VdaMessage& message) {
 
     if (message.payload.empty()) {
@@ -80,10 +102,16 @@ void RobotSession::handle(const VdaMessage& message) {
             auto state = json.get<vda5050::State>();
             fill_status(state, status_);
             *status_.mutable_last_state_at() = TimeUtil::GetCurrentTime();
+
+            last_state_time_ = std::chrono::steady_clock::now();
+            if (status_.connection() == fms::v1::CONNECTION_STATE_STALE) {
+                status_.set_connection(fms::v1::CONNECTION_STATE_ONLINE);        /
+            }
             log_status();
         } else if (message.topic == connection_topic_) {
             auto connection = json.get<vda5050::Connection>();
             status_.set_connection(to_proto(connection.connection_state));
+            last_state_time_ = std::chrono::steady_clock::now();
             log_status();
         } else if (message.topic == factsheet_topic_) {
             factsheet_ = json.get<vda5050::Factsheet>();
@@ -128,3 +156,4 @@ void RobotSession::count_invalid_message(const std::string& topic, const std::st
     *protocol->mutable_last_error_at() = TimeUtil::GetCurrentTime();
     spdlog::warn("[{}] invalid message on {}: {}", robot_id_, topic, error);
 }
+
