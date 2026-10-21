@@ -219,9 +219,20 @@ asio::awaitable<grpc::Status> DispatchService::resume_robot(const dv1::ResumeRob
     co_return grpc::Status::OK;
 }
 
-asio::awaitable<grpc::Status> DispatchService::initialize_position(const dv1::InitializePositionRequest&,
-                                                                   dv1::InitializePositionResponse&) {
-    co_return unimplemented("InitializePosition");
+asio::awaitable<grpc::Status> DispatchService::initialize_position(const dv1::InitializePositionRequest& request, dv1::InitializePositionResponse&) {
+    if (request.pose().map_id().empty() || request.last_node_id().empty()) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "pose.map_id and last_node_id are required"};
+    }
+
+    grpc::Status status;
+    RobotSession* session = find_online_robot(request.robot_id(), status);
+    if (!session) {
+        co_return status;
+    }
+    if (!session->initialize_position(request.pose(), request.last_node_id())) {
+        co_return grpc::Status{grpc::StatusCode::UNAVAILABLE, "mqtt queue is full, try again"};
+    }
+    co_return grpc::Status::OK;
 }
 
 RobotSession* DispatchService::find_online_robot(const std::string& robot_id, grpc::Status& status){

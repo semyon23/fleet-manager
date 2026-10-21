@@ -9,6 +9,20 @@
 #include <google/protobuf/util/time_util.h>
 using google::protobuf::util::TimeUtil;
 
+std::string action_error(const vda5050::State& state, const vda5050::ActionState& action_state) {
+    for (const auto& error : state.errors) {
+        if (!error.error_references) {
+            continue;
+        }
+        for (const auto& reference : *error.error_references) {
+            if (reference.reference_key == "actionId" && reference.reference_value == action_state.action_id) {
+                return error.error_description.value_or(error.error_type);
+            }
+        }
+    }
+    return action_state.action_result.value_or("no details");
+}
+
 RobotSession::RobotSession(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, std::string robot_id,
                            std::string manufacturer, std::string serial_number)
     : io_context_(io_context),
@@ -161,14 +175,24 @@ void RobotSession::count_invalid_message(const std::string& topic, const std::st
 }
 
 bool RobotSession::pause() {
-    return send_instant_action(vda5050::action_type::kStartPause);
+    return send_instant_action(vda5050::action_type::kStartPause, {});
 }
 
 bool RobotSession::resume() {
-    return send_instant_action(vda5050::action_type::kStopPause);
+    return send_instant_action(vda5050::action_type::kStopPause, {});
 }
 
-bool RobotSession::send_instant_action(const std::string& action_type) {
+bool RobotSession::initialize_position(const fms::v1::Pose& pose, const std::string& last_node_id) {
+    return send_instant_action(vda5050::action_type::kInitializePosition, {
+        {"x", pose.x()},
+        {"y", pose.y()},
+        {"theta", pose.theta()},
+        {"mapId", pose.map_id()},
+        {"lastNodeId", last_node_id},
+    });
+}
+
+bool RobotSession::send_instant_action(const std::string& action_type, std::vector<vda5050::ActionParameter> parameters){
     vda5050::InstantActions message;
     message.header.header_id = ++instant_actions_header_id_;
     message.header.timestamp = vda5050::make_timestamp();
@@ -179,9 +203,12 @@ bool RobotSession::send_instant_action(const std::string& action_type) {
     action.action_type = action_type;
 
     action.action_id = robot_id_ + "-" + action_type + "-" + std::to_string(message.header.header_id);
-    action.blocking_type = vda5050::BlockingType::None;
-    message.actions.push_back(action);
 
+    action.blocking_type = vda5050::BlockingType::None;
+    if (!parameters.empty()) {
+        action.action_parameters = std::move(parameters);
+    }
+    message.actions.push_back(action);
     if (!send("instantActions", nlohmann::json(message).dump())) {
         return false;
     }
@@ -201,7 +228,7 @@ void RobotSession::check_instant_actions(const vda5050::State& state) {
             spdlog::info("[{}] {} confirmed", robot_id_, it->second);
             pending_actions_.erase(it);
         } else if (action_state.action_status == vda5050::ActionStatus::Failed) {
-            spdlog::warn("[{}] {} failed: {}", robot_id_, it->second, action_state.action_result.value_or("no result"));
+            spdlog::warn("[{}] {} failed: {}", robot_id_, it->second, action_error(state, action_state));
             pending_actions_.erase(it);
         }
         // WAITING / INITIALIZING / RUNNING — ещё выполняется, ждём следующий state

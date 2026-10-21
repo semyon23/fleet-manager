@@ -66,9 +66,9 @@ service FleetDispatch {
   rpc ResumeRobot(ResumeRobotRequest) returns (ResumeRobotResponse);
 
   // VDA initializePosition: задать роботу позу и узел графа. Для подключения робота к графу
-  // (оператор поставил робота на узел) и после смены карты. Только когда у робота нет
-  // активной миссии, иначе FAILED_PRECONDITION. Ответ — после подтверждения роботом
-  // (instantActionStates FINISHED); FAILED — FAILED_PRECONDITION с текстом ошибки робота.
+  // (оператор поставил робота на узел) и после смены карты. Робот откажет, если у него активный order.
+  // Ответ — когда команда отправлена роботу (status пока не заполняется). Результат — в стриме
+  // статусов: новые last_node_id и pose; при отказе робота — ошибка в errors.
   rpc InitializePosition(InitializePositionRequest) returns (InitializePositionResponse);
 
   // ---------------------------------------------------------------- стримы

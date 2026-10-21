@@ -25,7 +25,7 @@ public:
 
     bool pause();
     bool resume();
-
+    bool initialize_position(const fms::v1::Pose& pose, const std::string& last_node_id);
     bool post(VdaMessage message);
 
     const std::string& robot_id() const { return robot_id_; }
@@ -44,7 +44,7 @@ private:
     bool send(const std::string& kind, std::string payload);
     bool request(MqttAction action, const std::string& topic, std::string payload = {});
 
-    bool send_instant_action(const std::string& action_type);
+    bool send_instant_action(const std::string& action_type, std::vector<vda5050::ActionParameter> parameters);
     void check_instant_actions(const vda5050::State& state);
 
     using Inbox = asio::experimental::channel<void(boost::system::error_code, VdaMessage)>;
