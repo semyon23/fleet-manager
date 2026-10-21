@@ -23,6 +23,9 @@ public:
     void start();
     void stop();
 
+    bool pause();
+    bool resume();
+
     bool post(VdaMessage message);
 
     const std::string& robot_id() const { return robot_id_; }
@@ -35,11 +38,14 @@ private:
     asio::awaitable<void> watchdog();
 
     void handle(const VdaMessage& message);
-    void count_invalid_message(const std::string& topic, const std::string& error);   // 3a
-    void log_status() const;                                                          // 3a
+    void count_invalid_message(const std::string& topic, const std::string& error);
+    void log_status() const;
 
     bool send(const std::string& kind, std::string payload);
     bool request(MqttAction action, const std::string& topic, std::string payload = {});
+
+    bool send_instant_action(const std::string& action_type);
+    void check_instant_actions(const vda5050::State& state);
 
     using Inbox = asio::experimental::channel<void(boost::system::error_code, VdaMessage)>;
 
@@ -59,6 +65,8 @@ private:
 
     asio::steady_timer watchdog_timer_;
     std::chrono::steady_clock::time_point last_state_time_;
+    std::uint32_t instant_actions_header_id_;
+    std::unordered_map<std::string, std::string> pending_actions_;
     bool stopped_ = false;
 };
 #endif //ROBOTSESSION_HPP

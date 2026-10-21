@@ -30,6 +30,8 @@ private:
     asio::awaitable<grpc::Status> resume_robot(const dv1::ResumeRobotRequest& request, dv1::ResumeRobotResponse& response);
     asio::awaitable<grpc::Status> initialize_position(const dv1::InitializePositionRequest& request, dv1::InitializePositionResponse& response);
 
+    RobotSession* find_online_robot(const std::string& robot_id, grpc::Status& status);
+
     agrpc::GrpcContext& grpc_context_;
     FleetRegistry& fleet_registry_;
     RobotStatusHub& status_hub_;

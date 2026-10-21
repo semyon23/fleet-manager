@@ -21,7 +21,8 @@ RobotSession::RobotSession(asio::io_context& io_context, Outbox& outbox, RobotSt
       connection_topic_(robot_topic(manufacturer_, serial_number_, "connection")),
       factsheet_topic_(robot_topic(manufacturer_, serial_number_, "factsheet")),
       inbox_(io_context, 100),
-      watchdog_timer_(io_context){
+      watchdog_timer_(io_context),
+      instant_actions_header_id_(static_cast<std::uint32_t>(std::time(nullptr))){
     status_.set_robot_id(robot_id_);
     status_.set_connection(fms::v1::CONNECTION_STATE_UNKNOWN);
 }
@@ -101,6 +102,7 @@ void RobotSession::handle(const VdaMessage& message) {
         if (message.topic == state_topic_) {
             auto state = json.get<vda5050::State>();
             fill_status(state, status_);
+            check_instant_actions(state);
             *status_.mutable_last_state_at() = TimeUtil::GetCurrentTime();
 
             last_state_time_ = std::chrono::steady_clock::now();
@@ -138,14 +140,15 @@ bool RobotSession::request(MqttAction action, const std::string& topic, std::str
 }
 
 void RobotSession::log_status() const{
-    spdlog::info("[{}] {} {} node={} battery={:.0f}% driving={} errors={}",
-                     robot_id_,
-                     fms::v1::ConnectionState_Name(status_.connection()),
-                     fms::v1::OperatingMode_Name(status_.operating_mode()),
-                     status_.last_node_id(),
-                     status_.power().state_of_charge(),
-                     status_.driving(),
-                     status_.errors_size());
+    spdlog::info("[{}] {} {} node={} battery={:.0f}% driving={} paused={} errors={}",
+                  robot_id_,
+                  fms::v1::ConnectionState_Name(status_.connection()),
+                  fms::v1::OperatingMode_Name(status_.operating_mode()),
+                  status_.last_node_id(),
+                  status_.power().state_of_charge(),
+                  status_.driving(),
+                  status_.paused(),
+                  status_.errors_size());
 }
 
 
@@ -157,3 +160,50 @@ void RobotSession::count_invalid_message(const std::string& topic, const std::st
     spdlog::warn("[{}] invalid message on {}: {}", robot_id_, topic, error);
 }
 
+bool RobotSession::pause() {
+    return send_instant_action(vda5050::action_type::kStartPause);
+}
+
+bool RobotSession::resume() {
+    return send_instant_action(vda5050::action_type::kStopPause);
+}
+
+bool RobotSession::send_instant_action(const std::string& action_type) {
+    vda5050::InstantActions message;
+    message.header.header_id = ++instant_actions_header_id_;
+    message.header.timestamp = vda5050::make_timestamp();
+    message.header.manufacturer = manufacturer_;
+    message.header.serial_number = serial_number_;
+
+    vda5050::Action action;
+    action.action_type = action_type;
+
+    action.action_id = robot_id_ + "-" + action_type + "-" + std::to_string(message.header.header_id);
+    action.blocking_type = vda5050::BlockingType::None;
+    message.actions.push_back(action);
+
+    if (!send("instantActions", nlohmann::json(message).dump())) {
+        return false;
+    }
+    pending_actions_[action.action_id] = action_type;
+    spdlog::info("[{}] {} sent ({})", robot_id_, action_type, action.action_id);
+    return true;
+}
+
+void RobotSession::check_instant_actions(const vda5050::State& state) {
+    for (const auto& action_state : state.instant_action_states) {
+        auto it = pending_actions_.find(action_state.action_id);
+        if (it == pending_actions_.end()) {
+            continue;
+        }
+
+        if (action_state.action_status == vda5050::ActionStatus::Finished) {
+            spdlog::info("[{}] {} confirmed", robot_id_, it->second);
+            pending_actions_.erase(it);
+        } else if (action_state.action_status == vda5050::ActionStatus::Failed) {
+            spdlog::warn("[{}] {} failed: {}", robot_id_, it->second, action_state.action_result.value_or("no result"));
+            pending_actions_.erase(it);
+        }
+        // WAITING / INITIALIZING / RUNNING — ещё выполняется, ждём следующий state
+    }
+}

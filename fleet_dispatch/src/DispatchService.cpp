@@ -195,15 +195,47 @@ asio::awaitable<grpc::Status> DispatchService::extend_mission(const dv1::ExtendM
     co_return unimplemented("ExtendMission");
 }
 
-asio::awaitable<grpc::Status> DispatchService::pause_robot(const dv1::PauseRobotRequest&, dv1::PauseRobotResponse&) {
-    co_return unimplemented("PauseRobot");
+asio::awaitable<grpc::Status> DispatchService::pause_robot(const dv1::PauseRobotRequest& request, dv1::PauseRobotResponse&) {
+    grpc::Status status;
+    RobotSession* session = find_online_robot(request.robot_id(), status);
+    if (!session) {
+        co_return status;
+    }
+    if (!session->pause()) {
+        co_return grpc::Status{grpc::StatusCode::UNAVAILABLE, "mqtt queue is full, try again"};
+    }
+    co_return grpc::Status::OK;
 }
 
-asio::awaitable<grpc::Status> DispatchService::resume_robot(const dv1::ResumeRobotRequest&, dv1::ResumeRobotResponse&) {
-    co_return unimplemented("ResumeRobot");
+asio::awaitable<grpc::Status> DispatchService::resume_robot(const dv1::ResumeRobotRequest& request, dv1::ResumeRobotResponse&) {
+    grpc::Status status;
+    RobotSession* session = find_online_robot(request.robot_id(), status);
+    if (!session) {
+        co_return status;
+    }
+    if (!session->resume()) {
+        co_return grpc::Status{grpc::StatusCode::UNAVAILABLE, "mqtt queue is full, try again"};
+    }
+    co_return grpc::Status::OK;
 }
 
 asio::awaitable<grpc::Status> DispatchService::initialize_position(const dv1::InitializePositionRequest&,
                                                                    dv1::InitializePositionResponse&) {
     co_return unimplemented("InitializePosition");
+}
+
+RobotSession* DispatchService::find_online_robot(const std::string& robot_id, grpc::Status& status){
+    RobotSession* session = fleet_registry_.find(robot_id);
+    if (!session) {
+        status = grpc::Status{grpc::StatusCode::NOT_FOUND, "robot " + robot_id + " not found"};
+        return nullptr;
+    }
+    auto connection = session->status().connection();
+    if (connection != fms::v1::CONNECTION_STATE_ONLINE) {
+
+        status = grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
+                              "robot " + robot_id + " is " + fms::v1::ConnectionState_Name(connection)};
+        return nullptr;
+    }
+    return session;
 }
