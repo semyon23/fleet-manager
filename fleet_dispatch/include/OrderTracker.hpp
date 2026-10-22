@@ -33,7 +33,7 @@ public:
     int total_nodes() const { return total_nodes_; }
     bool waiting_for_release() const { return waiting_for_release_; }   // base кончилась, ждёт продления
     const std::string& failure() const { return failure_; }   // причина при Rejected / Failed
-
+    const std::unordered_map<std::string, vda5050::ActionStatus>& actions() const { return actions_; }
 private:
     void finish(Phase phase, std::string failure = {});
     std::string order_error(const vda5050::State& state) const;

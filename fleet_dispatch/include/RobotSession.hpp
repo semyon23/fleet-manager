@@ -11,6 +11,7 @@
 
 #include "RobotMessages.hpp"
 #include "RobotStatusHub.hpp"
+#include "ActiveMission.hpp"
 #include "fms_types.pb.h"
 #include "vda5050.hpp"
 
@@ -27,6 +28,9 @@ public:
     bool resume();
     bool initialize_position(const fms::v1::Pose& pose, const std::string& last_node_id);
     bool post(VdaMessage message);
+
+    bool start_mission(const fms::v1::Mission& mission);   // false — order не ушёл (очередь MQTT)
+    const ActiveMission* mission() const { return mission_.get(); }   // nullptr — робот свободен
 
     const std::string& robot_id() const { return robot_id_; }
     const std::string& manufacturer() const { return manufacturer_; }
@@ -46,7 +50,7 @@ private:
 
     bool send_instant_action(const std::string& action_type, std::vector<vda5050::ActionParameter> parameters);
     void check_instant_actions(const vda5050::State& state);
-
+    void on_mission_changed();
     using Inbox = asio::experimental::channel<void(boost::system::error_code, VdaMessage)>;
 
     asio::io_context& io_context_;
@@ -66,7 +70,14 @@ private:
     asio::steady_timer watchdog_timer_;
     std::chrono::steady_clock::time_point last_state_time_;
     std::uint32_t instant_actions_header_id_;
+    std::uint32_t order_header_id_;
     std::unordered_map<std::string, std::string> pending_actions_;
+    std::unique_ptr<ActiveMission> mission_;
     bool stopped_ = false;
+
+
+
+
+
 };
 #endif //ROBOTSESSION_HPP

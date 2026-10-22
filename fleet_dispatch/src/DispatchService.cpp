@@ -4,7 +4,7 @@
 #include <boost/asio/use_awaitable.hpp>
 #include "spdlog/spdlog.h"
 #include <boost/asio/experimental/awaitable_operators.hpp>
-
+#include "OrderBuilder.hpp"
 // Для стрима нужен rpc.wait_for_done(): узнать, что клиент отключился, не дожидаясь следующей записи
 struct NotifyWhenDoneTraits : agrpc::DefaultServerRPCTraits {
     static constexpr bool NOTIFY_WHEN_DONE = true;
@@ -183,8 +183,65 @@ asio::awaitable<grpc::Status> DispatchService::remove_robot(const dv1::RemoveRob
     co_return grpc::Status::OK;
 }
 
-asio::awaitable<grpc::Status> DispatchService::add_mission(const dv1::AddMissionRequest&, dv1::AddMissionResponse&) {
-    co_return unimplemented("AddMission");
+asio::awaitable<grpc::Status> DispatchService::add_mission(const dv1::AddMissionRequest& request, dv1::AddMissionResponse& response) {
+    // 5c: миссия из одного шага (Move или Action). Ответ — начальный статус.
+    const auto& mission = request.mission();
+    if (mission.mission_id().empty() || mission.robot_id().empty()) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "mission_id and robot_id are required"};
+    }
+
+    grpc::Status status;
+    RobotSession* session = find_online_robot(mission.robot_id(), status);
+    if (!session) {
+        co_return status;
+    }
+
+    // У робота уже есть миссия: та же — повтор запроса, отвечаем её статусом
+    if (const ActiveMission* active = session->mission()) {
+        if (active->mission_id() == mission.mission_id()) {
+            *response.mutable_status() = active->status();
+            co_return grpc::Status::OK;
+        }
+        co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
+                               "robot " + mission.robot_id() + " is busy with mission " + active->mission_id()};
+    }
+
+    if (mission.nodes_size() != 1) {
+        co_return grpc::Status{grpc::StatusCode::UNIMPLEMENTED, "only missions with one step are supported yet"};
+    }
+    const auto& node = mission.nodes(0);
+    if (node.id().empty()) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "mission node id is required"};
+    }
+
+    const auto& robot = session->status();
+    if (node.has_move()) {
+        if (auto error = validate_move_step(node.move()); !error.empty()) {
+            co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, error};
+        }
+        // Робот откажет, если маршрут начинается не там, где он стоит — проверяем заранее
+        const auto& start = node.move().nodes(0).node_id();
+        if (start != robot.last_node_id()) {
+            co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
+                                   "robot is at '" + robot.last_node_id() + "', route starts at '" + start + "'"};
+        }
+    } else if (node.has_action()) {
+        if (auto error = validate_action_step(node.action()); !error.empty()) {
+            co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, error};
+        }
+        if (robot.last_node_id().empty()) {
+            co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
+                                   "robot is not on the graph, call InitializePosition first"};
+        }
+    } else {
+        co_return grpc::Status{grpc::StatusCode::UNIMPLEMENTED, "only move and action steps are supported yet"};
+    }
+
+    if (!session->start_mission(mission)) {
+        co_return grpc::Status{grpc::StatusCode::UNAVAILABLE, "mqtt queue is full, try again"};
+    }
+    *response.mutable_status() = session->mission()->status();
+    co_return grpc::Status::OK;
 }
 
 asio::awaitable<grpc::Status> DispatchService::cancel_mission(const dv1::CancelMissionRequest&, dv1::CancelMissionResponse&) {

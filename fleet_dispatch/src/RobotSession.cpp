@@ -6,6 +6,7 @@
 #include "spdlog/spdlog.h"
 #include "VdaTopics.hpp"
 #include "RobotStatusBuilder.hpp"
+#include "OrderBuilder.hpp"
 #include <google/protobuf/util/time_util.h>
 using google::protobuf::util::TimeUtil;
 
@@ -36,7 +37,8 @@ RobotSession::RobotSession(asio::io_context& io_context, Outbox& outbox, RobotSt
       factsheet_topic_(robot_topic(manufacturer_, serial_number_, "factsheet")),
       inbox_(io_context, 100),
       watchdog_timer_(io_context),
-      instant_actions_header_id_(static_cast<std::uint32_t>(std::time(nullptr))){
+      instant_actions_header_id_(static_cast<std::uint32_t>(std::time(nullptr))),
+      order_header_id_(static_cast<std::uint32_t>(std::time(nullptr))) {
     status_.set_robot_id(robot_id_);
     status_.set_connection(fms::v1::CONNECTION_STATE_UNKNOWN);
 }
@@ -100,6 +102,9 @@ asio::awaitable<void> RobotSession::watchdog() {
             spdlog::warn("[{}] no state for 60 s, robot is STALE", robot_id_);
             status_hub_.publish(status_);
         }
+        if (mission_ && mission_->on_tick(std::chrono::steady_clock::now())) {
+            on_mission_changed();
+        }
     }
 }
 
@@ -117,6 +122,11 @@ void RobotSession::handle(const VdaMessage& message) {
             auto state = json.get<vda5050::State>();
             fill_status(state, status_);
             check_instant_actions(state);
+
+            if (mission_ && mission_->on_state(state)) {
+                on_mission_changed();
+            }
+
             *status_.mutable_last_state_at() = TimeUtil::GetCurrentTime();
 
             last_state_time_ = std::chrono::steady_clock::now();
@@ -232,5 +242,45 @@ void RobotSession::check_instant_actions(const vda5050::State& state) {
             pending_actions_.erase(it);
         }
         // WAITING / INITIALIZING / RUNNING — ещё выполняется, ждём следующий state
+    }
+}
+
+// 5c: построить order шага, отправить и начать следить
+bool RobotSession::start_mission(const fms::v1::Mission& mission) {
+    const auto& node = mission.nodes(0);
+    std::string order_id = mission.mission_id() + "-" + node.id();
+
+    vda5050::Order order = node.has_move() ? build_move_order(order_id, node.move())
+                                           : build_action_order(order_id, node.action(), status_);
+    order.header.header_id = ++order_header_id_;
+    order.header.timestamp = vda5050::make_timestamp();
+    order.header.manufacturer = manufacturer_;
+    order.header.serial_number = serial_number_;
+
+    if (!send("order", nlohmann::json(order).dump())) {
+        return false;
+    }
+
+    mission_ = std::make_unique<ActiveMission>(mission, order, std::chrono::steady_clock::now());
+    status_.set_mission_id(mission.mission_id());
+    status_hub_.publish(status_);
+    spdlog::info("[{}] mission {} started: order {} sent, {} nodes", robot_id_, mission.mission_id(), order_id,
+                 order.nodes.size());
+    return true;
+}
+
+// 5c: статус миссии изменился
+void RobotSession::on_mission_changed() {
+    const auto& status = mission_->status();
+    const auto& step = status.steps(0);
+    spdlog::info("[{}] mission {} {}, step {} {}, node {}/{}{}", robot_id_, status.mission_id(),
+                 fms::v1::MissionState_Name(status.state()), step.node_id(), fms::v1::StepState_Name(step.state()),
+                 step.move().last_node_index() + 1, step.move().total_nodes(),
+                 status.has_error() ? " — " + status.error().message() : "");
+
+    if (mission_->done()) {
+        mission_.reset();   // робот свободен
+        status_.clear_mission_id();
+        status_hub_.publish(status_);
     }
 }
