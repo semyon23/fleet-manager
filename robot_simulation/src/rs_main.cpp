@@ -40,7 +40,7 @@ int main(){
     spdlog::info("[system] Robot simulation started");
     AppConfig app_config{};
     try{
-        app_config = ConfigLoader::load("/home/ubuntu/fleet-manager/robot_simulation/config/config.yaml");
+        app_config = ConfigLoader::load("/home/ktc/CLionProjects/fleet-manager/robot_simulation/config/config.yaml");
 
         spdlog::trace("[System][config] Mqtt broker address: "
                      "host {}:{}, (username = {}, password = {}) ", app_config.mqtt.host, app_config.mqtt.port, app_config.mqtt.username, app_config.mqtt.password);

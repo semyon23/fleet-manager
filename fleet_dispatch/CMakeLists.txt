@@ -10,16 +10,11 @@ add_executable(fleet_dispatch fd_main.cpp
         src/GrpcServer.cpp
         src/DispatchService.cpp
         src/RobotSession.cpp
-        include/RobotSession.hpp
         src/FleetRegistry.cpp
-        include/FleetRegistry.hpp
-        include/VdaTopics.hpp
         src/RobotMessageRouter.cpp
-        include/RobotMessageRouter.hpp
         src/RobotStatusBuilder.cpp
-        include/RobotStatusBuilder.hpp
         src/RobotStatusHub.cpp
-        include/RobotStatusHub.hpp
+        src/OrderBuilder.cpp
 )
 
 target_link_libraries(fleet_dispatch

@@ -1,5 +1,5 @@
 mqtt:
-  host: "127.0.0.1"
+  host: "192.168.163.193"
   port: 1883
   client_id: "simulator"
   username: "user"
@@ -63,16 +63,16 @@ physical:
   software_version: "0.1.0"
 
 behavior_tree:
-  xml_path: "/home/ubuntu/fleet-manager/robot_simulation/trees/robot_tree.xml"
-
+#  xml_path: "/home/ubuntu/fleet-manager/robot_simulation/trees/robot_tree.xml"
+  xml_path: "/home/ktc/CLionProjects/fleet-manager/robot_simulation/trees/robot_tree.xml"
 simulation:
   tick_period_ms: 100
 
 robots:
   - serial_number: 1
-  - serial_number: 2
-  - serial_number: 2
-  - serial_number: 4
-  - serial_number: 4
+#  - serial_number: 2
+#  - serial_number: 2
+#  - serial_number: 4
+#  - serial_number: 4
 
 
