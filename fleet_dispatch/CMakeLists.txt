@@ -15,6 +15,8 @@ add_executable(fleet_dispatch fd_main.cpp
         src/RobotStatusBuilder.cpp
         src/RobotStatusHub.cpp
         src/OrderBuilder.cpp
+        include/OrderTracker.cpp
+        include/OrderTracker.hpp
 )
 
 target_link_libraries(fleet_dispatch
