@@ -20,13 +20,14 @@ int main(){
         Outbox outbox{io_context, 1000};
 
         RobotStatusHub status_hub{io_context};
+        MissionStatusHub mission_hub{io_context};
 
         GrpcServer grpc_server{"0.0.0.0:5001"};
         agrpc::GrpcContext grpc_context{grpc_server.add_completion_queue()};
 
-        FleetRegistry registry{io_context, outbox, status_hub};
+        FleetRegistry registry{io_context, outbox, status_hub, mission_hub};
         RobotMessageRouter message_router{io_context, mqtt, registry, outbox};
-        DispatchService dispatch_service{grpc_context, registry, status_hub};
+        DispatchService dispatch_service{grpc_context, registry, status_hub, mission_hub};
         grpc_server.add_service(dispatch_service.grpc_service());
 
 
@@ -43,6 +44,7 @@ int main(){
             spdlog::info("signal {} received, stopping", signal);
             grpc_server.shutdown();
             status_hub.close_all();
+            mission_hub.close_all();
             registry.stop_all();
             outbox.close();
             mqtt.stop();

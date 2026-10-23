@@ -11,6 +11,7 @@
 
 #include "RobotMessages.hpp"
 #include "RobotStatusHub.hpp"
+#include "MissionStatusHub.hpp"
 #include "ActiveMission.hpp"
 #include "fms_types.pb.h"
 #include "vda5050.hpp"
@@ -18,7 +19,7 @@
 
 class RobotSession : public std::enable_shared_from_this<RobotSession> {
 public:
-    RobotSession(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, std::string robot_id,
+    RobotSession(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, MissionStatusHub& mission_hub, std::string robot_id,
                  std::string manufacturer, std::string serial_number);
 
     void start();
@@ -31,6 +32,7 @@ public:
 
     bool start_mission(const fms::v1::Mission& mission);   // false — order не ушёл (очередь MQTT)
     bool cancel_mission();   // 5d: отправить cancelOrder; false — не ушло (очередь MQTT)
+    void abort_mission(const std::string& message);
     const ActiveMission* mission() const { return mission_.get(); }   // nullptr — робот свободен
 
     const std::string& robot_id() const { return robot_id_; }
@@ -58,6 +60,7 @@ private:
 
     Outbox& outbox_;
     RobotStatusHub& status_hub_;
+    MissionStatusHub& mission_hub_;
     std::string robot_id_;
     std::string manufacturer_;
     std::string serial_number_;

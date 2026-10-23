@@ -23,7 +23,7 @@ public:
 
     const std::string& mission_id() const { return mission_.mission_id(); }
     const fms::v1::MissionStatus& status() const { return status_; }
-
+    void abort(fms::v1::MissionErrorCode code, const std::string& message);
 private:
     void update_status();
     void check_cancel(const vda5050::State& state);

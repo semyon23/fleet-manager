@@ -19,6 +19,8 @@ add_executable(fleet_dispatch fd_main.cpp
         include/OrderTracker.hpp
         src/ActiveMission.cpp
         include/ActiveMission.hpp
+        include/MissionStatusHub.cpp
+        include/MissionStatusHub.hpp
 )
 
 target_link_libraries(fleet_dispatch

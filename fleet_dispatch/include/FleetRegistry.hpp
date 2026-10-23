@@ -10,7 +10,7 @@
 
 #include "RobotMessages.hpp"
 #include "RobotSession.hpp"
-
+//#include "MissionStatusHub.hpp"
 enum class AddResult {
     Added,
     AlreadyExists,
@@ -19,7 +19,7 @@ enum class AddResult {
 
 class FleetRegistry {
 public:
-    FleetRegistry(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub);
+    FleetRegistry(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, MissionStatusHub& mission_hub);
 
     AddResult add(const std::string& robot_id, const std::string& manufacturer, const std::string& serial_number);
     bool remove(const std::string& robot_id);
@@ -35,6 +35,7 @@ private:
     asio::io_context& io_context_;
     Outbox& outbox_;
     RobotStatusHub& status_hub_;
+    MissionStatusHub& mission_hub_;
     std::unordered_map<std::string, std::shared_ptr<RobotSession>> sessions_;
 };
 

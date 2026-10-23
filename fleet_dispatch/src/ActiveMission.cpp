@@ -83,14 +83,16 @@ bool ActiveMission::on_state(const vda5050::State& state) {
     }
     auto before = status_;
     if (canceling()) {
-        // при отмене робот сам переводит действия order'а в FAILED — это не провал миссии,
-        // поэтому tracker не слушаем, ждём только подтверждения cancelOrder
         check_cancel(state);
     } else {
         tracker_.on_state(state);
         update_status();
     }
-    return !google::protobuf::util::MessageDifferencer::Equals(before, status_);
+    bool changed = !google::protobuf::util::MessageDifferencer::Equals(before, status_);
+    if (changed) {
+        *status_.mutable_updated_at() = TimeUtil::GetCurrentTime();   // 6
+    }
+    return changed;
 }
 
 bool ActiveMission::on_tick(OrderTracker::Clock::time_point now) {
@@ -106,13 +108,18 @@ bool ActiveMission::on_tick(OrderTracker::Clock::time_point now) {
         tracker_.on_tick(now);
         update_status();
     }
-    return !google::protobuf::util::MessageDifferencer::Equals(before, status_);
+    bool changed = !google::protobuf::util::MessageDifferencer::Equals(before, status_);
+    if (changed) {
+        *status_.mutable_updated_at() = TimeUtil::GetCurrentTime();   // 6
+    }
+    return changed;
 }
 
 void ActiveMission::cancel(const std::string& cancel_action_id, Clock::time_point now) {
     cancel_action_id_ = cancel_action_id;
     cancel_sent_at_ = now;
     status_.set_state(fms::v1::MISSION_STATE_CANCELING);
+    *status_.mutable_updated_at() = TimeUtil::GetCurrentTime();
 }
 
 void ActiveMission::check_cancel(const vda5050::State& state) {
@@ -190,4 +197,12 @@ void ActiveMission::finish(fms::v1::MissionState mission_state, fms::v1::StepSta
     status_.set_state(mission_state);
     *status_.mutable_finished_at() = now;
     status_.clear_current_node_id();
+}
+
+void ActiveMission::abort(fms::v1::MissionErrorCode code, const std::string &message) {
+    if (done()) {
+        return;
+    }
+    fail(code, message);
+    *status_.mutable_updated_at() = TimeUtil::GetCurrentTime();
 }

@@ -10,10 +10,9 @@ struct NotifyWhenDoneTraits : agrpc::DefaultServerRPCTraits {
     static constexpr bool NOTIFY_WHEN_DONE = true;
 };
 
-
-
 using AsyncService = dv1::FleetDispatch::AsyncService;
 using StreamRobotStatusRPC = agrpc::ServerRPC<&AsyncService::RequestStreamRobotStatus, NotifyWhenDoneTraits>;
+using StreamMissionStatusRPC = agrpc::ServerRPC<&AsyncService::RequestStreamMissionStatus, NotifyWhenDoneTraits>;
 
 using AddRobotRPC           = agrpc::ServerRPC<&AsyncService::RequestAddRobot>;
 using RemoveRobotRPC        = agrpc::ServerRPC<&AsyncService::RequestRemoveRobot>;
@@ -24,7 +23,7 @@ using PauseRobotRPC         = agrpc::ServerRPC<&AsyncService::RequestPauseRobot>
 using ResumeRobotRPC        = agrpc::ServerRPC<&AsyncService::RequestResumeRobot>;
 using InitializePositionRPC = agrpc::ServerRPC<&AsyncService::RequestInitializePosition>;
 //using StreamRobotStatusRPC   = agrpc::ServerRPC<&AsyncService::RequestStreamRobotStatus>;
-using StreamMissionStatusRPC = agrpc::ServerRPC<&AsyncService::RequestStreamMissionStatus>;
+//using StreamMissionStatusRPC = agrpc::ServerRPC<&AsyncService::RequestStreamMissionStatus>;
 
 const auto on_handler_done = [](std::exception_ptr error) {
     if (!error) return;
@@ -38,8 +37,8 @@ grpc::Status unimplemented(const char* name) {
     return {grpc::StatusCode::UNIMPLEMENTED, std::string(name) + ": not implemented yet"};
 }
 
-DispatchService::DispatchService(agrpc::GrpcContext& grpc_context, FleetRegistry& registry,  RobotStatusHub& status_hub)
-    : grpc_context_(grpc_context), fleet_registry_(registry), status_hub_(status_hub) {}
+DispatchService::DispatchService(agrpc::GrpcContext& grpc_context, FleetRegistry& registry,  RobotStatusHub& status_hub, MissionStatusHub& mission_hub)
+    : grpc_context_(grpc_context), fleet_registry_(registry), status_hub_(status_hub), mission_hub_(mission_hub) {}
 
 grpc::Service& DispatchService::grpc_service(){
      return service_;
@@ -151,8 +150,30 @@ void DispatchService::start() {
 
     agrpc::register_awaitable_rpc_handler<StreamMissionStatusRPC>(
         grpc_context_, service_,
-        [](StreamMissionStatusRPC& rpc, StreamMissionStatusRPC::Request&) -> asio::awaitable<void> {
-            co_await rpc.finish(unimplemented("StreamMissionStatus"));
+        [this](StreamMissionStatusRPC& rpc, StreamMissionStatusRPC::Request& request) -> asio::awaitable<void> {
+            using namespace asio::experimental::awaitable_operators;
+
+            std::vector<std::string> robot_ids(request.robot_ids().begin(), request.robot_ids().end());
+            auto subscriber = mission_hub_.subscribe(std::move(robot_ids));
+            grpc::Status status = grpc::Status::OK;
+
+            auto send_updates = [&]() -> asio::awaitable<void> {
+                while (true) {
+                    auto [ec, update] = co_await subscriber->channel.async_receive(asio::as_tuple(asio::use_awaitable));
+                    if (ec) {
+                        status = grpc::Status{grpc::StatusCode::UNAVAILABLE, "mission stream closed, subscribe again"};
+                        co_return;
+                    }
+                    if (!co_await rpc.write(update)) {
+                        co_return;
+                    }
+                }
+            };
+
+            co_await (send_updates() || rpc.wait_for_done(asio::use_awaitable));
+
+            mission_hub_.unsubscribe(subscriber);
+            co_await rpc.finish(status);
         },
         on_handler_done);
 }

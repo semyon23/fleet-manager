@@ -24,11 +24,12 @@ std::string action_error(const vda5050::State& state, const vda5050::ActionState
     return action_state.action_result.value_or("no details");
 }
 
-RobotSession::RobotSession(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, std::string robot_id,
+RobotSession::RobotSession(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, MissionStatusHub& mission_hub, std::string robot_id,
                            std::string manufacturer, std::string serial_number)
     : io_context_(io_context),
       outbox_(outbox),
       status_hub_(status_hub),
+      mission_hub_(mission_hub),
       robot_id_(std::move(robot_id)),
       manufacturer_(std::move(manufacturer)),
       serial_number_(std::move(serial_number)),
@@ -264,6 +265,7 @@ bool RobotSession::start_mission(const fms::v1::Mission& mission) {
     }
 
     mission_ = std::make_unique<ActiveMission>(mission, order, std::chrono::steady_clock::now());
+    mission_hub_.publish(mission_->status());
     status_.set_mission_id(mission.mission_id());
     status_hub_.publish(status_);
     spdlog::info("[{}] mission {} started: order {} sent, {} nodes", robot_id_, mission.mission_id(), order_id,
@@ -280,8 +282,10 @@ void RobotSession::on_mission_changed() {
                  step.move().last_node_index() + 1, step.move().total_nodes(),
                  status.has_error() ? " — " + status.error().message() : "");
 
+    mission_hub_.publish(status);
+
     if (mission_->done()) {
-        mission_.reset();   // робот свободен
+        mission_.reset();
         status_.clear_mission_id();
         status_hub_.publish(status_);
     }
@@ -295,4 +299,12 @@ bool RobotSession::cancel_mission() {
     mission_->cancel(action_id, std::chrono::steady_clock::now());
     on_mission_changed();
     return true;
+}
+
+void RobotSession::abort_mission(const std::string &message) {
+    if (!mission_) {
+        return;
+    }
+    mission_->abort(fms::v1::MISSION_ERROR_CODE_ROBOT_REMOVED, message);
+    on_mission_changed();
 }
