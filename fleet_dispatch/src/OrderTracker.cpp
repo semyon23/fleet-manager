@@ -73,7 +73,7 @@ void OrderTracker::on_state(const vda5050::State& state) {
     waiting_for_release_ = !state.node_states.empty() && only_horizon_left && !state.driving;
 
     // 6. Закончен: маршрут пройден и все действия FINISHED
-    bool route_done = state.node_states.empty() && state.edge_states.empty();
+    bool route_done = state.node_states.empty() && state.edge_states.empty() && !state.driving;
     bool actions_done = std::all_of(actions_.begin(), actions_.end(), [](const auto& action) {
         return action.second == vda5050::ActionStatus::Finished;
     });

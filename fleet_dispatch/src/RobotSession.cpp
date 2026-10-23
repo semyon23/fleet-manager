@@ -24,6 +24,14 @@ std::string action_error(const vda5050::State& state, const vda5050::ActionState
     return action_state.action_result.value_or("no details");
 }
 
+// Номер для actionId — общий на все сессии: id не повторится, даже если робота удалили
+// и сразу добавили снова (новая сессия в ту же секунду). Старт от времени — не повторится
+// и после перезапуска dispatch (до 1000 action'ов в секунду).
+std::uint64_t next_action_number() {
+    static std::uint64_t number = static_cast<std::uint64_t>(std::time(nullptr)) * 1000;
+    return ++number;
+}
+
 RobotSession::RobotSession(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, MissionStatusHub& mission_hub, std::string robot_id,
                            std::string manufacturer, std::string serial_number)
     : io_context_(io_context),
@@ -205,6 +213,7 @@ bool RobotSession::initialize_position(const fms::v1::Pose& pose, const std::str
 
 std::string RobotSession::send_instant_action(const std::string& action_type, std::vector<vda5050::ActionParameter> parameters){
     vda5050::InstantActions message;
+
     message.header.header_id = ++instant_actions_header_id_;
     message.header.timestamp = vda5050::make_timestamp();
     message.header.manufacturer = manufacturer_;
@@ -213,8 +222,8 @@ std::string RobotSession::send_instant_action(const std::string& action_type, st
     vda5050::Action action;
     action.action_type = action_type;
 
-    action.action_id = robot_id_ + "-" + action_type + "-" + std::to_string(message.header.header_id);
-
+   // action.action_id = robot_id_ + "-" + action_type + "-" + std::to_string(message.header.header_id);
+    action.action_id = robot_id_ + "-" + action_type + "-" + std::to_string(next_action_number());
     action.blocking_type = vda5050::BlockingType::None;
     if (!parameters.empty()) {
         action.action_parameters = std::move(parameters);
@@ -273,14 +282,19 @@ bool RobotSession::start_mission(const fms::v1::Mission& mission) {
     return true;
 }
 
-// 5c: статус миссии изменился
 void RobotSession::on_mission_changed() {
     const auto& status = mission_->status();
     const auto& step = status.steps(0);
-    spdlog::info("[{}] mission {} {}, step {} {}, node {}/{}{}", robot_id_, status.mission_id(),
+
+    std::string progress;
+    if (step.has_move()) {
+        progress = ", node " + std::to_string(step.move().last_node_index() + 1) + "/" +
+                   std::to_string(step.move().total_nodes());
+    }
+
+    spdlog::info("[{}] mission {} {}, step {} {}{}{}", robot_id_, status.mission_id(),
                  fms::v1::MissionState_Name(status.state()), step.node_id(), fms::v1::StepState_Name(step.state()),
-                 step.move().last_node_index() + 1, step.move().total_nodes(),
-                 status.has_error() ? " — " + status.error().message() : "");
+                 progress, status.has_error() ? " — " + status.error().message() : "");
 
     mission_hub_.publish(status);
 

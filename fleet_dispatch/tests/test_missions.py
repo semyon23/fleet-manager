@@ -51,7 +51,7 @@ def test_move_mission_completes(robot):
     assert step.move.last_node_index == 2 and step.move.last_node_id == "b"
     assert step.actions[0].status == fms.ACTION_STATUS_FINISHED
     assert status.HasField("finished_at")
-
+    assert not robot.mqtt.latest("state")["driving"], "mission COMPLETED while the robot was still driving"
     # прогресс шёл по узлам: 0 → 1 → 2, без скачков назад
     indexes = [u.status.steps[0].move.last_node_index for u in missions.items()
                if u.HasField("status") and u.status.mission_id == mission_id]
