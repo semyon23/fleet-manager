@@ -19,7 +19,7 @@ add_executable(fleet_dispatch fd_main.cpp
         include/OrderTracker.hpp
         src/ActiveMission.cpp
         include/ActiveMission.hpp
-        include/MissionStatusHub.cpp
+        src/MissionStatusHub.cpp
         include/MissionStatusHub.hpp
 )
 
