@@ -48,6 +48,15 @@ RobotSession* FleetRegistry::find(const std::string& robot_id) {
     return it == sessions_.end() ? nullptr : it->second.get();
 }
 
+RobotSession* FleetRegistry::find_by_mission(const std::string& mission_id) {
+    for (auto& [id, session] : sessions_) {
+        if (session->mission() && session->mission()->mission_id() == mission_id) {
+            return session.get();
+        }
+    }
+    return nullptr;
+}
+
 bool FleetRegistry::post(const std::string& manufacturer, const std::string& serial_number, VdaMessage message) {
     RobotSession* session = find_by_vda(manufacturer, serial_number);
     if (!session) {

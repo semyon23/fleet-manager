@@ -196,6 +196,11 @@ asio::awaitable<grpc::Status> DispatchService::add_mission(const dv1::AddMission
         co_return status;
     }
 
+    if (RobotSession* other = fleet_registry_.find_by_mission(mission.mission_id()); other && other != session) {
+        co_return grpc::Status{grpc::StatusCode::ALREADY_EXISTS,
+                               "mission " + mission.mission_id() + " is already running on robot " + other->robot_id()};
+    }
+
     // У робота уже есть миссия: та же — повтор запроса, отвечаем её статусом
     if (const ActiveMission* active = session->mission()) {
         if (active->mission_id() == mission.mission_id()) {
@@ -244,8 +249,23 @@ asio::awaitable<grpc::Status> DispatchService::add_mission(const dv1::AddMission
     co_return grpc::Status::OK;
 }
 
-asio::awaitable<grpc::Status> DispatchService::cancel_mission(const dv1::CancelMissionRequest&, dv1::CancelMissionResponse&) {
-    co_return unimplemented("CancelMission");
+asio::awaitable<grpc::Status> DispatchService::cancel_mission(const dv1::CancelMissionRequest& request, dv1::CancelMissionResponse&) {
+    RobotSession* session = fleet_registry_.find_by_mission(request.mission_id());
+    if (!session) {
+        co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "mission " + request.mission_id() + " is not running"};
+    }
+    if (session->mission()->canceling()) {
+        co_return grpc::Status::OK;   // повтор: отмена уже идёт
+    }
+    auto connection = session->status().connection();
+    if (connection != fms::v1::CONNECTION_STATE_ONLINE) {
+        co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
+                               "robot " + session->robot_id() + " is " + fms::v1::ConnectionState_Name(connection)};
+    }
+    if (!session->cancel_mission()) {
+        co_return grpc::Status{grpc::StatusCode::UNAVAILABLE, "mqtt queue is full, try again"};
+    }
+    co_return grpc::Status::OK;
 }
 
 asio::awaitable<grpc::Status> DispatchService::extend_mission(const dv1::ExtendMissionRequest&, dv1::ExtendMissionResponse&) {

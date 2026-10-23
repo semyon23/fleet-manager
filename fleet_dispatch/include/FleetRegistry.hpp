@@ -26,6 +26,7 @@ public:
     void stop_all();
 
     RobotSession* find(const std::string& robot_id);
+    RobotSession* find_by_mission(const std::string& mission_id);
     bool post(const std::string& manufacturer, const std::string& serial_number, VdaMessage message);
 
 private:

@@ -185,24 +185,24 @@ void RobotSession::count_invalid_message(const std::string& topic, const std::st
 }
 
 bool RobotSession::pause() {
-    return send_instant_action(vda5050::action_type::kStartPause, {});
+    return !send_instant_action(vda5050::action_type::kStartPause, {}).empty();
 }
 
 bool RobotSession::resume() {
-    return send_instant_action(vda5050::action_type::kStopPause, {});
+    return !send_instant_action(vda5050::action_type::kStopPause, {}).empty();
 }
 
 bool RobotSession::initialize_position(const fms::v1::Pose& pose, const std::string& last_node_id) {
-    return send_instant_action(vda5050::action_type::kInitializePosition, {
+    return !send_instant_action(vda5050::action_type::kInitializePosition, {
         {"x", pose.x()},
         {"y", pose.y()},
         {"theta", pose.theta()},
         {"mapId", pose.map_id()},
         {"lastNodeId", last_node_id},
-    });
+    }).empty();
 }
 
-bool RobotSession::send_instant_action(const std::string& action_type, std::vector<vda5050::ActionParameter> parameters){
+std::string RobotSession::send_instant_action(const std::string& action_type, std::vector<vda5050::ActionParameter> parameters){
     vda5050::InstantActions message;
     message.header.header_id = ++instant_actions_header_id_;
     message.header.timestamp = vda5050::make_timestamp();
@@ -220,11 +220,13 @@ bool RobotSession::send_instant_action(const std::string& action_type, std::vect
     }
     message.actions.push_back(action);
     if (!send("instantActions", nlohmann::json(message).dump())) {
-        return false;
+        return {};
     }
     pending_actions_[action.action_id] = action_type;
     spdlog::info("[{}] {} sent ({})", robot_id_, action_type, action.action_id);
-    return true;
+    return action.action_id;
+
+
 }
 
 void RobotSession::check_instant_actions(const vda5050::State& state) {
@@ -283,4 +285,14 @@ void RobotSession::on_mission_changed() {
         status_.clear_mission_id();
         status_hub_.publish(status_);
     }
+}
+
+bool RobotSession::cancel_mission() {
+    std::string action_id = send_instant_action(vda5050::action_type::kCancelOrder);
+    if (action_id.empty()) {
+        return false;
+    }
+    mission_->cancel(action_id, std::chrono::steady_clock::now());
+    on_mission_changed();
+    return true;
 }

@@ -30,6 +30,7 @@ public:
     bool post(VdaMessage message);
 
     bool start_mission(const fms::v1::Mission& mission);   // false — order не ушёл (очередь MQTT)
+    bool cancel_mission();   // 5d: отправить cancelOrder; false — не ушло (очередь MQTT)
     const ActiveMission* mission() const { return mission_.get(); }   // nullptr — робот свободен
 
     const std::string& robot_id() const { return robot_id_; }
@@ -48,7 +49,7 @@ private:
     bool send(const std::string& kind, std::string payload);
     bool request(MqttAction action, const std::string& topic, std::string payload = {});
 
-    bool send_instant_action(const std::string& action_type, std::vector<vda5050::ActionParameter> parameters);
+    std::string send_instant_action(const std::string& action_type, std::vector<vda5050::ActionParameter> parameters = {});
     void check_instant_actions(const vda5050::State& state);
     void on_mission_changed();
     using Inbox = asio::experimental::channel<void(boost::system::error_code, VdaMessage)>;

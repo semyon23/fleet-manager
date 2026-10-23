@@ -30,7 +30,12 @@ void add_action(fms::v1::StepStatus* step, const vda5050::Action& action, const 
     progress->set_status(fms::v1::ACTION_STATUS_WAITING);
 }
 
-}  // namespace
+}
+
+namespace {
+    constexpr auto kCancelTimeout = std::chrono::seconds(10);   // 5d
+}
+
 
 ActiveMission::ActiveMission(fms::v1::Mission mission, const vda5050::Order& order,
                              OrderTracker::Clock::time_point sent_at)
@@ -73,23 +78,62 @@ ActiveMission::ActiveMission(fms::v1::Mission mission, const vda5050::Order& ord
 }
 
 bool ActiveMission::on_state(const vda5050::State& state) {
+    if (done()) {
+        return false;
+    }
     auto before = status_;
-    tracker_.on_state(state);
-    update_status();
+    if (canceling()) {
+        // при отмене робот сам переводит действия order'а в FAILED — это не провал миссии,
+        // поэтому tracker не слушаем, ждём только подтверждения cancelOrder
+        check_cancel(state);
+    } else {
+        tracker_.on_state(state);
+        update_status();
+    }
     return !google::protobuf::util::MessageDifferencer::Equals(before, status_);
 }
 
 bool ActiveMission::on_tick(OrderTracker::Clock::time_point now) {
+    if (done()) {
+        return false;
+    }
     auto before = status_;
-    tracker_.on_tick(now);
-    update_status();
+    if (canceling()) {
+        if (now - cancel_sent_at_ > kCancelTimeout) {
+            fail(fms::v1::MISSION_ERROR_CODE_TIMEOUT, "robot did not confirm cancelOrder in 10 s");
+        }
+    } else {
+        tracker_.on_tick(now);
+        update_status();
+    }
     return !google::protobuf::util::MessageDifferencer::Equals(before, status_);
 }
+
+void ActiveMission::cancel(const std::string& cancel_action_id, Clock::time_point now) {
+    cancel_action_id_ = cancel_action_id;
+    cancel_sent_at_ = now;
+    status_.set_state(fms::v1::MISSION_STATE_CANCELING);
+}
+
+void ActiveMission::check_cancel(const vda5050::State& state) {
+    for (const auto& action_state : state.instant_action_states) {
+        if (action_state.action_id != cancel_action_id_) {
+            continue;
+        }
+
+        if (action_state.action_status == vda5050::ActionStatus::Finished ||
+            action_state.action_status == vda5050::ActionStatus::Failed) {
+            finish(fms::v1::MISSION_STATE_CANCELED, fms::v1::STEP_STATE_CANCELED);
+            }
+        return;
+    }
+}
+
+
 
 void ActiveMission::update_status() {
     auto* step = status_.mutable_steps(0);
 
-    // Прогресс по маршруту
     if (step->has_move() && tracker_.passed_nodes() > 0) {
         int index = tracker_.passed_nodes() - 1;
         auto* move = step->mutable_move();
@@ -98,7 +142,6 @@ void ActiveMission::update_status() {
         move->set_waiting_for_release(tracker_.waiting_for_release());
     }
 
-    // Статусы действий
     for (auto& action : *step->mutable_actions()) {
         auto it = tracker_.actions().find(action.action_id());
         if (it != tracker_.actions().end()) {
@@ -109,32 +152,42 @@ void ActiveMission::update_status() {
     if (!tracker_.done()) {
         return;
     }
-
-    // Order закончился — с ним и шаг, и миссия (шаг один)
-    auto now = TimeUtil::GetCurrentTime();
-    *step->mutable_finished_at() = now;
-    *status_.mutable_finished_at() = now;
-    status_.clear_current_node_id();
-
     if (tracker_.phase() == OrderTracker::Phase::Finished) {
-        step->set_state(fms::v1::STEP_STATE_COMPLETED);
-        status_.set_state(fms::v1::MISSION_STATE_COMPLETED);
+        finish(fms::v1::MISSION_STATE_COMPLETED, fms::v1::STEP_STATE_COMPLETED);
         return;
     }
-
-    step->set_state(fms::v1::STEP_STATE_FAILED);
-    status_.set_state(fms::v1::MISSION_STATE_FAILED);
-    auto* error = status_.mutable_error();
-    error->set_message(tracker_.failure());
 
     bool action_failed = std::any_of(tracker_.actions().begin(), tracker_.actions().end(), [](const auto& a) {
         return a.second == vda5050::ActionStatus::Failed;
     });
     if (tracker_.phase() == OrderTracker::Phase::Rejected) {
-        error->set_code(fms::v1::MISSION_ERROR_CODE_ORDER_REJECTED);
+        fail(fms::v1::MISSION_ERROR_CODE_ORDER_REJECTED, tracker_.failure());
     } else if (action_failed) {
-        error->set_code(fms::v1::MISSION_ERROR_CODE_ACTION_FAILED);
+        fail(fms::v1::MISSION_ERROR_CODE_ACTION_FAILED, tracker_.failure());
     } else {
-        error->set_code(fms::v1::MISSION_ERROR_CODE_ROBOT_ERROR);   // робот переключился на чужой order
+        fail(fms::v1::MISSION_ERROR_CODE_ROBOT_ERROR, tracker_.failure());   // робот переключился на чужой order
     }
+}
+
+bool ActiveMission::done() const {
+    auto state = status_.state();
+    return state == fms::v1::MISSION_STATE_COMPLETED || state == fms::v1::MISSION_STATE_FAILED ||
+           state == fms::v1::MISSION_STATE_CANCELED;
+}
+
+void ActiveMission::fail(fms::v1::MissionErrorCode code, const std::string &message) {
+    finish(fms::v1::MISSION_STATE_FAILED, fms::v1::STEP_STATE_FAILED);
+    auto* error = status_.mutable_error();
+    error->set_code(code);
+    error->set_message(message);
+}
+
+void ActiveMission::finish(fms::v1::MissionState mission_state, fms::v1::StepState step_state) {
+    auto now = TimeUtil::GetCurrentTime();
+    auto* step = status_.mutable_steps(0);
+    step->set_state(step_state);
+    *step->mutable_finished_at() = now;
+    status_.set_state(mission_state);
+    *status_.mutable_finished_at() = now;
+    status_.clear_current_node_id();
 }
