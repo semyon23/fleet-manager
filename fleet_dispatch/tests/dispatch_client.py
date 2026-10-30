@@ -138,3 +138,47 @@ def action_mission(mission_id: str, robot_id: str, actions: list) -> fms.Mission
     mission = fms.Mission(mission_id=mission_id, robot_id=robot_id)
     mission.nodes.add(id="s1", name="action", action=step)
     return mission
+
+
+# ------------------------------------------------------------- многошаговые миссии
+
+def _step(step_id: str, on_failure: Optional[int] = None, max_retries: int = 0,
+          timeout: Optional[float] = None, **kind) -> fms.MissionNode:
+    """Шаг миссии. kind — один из move= / action= / wait=; timeout — в секундах."""
+    step = fms.MissionNode(id=step_id, name=step_id, **kind)
+    if on_failure is not None:
+        step.on_failure = on_failure
+    step.max_retries = max_retries
+    if timeout is not None:
+        step.timeout.FromMilliseconds(int(timeout * 1000))
+    return step
+
+
+def step_move(step_id: str, nodes: list, **options) -> fms.MissionNode:
+    move = fms.MoveStep()
+    move.nodes.extend(nodes)
+    move.nodes[0].allowed_deviation_xy = 0.5
+    for i in range(len(nodes) - 1):
+        move.edges.add(edge_id=f"{step_id}-e{i}")
+    return _step(step_id, move=move, **options)
+
+
+def step_action(step_id: str, actions: list, **options) -> fms.MissionNode:
+    return _step(step_id, action=fms.ActionStep(actions=actions), **options)
+
+
+def step_wait(step_id: str, seconds: float, **options) -> fms.MissionNode:
+    wait = fms.WaitStep()
+    wait.duration.FromMilliseconds(int(seconds * 1000))
+    return _step(step_id, wait=wait, **options)
+
+
+def mission_of(mission_id: str, robot_id: str, steps: list) -> fms.Mission:
+    mission = fms.Mission(mission_id=mission_id, robot_id=robot_id)
+    mission.nodes.extend(steps)
+    return mission
+
+
+def unknown_action() -> fms.Action:
+    """Действие, которого нет в factsheet симулятора: робот отклонит order с ним."""
+    return fms.Action(action_type="noSuchAction", blocking_type=fms.BLOCKING_TYPE_HARD)

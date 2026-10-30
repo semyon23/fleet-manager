@@ -5,7 +5,8 @@
 #include "spdlog/spdlog.h"
 #include <boost/asio/experimental/awaitable_operators.hpp>
 #include "OrderBuilder.hpp"
-// Для стрима нужен rpc.wait_for_done(): узнать, что клиент отключился, не дожидаясь следующей записи
+#include <set>
+
 struct NotifyWhenDoneTraits : agrpc::DefaultServerRPCTraits {
     static constexpr bool NOTIFY_WHEN_DONE = true;
 };
@@ -232,35 +233,47 @@ asio::awaitable<grpc::Status> DispatchService::add_mission(const dv1::AddMission
                                "robot " + mission.robot_id() + " is busy with mission " + active->mission_id()};
     }
 
-    if (mission.nodes_size() != 1) {
-        co_return grpc::Status{grpc::StatusCode::UNIMPLEMENTED, "only missions with one step are supported yet"};
-    }
-    const auto& node = mission.nodes(0);
-    if (node.id().empty()) {
-        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "mission node id is required"};
+        if (mission.nodes().empty()) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "mission has no steps"};
     }
 
-    const auto& robot = session->status();
-    if (node.has_move()) {
-        if (auto error = validate_move_step(node.move()); !error.empty()) {
-            co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, error};
+    // 7: все шаги по порядку; robot_at — где робот окажется перед очередным шагом
+    std::string robot_at = session->status().last_node_id();
+    std::set<std::string> step_ids;
+    for (const auto& node : mission.nodes()) {
+        const std::string step = "step '" + node.id() + "': ";
+        if (node.id().empty() || !step_ids.insert(node.id()).second) {
+            co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "step ids must be non-empty and unique"};
         }
-        // Робот откажет, если маршрут начинается не там, где он стоит — проверяем заранее
-        const auto& start = node.move().nodes(0).node_id();
-        if (start != robot.last_node_id()) {
-            co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
-                                   "robot is at '" + robot.last_node_id() + "', route starts at '" + start + "'"};
+        if (!node.parent_id().empty()) {
+            co_return grpc::Status{grpc::StatusCode::UNIMPLEMENTED, step + "nested steps are not supported yet"};
         }
-    } else if (node.has_action()) {
-        if (auto error = validate_action_step(node.action()); !error.empty()) {
-            co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, error};
+
+        if (node.has_move()) {
+            if (auto error = validate_move_step(node.move()); !error.empty()) {
+                co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, step + error};
+            }
+            const auto& start = node.move().nodes(0).node_id();
+            if (start != robot_at) {
+                co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
+                                       step + "robot will be at '" + robot_at + "', route starts at '" + start + "'"};
+            }
+            robot_at = node.move().nodes(node.move().nodes_size() - 1).node_id();
+        } else if (node.has_action()) {
+            if (auto error = validate_action_step(node.action()); !error.empty()) {
+                co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, step + error};
+            }
+            if (robot_at.empty()) {
+                co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
+                                       step + "robot is not on the graph, call InitializePosition first"};
+            }
+        } else if (node.has_wait()) {
+            if (!node.wait().has_duration()) {
+                co_return grpc::Status{grpc::StatusCode::UNIMPLEMENTED, step + "waiting for a signal is not supported yet"};
+            }
+        } else {
+            co_return grpc::Status{grpc::StatusCode::UNIMPLEMENTED, step + "notify steps are not supported yet"};
         }
-        if (robot.last_node_id().empty()) {
-            co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
-                                   "robot is not on the graph, call InitializePosition first"};
-        }
-    } else {
-        co_return grpc::Status{grpc::StatusCode::UNIMPLEMENTED, "only move and action steps are supported yet"};
     }
 
     if (!session->start_mission(mission)) {

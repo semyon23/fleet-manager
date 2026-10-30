@@ -2,7 +2,7 @@
 #include "../include/OrderTracker.hpp"
 
 namespace {
-// Сколько ждать, пока робот покажет наш order в state
+
 constexpr auto kAcceptTimeout = std::chrono::seconds(10);
 }
 
@@ -54,16 +54,12 @@ void OrderTracker::on_state(const vda5050::State& state) {
         passed_nodes_ = static_cast<int>(state.last_node_sequence_id / 2) + 1;
     }
 
-    // 4. Статусы наших действий
+    // 4. Статусы наших действий. Провал действия запоминаем, но order не заканчиваем:
+    //    робот может ещё ехать — ждём, пока он закончит, иначе следующий order наткнётся на занятого робота
     for (const auto& action_state : state.action_states) {
         auto it = actions_.find(action_state.action_id);
-        if (it == actions_.end()) {
-            continue;
-        }
-        it->second = action_state.action_status;
-        if (action_state.action_status == vda5050::ActionStatus::Failed) {
-            finish(Phase::Failed, "action " + action_state.action_id + " failed");
-            return;
+        if (it != actions_.end()) {
+            it->second = action_state.action_status;
         }
     }
 
@@ -72,12 +68,20 @@ void OrderTracker::on_state(const vda5050::State& state) {
                                          [](const auto& node) { return !node.released; });
     waiting_for_release_ = !state.node_states.empty() && only_horizon_left && !state.driving;
 
-    // 6. Закончен: маршрут пройден и все действия FINISHED
+    // 6. Order закончился: маршрут пройден, робот стоит, каждое наше действие FINISHED или FAILED
     bool route_done = state.node_states.empty() && state.edge_states.empty() && !state.driving;
-    bool actions_done = std::all_of(actions_.begin(), actions_.end(), [](const auto& action) {
-        return action.second == vda5050::ActionStatus::Finished;
+    bool actions_final = std::all_of(actions_.begin(), actions_.end(), [](const auto& action) {
+        return action.second == vda5050::ActionStatus::Finished || action.second == vda5050::ActionStatus::Failed;
     });
-    if (route_done && actions_done) {
+    if (!route_done || !actions_final) {
+        return;
+    }
+    auto failed = std::find_if(actions_.begin(), actions_.end(), [](const auto& action) {
+        return action.second == vda5050::ActionStatus::Failed;
+    });
+    if (failed != actions_.end()) {
+        finish(Phase::Failed, "action " + failed->first + " failed");
+    } else {
         finish(Phase::Finished);
     }
 }

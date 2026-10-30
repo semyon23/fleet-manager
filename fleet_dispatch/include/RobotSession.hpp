@@ -50,7 +50,7 @@ private:
 
     bool send(const std::string& kind, std::string payload);
     bool request(MqttAction action, const std::string& topic, std::string payload = {});
-
+    bool send_step_order();   // 7: построить и отправить order текущего шага миссии
     std::string send_instant_action(const std::string& action_type, std::vector<vda5050::ActionParameter> parameters = {});
     void check_instant_actions(const vda5050::State& state);
     void on_mission_changed();

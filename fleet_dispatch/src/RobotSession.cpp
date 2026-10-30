@@ -98,7 +98,7 @@ asio::awaitable<void> RobotSession::run() {
 
 asio::awaitable<void> RobotSession::watchdog() {
     while (true) {
-        watchdog_timer_.expires_after(std::chrono::seconds(5));
+        watchdog_timer_.expires_after(std::chrono::seconds(1));
         co_await watchdog_timer_.async_wait(asio::as_tuple(asio::use_awaitable));
         if (stopped_) {
             break;
@@ -259,39 +259,32 @@ void RobotSession::check_instant_actions(const vda5050::State& state) {
 
 // 5c: построить order шага, отправить и начать следить
 bool RobotSession::start_mission(const fms::v1::Mission& mission) {
-    const auto& node = mission.nodes(0);
-    std::string order_id = mission.mission_id() + "-" + node.id();
-
-    vda5050::Order order = node.has_move() ? build_move_order(order_id, node.move())
-                                           : build_action_order(order_id, node.action(), status_);
-    order.header.header_id = ++order_header_id_;
-    order.header.timestamp = vda5050::make_timestamp();
-    order.header.manufacturer = manufacturer_;
-    order.header.serial_number = serial_number_;
-
-    if (!send("order", nlohmann::json(order).dump())) {
+    mission_ = std::make_unique<ActiveMission>(mission, std::chrono::steady_clock::now());
+    if (mission_->order_needed() && !send_step_order()) {
+        mission_.reset();   // order не ушёл — миссию не начинаем
         return false;
     }
-
-    mission_ = std::make_unique<ActiveMission>(mission, order, std::chrono::steady_clock::now());
-    mission_hub_.publish(mission_->status());
     status_.set_mission_id(mission.mission_id());
     status_hub_.publish(status_);
-    spdlog::info("[{}] mission {} started: order {} sent, {} nodes", robot_id_, mission.mission_id(), order_id,
-                 order.nodes.size());
+    mission_hub_.publish(mission_->status());
+    spdlog::info("[{}] mission {} started, {} steps", robot_id_, mission.mission_id(), mission.nodes_size());
     return true;
 }
 
 void RobotSession::on_mission_changed() {
+    // 7: следующий шаг или повтор ждёт order
+    if (mission_->order_needed() && !send_step_order()) {
+        mission_->abort(fms::v1::MISSION_ERROR_CODE_INTERNAL, "mqtt queue is full, order not sent");
+    }
+
     const auto& status = mission_->status();
-    const auto& step = status.steps(0);
+    const auto& step = status.steps(mission_->current_index());
 
     std::string progress;
     if (step.has_move()) {
         progress = ", node " + std::to_string(step.move().last_node_index() + 1) + "/" +
                    std::to_string(step.move().total_nodes());
     }
-
     spdlog::info("[{}] mission {} {}, step {} {}{}{}", robot_id_, status.mission_id(),
                  fms::v1::MissionState_Name(status.state()), step.node_id(), fms::v1::StepState_Name(step.state()),
                  progress, status.has_error() ? " — " + status.error().message() : "");
@@ -299,6 +292,9 @@ void RobotSession::on_mission_changed() {
     mission_hub_.publish(status);
 
     if (mission_->done()) {
+        if (status.has_error() && status.error().code() == fms::v1::MISSION_ERROR_CODE_TIMEOUT) {
+            send_instant_action(vda5050::action_type::kCancelOrder);
+        }
         mission_.reset();
         status_.clear_mission_id();
         status_hub_.publish(status_);
@@ -321,4 +317,24 @@ void RobotSession::abort_mission(const std::string &message) {
     }
     mission_->abort(fms::v1::MISSION_ERROR_CODE_ROBOT_REMOVED, message);
     on_mission_changed();
+}
+
+bool RobotSession::send_step_order() {
+    const auto& node = mission_->current_step();
+    std::string order_id = mission_->current_order_id();
+
+    vda5050::Order order = node.has_move() ? build_move_order(order_id, node.move())
+                                           : build_action_order(order_id, node.action(), status_);
+    order.header.header_id = ++order_header_id_;
+    order.header.timestamp = vda5050::make_timestamp();
+    order.header.manufacturer = manufacturer_;
+    order.header.serial_number = serial_number_;
+
+    if (!send("order", nlohmann::json(order).dump())) {
+        return false;
+    }
+    mission_->order_sent(order, std::chrono::steady_clock::now());
+    spdlog::info("[{}] mission {}: step {} order {} sent, {} nodes", robot_id_, mission_->mission_id(), node.id(),
+                 order_id, order.nodes.size());
+    return true;
 }

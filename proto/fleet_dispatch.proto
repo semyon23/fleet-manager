@@ -106,7 +106,8 @@ message AddMissionRequest {
   fms.v1.Mission mission = 1;
 }
 message AddMissionResponse {
-  fms.v1.MissionStatus status = 1;  // начальный статус: RUNNING, все шаги PENDING, action_id заполнены
+  fms.v1.MissionStatus status = 1;  // начальный статус: RUNNING, первый шаг RUNNING, остальные PENDING;
+  // action_id шага заполняются, когда отправлен его order
 }
 
 message CancelMissionRequest {

@@ -8,8 +8,8 @@ import pytest
 import fleet_dispatch_pb2 as dpb
 import fms_types_pb2 as fms
 from conftest import ORIGIN
-from dispatch_client import (action_mission, is_final, mission_status, move_mission, new_id, node,
-                             robot_status, sim_action)
+from dispatch_client import (action_mission, is_final, mission_of, mission_status, move_mission, new_id, node,
+                             robot_status, sim_action, step_action, step_move, step_wait, unknown_action)
 
 
 def wait_final(robot, missions, mission_id: str, meters: float = 0.0):
@@ -119,10 +119,21 @@ def test_route_must_start_where_robot_is(robot):
     assert ORIGIN in error.details()
 
 
-def two_steps(robot):
-    mission = action_mission(new_id("two"), robot.robot_id, [sim_action(1.0)])
-    mission.nodes.add(id="s2", action=fms.ActionStep(actions=[sim_action(1.0)]))
+def notify_step(robot):
+    mission = fms.Mission(mission_id=new_id("notify"), robot_id=robot.robot_id)
+    mission.nodes.add(id="s1", notify=fms.NotifyStep(topic="loaded"))
     return mission
+
+
+def nested_step(robot):
+    mission = action_mission(new_id("nested"), robot.robot_id, [sim_action(1.0)])
+    mission.nodes[0].parent_id = "root"
+    return mission
+
+
+def duplicate_step_ids(robot):
+    return mission_of(new_id("dup"), robot.robot_id, [step_action("s1", [sim_action(1.0)]),
+                                                      step_action("s1", [sim_action(1.0)])])
 
 
 def wait_step(robot):
@@ -146,8 +157,10 @@ def no_mission_id(robot):
 
 
 @pytest.mark.parametrize("build, code", [
-    (two_steps, grpc.StatusCode.UNIMPLEMENTED),
-    (wait_step, grpc.StatusCode.UNIMPLEMENTED),
+    (notify_step, grpc.StatusCode.UNIMPLEMENTED),
+    (nested_step, grpc.StatusCode.UNIMPLEMENTED),
+    (wait_step, grpc.StatusCode.UNIMPLEMENTED),          # ожидание сигнала — позже
+    (duplicate_step_ids, grpc.StatusCode.INVALID_ARGUMENT),
     (missing_edge, grpc.StatusCode.INVALID_ARGUMENT),
     (no_blocking_type, grpc.StatusCode.INVALID_ARGUMENT),
     (no_mission_id, grpc.StatusCode.INVALID_ARGUMENT),
@@ -207,3 +220,80 @@ def test_remove_robot_fails_its_mission(robot):
     send_instant_actions(robot.mqtt, [{"actionId": new_id("cancelOrder"), "actionType": "cancelOrder",
                                        "blockingType": "NONE"}])
     robot.wait_idle(robot.settings.t(5))
+
+
+# ------------------------------------------------------------------ миссии из нескольких шагов
+
+def test_multi_step_mission_completes(robot):
+    missions = robot.mission_updates()
+    mission_id = new_id("multi")
+    mission = mission_of(mission_id, robot.robot_id, [
+        step_move("go", [node(ORIGIN, 0.0), node("a", 4.0)]),
+        step_action("work", [sim_action(1.0)]),
+        step_wait("rest", 1.0),
+        step_move("back", [node("a", 4.0), node("b", 6.0)]),
+    ])
+
+    response = robot.add_mission(mission)
+    assert [s.state for s in response.status.steps] == [
+        fms.STEP_STATE_RUNNING, fms.STEP_STATE_PENDING, fms.STEP_STATE_PENDING, fms.STEP_STATE_PENDING]
+
+    status = wait_final(robot, missions, mission_id, meters=6)
+    assert status.state == fms.MISSION_STATE_COMPLETED, status
+    assert all(s.state == fms.STEP_STATE_COMPLETED for s in status.steps), status
+
+    # шаги шли строго по порядку
+    current = [u.status.current_node_id for u in missions.items()
+               if u.HasField("status") and u.status.mission_id == mission_id and u.status.current_node_id]
+    order = [c for i, c in enumerate(current) if i == 0 or current[i - 1] != c]
+    assert order == ["go", "work", "rest", "back"], order
+
+
+def test_failed_step_can_be_skipped(robot):
+    missions = robot.mission_updates()
+    mission_id = new_id("skip")
+    robot.add_mission(mission_of(mission_id, robot.robot_id, [
+        step_action("bad", [unknown_action()], on_failure=fms.FAILURE_ACTION_SKIP),
+        step_action("good", [sim_action(1.0)]),
+    ]))
+
+    status = wait_final(robot, missions, mission_id)
+    assert status.state == fms.MISSION_STATE_COMPLETED, status
+    assert status.steps[0].state == fms.STEP_STATE_SKIPPED
+    assert status.steps[1].state == fms.STEP_STATE_COMPLETED
+
+
+def test_failed_step_is_retried_then_fails(robot):
+    missions = robot.mission_updates()
+    mission_id = new_id("retry")
+    robot.add_mission(mission_of(mission_id, robot.robot_id, [
+        step_action("bad", [unknown_action()], on_failure=fms.FAILURE_ACTION_RETRY, max_retries=2),
+    ]))
+
+    status = wait_final(robot, missions, mission_id)
+    assert status.state == fms.MISSION_STATE_FAILED, status
+    assert status.error.code == fms.MISSION_ERROR_CODE_ORDER_REJECTED
+    assert status.steps[0].attempts == 3, "1 attempt + 2 retries"
+
+
+def test_step_timeout_fails_mission_and_stops_robot(robot):
+    missions = robot.mission_updates()
+    mission_id = new_id("timeout")
+    robot.add_mission(mission_of(mission_id, robot.robot_id, [
+        step_move("far", [node(ORIGIN, 0.0), node("far", 15.0)], timeout=2.0),
+    ]))
+
+    status = wait_final(robot, missions, mission_id)
+    assert status.state == fms.MISSION_STATE_FAILED, status
+    assert status.error.code == fms.MISSION_ERROR_CODE_TIMEOUT
+    robot.wait_idle(robot.settings.t(5))   # dispatch остановил робота cancelOrder'ом
+
+
+def test_route_chain_is_checked(robot):
+    """Второй маршрут должен начинаться там, где закончится первый."""
+    mission = mission_of(new_id("chain"), robot.robot_id, [
+        step_move("go", [node(ORIGIN, 0.0), node("a", 4.0)]),
+        step_move("jump", [node("b", 8.0), node("c", 10.0)]),
+    ])
+    error = expect_error(grpc.StatusCode.FAILED_PRECONDITION, robot.add_mission, mission)
+    assert "jump" in error.details()
