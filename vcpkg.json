@@ -2,6 +2,7 @@
   "name": "untitled",
   "version-string": "1.0.0",
   "dependencies": [
+    "libpqxx",
     "yaml-cpp",
     {
       "name": "behaviortree-cpp",

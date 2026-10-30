@@ -18,6 +18,7 @@ add_subdirectory(vda5050)
 add_subdirectory(proto)
 add_subdirectory(fleet_control)
 add_subdirectory(fleet_dispatch)
+add_subdirectory(fleet_database)
 add_subdirectory(robot_simulation)
 
 add_library(mqtt_client STATIC
@@ -29,5 +30,5 @@ target_include_directories(mqtt_client PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/fleet_dispatch/include
 )
 
-# Привязываем Boost, так как MqttClientHandler использует Asio/Mqtt5
+
 target_link_libraries(mqtt_client PRIVATE Boost::headers)
