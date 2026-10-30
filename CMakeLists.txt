@@ -16,19 +16,20 @@ find_package(spdlog CONFIG REQUIRED)
 #add_subdirectory(shared/mqtt_client)
 add_subdirectory(vda5050)
 add_subdirectory(proto)
+add_subdirectory(shared)
 add_subdirectory(fleet_control)
 add_subdirectory(fleet_dispatch)
 add_subdirectory(fleet_database)
 add_subdirectory(robot_simulation)
 
-add_library(mqtt_client STATIC
-        shared/src/mqtt_client.cpp
-        shared/include/mqtt_client.hpp
-)
+#add_library(mqtt_client STATIC
+#        shared/src/mqtt_client.cpp
+#        shared/include/mqtt_client.hpp
+#)
+#
+#target_include_directories(mqtt_client PUBLIC
+#        ${CMAKE_CURRENT_SOURCE_DIR}/fleet_dispatch/include
+#)
 
-target_include_directories(mqtt_client PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/fleet_dispatch/include
-)
 
-
-target_link_libraries(mqtt_client PRIVATE Boost::headers)
+#target_link_libraries(mqtt_client PRIVATE Boost::headers)

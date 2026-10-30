@@ -1,6 +1,6 @@
 #include "../include/FleetRegistry.hpp"
 #include "spdlog/spdlog.h"
-#include "VdaTopics.hpp"
+#include "../include/VdaTopics.hpp"
 
 FleetRegistry::FleetRegistry(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, MissionStatusHub& mission_hub)
     : io_context_(io_context), outbox_(outbox),  status_hub_(status_hub), mission_hub_(mission_hub) {}

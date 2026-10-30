@@ -9,7 +9,7 @@
 
 #include "FleetRegistry.hpp"
 #include "RobotMessages.hpp"
-#include "../shared/include/mqtt_client.hpp"
+#include "mqtt_client.hpp"
 
 class RobotMessageRouter {
 public:

@@ -2,9 +2,9 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/signal_set.hpp>
 
-#include "DispatchService.hpp"
+#include "include/DispatchService.hpp"
 #include "GrpcServer.hpp"
-#include "RobotMessageRouter.hpp"
+#include "include/RobotMessageRouter.hpp"
 #include "spdlog/spdlog.h"
 
 int main(){

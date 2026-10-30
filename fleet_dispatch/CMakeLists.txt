@@ -7,7 +7,7 @@ find_package(nlohmann_json CONFIG REQUIRED)
 find_package(behaviortree_cpp REQUIRED)
 
 add_executable(fleet_dispatch fd_main.cpp
-        src/GrpcServer.cpp
+#        ../shared/src/GrpcServer.cpp
         src/DispatchService.cpp
         src/RobotSession.cpp
         src/FleetRegistry.cpp
@@ -16,17 +16,15 @@ add_executable(fleet_dispatch fd_main.cpp
         src/RobotStatusHub.cpp
         src/OrderBuilder.cpp
         src/OrderTracker.cpp
-        include/OrderTracker.hpp
         src/ActiveMission.cpp
-        include/ActiveMission.hpp
         src/MissionStatusHub.cpp
-        include/MissionStatusHub.hpp
 )
 
 target_link_libraries(fleet_dispatch
         PRIVATE
         vda5050
         spdlog::spdlog
+        grpc_server
         mqtt_client
         BT::behaviortree_cpp
         asio-grpc::asio-grpc

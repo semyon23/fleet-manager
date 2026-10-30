@@ -1,18 +1,8 @@
-//
-// Created by ubuntu on 10/17/26.
-//
 
 #include "../include/GrpcServer.hpp"
-#include <grpcpp/ext/proto_server_reflection_plugin.h>
-#include "spdlog/spdlog.h"
-// GrpcServer.cpp
-#include "../include/GrpcServer.hpp"
-
 #include <grpcpp/ext/proto_server_reflection_plugin.h>
 #include <grpcpp/health_check_service_interface.h>
 #include <stdexcept>
-
-#include "fleet_dispatch.grpc.pb.h"
 #include "spdlog/spdlog.h"
 
 GrpcServer::GrpcServer(std::string address) : address_(std::move(address)) {
@@ -42,7 +32,6 @@ void GrpcServer::start() {
 void GrpcServer::set_serving(bool serving) {
     auto* health = server_->GetHealthCheckService();
     health->SetServingStatus("", serving);
-    health->SetServingStatus(fms::dispatch::v1::FleetDispatch::service_full_name(), serving);
 }
 
 void GrpcServer::shutdown() {

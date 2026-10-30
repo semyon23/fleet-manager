@@ -4,7 +4,7 @@
 #include <boost/asio/use_awaitable.hpp>
 #include "spdlog/spdlog.h"
 #include <boost/asio/experimental/awaitable_operators.hpp>
-#include "OrderBuilder.hpp"
+#include "../include/OrderBuilder.hpp"
 #include <set>
 
 struct NotifyWhenDoneTraits : agrpc::DefaultServerRPCTraits {
