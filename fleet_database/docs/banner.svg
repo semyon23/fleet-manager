@@ -1,0 +1,152 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" width="1200" height="360" font-family="'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f1b2d"/>
+      <stop offset="1" stop-color="#16324f"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#ffffff" stroke-opacity="0.05" stroke-width="1"/>
+    </pattern>
+    <linearGradient id="wordmark" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#bfdbfe"/>
+      <stop offset="1" stop-color="#60a5fa"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="cylinder" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#553c9a" stop-opacity="0.75"/>
+      <stop offset="0.5" stop-color="#6b46c1" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#553c9a" stop-opacity="0.75"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#a0c4e8"/>
+    </marker>
+    <marker id="arrow-db" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#b794f4"/>
+    </marker>
+
+    <!-- one query waiting in the database thread queue -->
+    <g id="query">
+      <rect x="0" y="-7" width="8" height="14" rx="2" fill="#b794f4"/>
+    </g>
+  </defs>
+
+  <rect width="1200" height="360" rx="18" fill="url(#bg)"/>
+  <rect width="1200" height="360" rx="18" fill="url(#grid)"/>
+
+  <!-- ============================ writers ============================ -->
+
+  <!-- fleet_control: gear -->
+  <g transform="translate(598 110)">
+    <circle r="30" fill="url(#glow)"/>
+    <circle r="16" fill="none" stroke="#63b3ed" stroke-width="7" stroke-dasharray="5.03 7.54"/>
+    <circle r="14" fill="#2b6cb0" stroke="#63b3ed" stroke-width="2"/>
+    <circle r="5" fill="#0f1b2d" stroke="#63b3ed" stroke-width="2"/>
+  </g>
+  <text x="598" y="160" fill="#63b3ed" font-size="14" font-weight="600" text-anchor="middle">fleet_control</text>
+
+  <!-- fleet_dispatch: clipboard with an order route -->
+  <g transform="translate(598 245)">
+    <circle r="30" fill="url(#glow)"/>
+    <rect x="-15" y="-19" width="30" height="40" rx="5" fill="#2c7a7b" fill-opacity="0.5" stroke="#4fd1c5" stroke-width="2"/>
+    <rect x="-7" y="-23" width="14" height="8" rx="2.5" fill="#4fd1c5"/>
+    <path d="M-7 13V2H6V-8" fill="none" stroke="#e2e8f0" stroke-width="2" stroke-linejoin="round"/>
+    <g fill="#4fd1c5" stroke="#e2e8f0" stroke-width="1.5">
+      <circle cx="-7" cy="13" r="3"/>
+      <circle cx="-7" cy="2" r="3"/>
+      <circle cx="6" cy="2" r="3"/>
+    </g>
+    <circle cx="6" cy="-8" r="3.5" fill="#f6ad55" stroke="#e2e8f0" stroke-width="1.5"/>
+  </g>
+  <text x="598" y="295" fill="#4fd1c5" font-size="14" font-weight="600" text-anchor="middle">fleet_dispatch</text>
+
+  <g stroke="#a0c4e8" stroke-width="2" fill="none" marker-start="url(#arrow)" marker-end="url(#arrow)">
+    <path d="M632 110H676"/>
+    <path d="M632 245H676"/>
+  </g>
+  <g font-size="12" font-weight="600" fill="#a0c4e8" text-anchor="middle">
+    <text x="654" y="100">gRPC</text>
+    <text x="654" y="235">gRPC</text>
+  </g>
+
+  <!-- ============================ fleet_database ============================ -->
+  <rect x="682" y="28" width="248" height="304" rx="14" fill="#553c9a" fill-opacity="0.14" stroke="#b794f4" stroke-width="1.5"/>
+
+  <!-- header: small cylinder + name -->
+  <g transform="translate(708 52)">
+    <path d="M-12 0V16A12 4 0 0 0 12 16V0" fill="#553c9a" fill-opacity="0.6" stroke="#b794f4" stroke-width="1.5"/>
+    <ellipse cx="0" cy="0" rx="12" ry="4" fill="#6b46c1" stroke="#b794f4" stroke-width="1.5"/>
+  </g>
+  <text x="730" y="66" fill="#b794f4" font-size="17" font-weight="700">fleet_database</text>
+
+  <!-- gRPC services -->
+  <g font-size="13">
+    <g transform="translate(698 90)">
+      <rect width="216" height="48" rx="9" fill="#0f1b2d" fill-opacity="0.65" stroke="#63b3ed" stroke-opacity="0.6"/>
+      <text x="14" y="21" fill="#ffffff" font-weight="600">RobotRegistry</text>
+      <text x="14" y="38" fill="#a0c4e8" font-size="11">robots · lifecycle · factsheet — control</text>
+    </g>
+    <g transform="translate(698 150)">
+      <rect width="216" height="48" rx="9" fill="#0f1b2d" fill-opacity="0.65" stroke="#4fd1c5" stroke-opacity="0.6"/>
+      <text x="14" y="21" fill="#ffffff" font-weight="600">DispatchStorage</text>
+      <text x="14" y="38" fill="#a0c4e8" font-size="11">status · missions · headerId — dispatch</text>
+    </g>
+    <g transform="translate(698 210)">
+      <rect width="216" height="48" rx="9" fill="#0f1b2d" fill-opacity="0.65" stroke="#b794f4" stroke-opacity="0.6"/>
+      <text x="14" y="21" fill="#ffffff" font-weight="600">migrations</text>
+      <text x="14" y="38" fill="#a0c4e8" font-size="11">001_robots.sql · 002_… applied at start</text>
+    </g>
+  </g>
+
+  <!-- database thread: queue of queries -->
+  <rect x="698" y="272" width="216" height="44" rx="9" fill="#553c9a" fill-opacity="0.25" stroke="#b794f4" stroke-opacity="0.8"/>
+  <text x="712" y="291" fill="#b794f4" font-size="12.5" font-weight="600">database thread</text>
+  <text x="712" y="307" fill="#a0c4e8" font-size="11">one query at a time</text>
+  <use href="#query" x="868" y="294" opacity="0.35"/>
+  <use href="#query" x="880" y="294" opacity="0.65"/>
+  <use href="#query" x="892" y="294"/>
+
+  <!-- ============================ PostgreSQL ============================ -->
+  <path d="M932 294H982" stroke="#b794f4" stroke-width="2" fill="none" marker-start="url(#arrow-db)" marker-end="url(#arrow-db)"/>
+  <text x="957" y="284" fill="#b794f4" font-size="12" font-weight="600" text-anchor="middle">SQL</text>
+
+  <g transform="translate(1068 0)">
+    <circle cy="180" r="95" fill="url(#glow)"/>
+    <path d="M-72 62V290A72 18 0 0 0 72 290V62" fill="url(#cylinder)" stroke="#b794f4" stroke-width="2"/>
+    <path d="M-72 138A72 18 0 0 0 72 138M-72 214A72 18 0 0 0 72 214" fill="none" stroke="#b794f4" stroke-opacity="0.45" stroke-width="1.5"/>
+    <ellipse cx="0" cy="62" rx="72" ry="18" fill="#6b46c1" stroke="#b794f4" stroke-width="2"/>
+    <g font-size="12.5" font-weight="600" fill="#e9d8fd" text-anchor="middle">
+      <text y="110">robots</text>
+      <text y="128" fill="#a78bda" font-weight="400" font-size="11">robot_status</text>
+      <text y="186">factsheets</text>
+      <text y="204" fill="#a78bda" font-weight="400" font-size="11">missions</text>
+      <text y="262" fill="#a78bda" font-weight="400" font-size="11">schema_migrations</text>
+    </g>
+  </g>
+  <text x="1068" y="336" fill="#b794f4" font-size="14" font-weight="600" text-anchor="middle">PostgreSQL</text>
+
+  <!-- ============================ title ============================ -->
+  <g id="brand">
+    <text x="56" y="64" fill="url(#wordmark)" font-size="24" font-weight="700" letter-spacing="4.5">COMPASS</text>
+    <rect x="219" y="42" width="3" height="26" rx="1.5" fill="#f97316"/>
+    <g fill="#94a3b8" font-size="11" font-weight="600" letter-spacing="2.2">
+      <text x="232" y="53">FLEET</text>
+      <text x="232" y="67">SERVER</text>
+    </g>
+  </g>
+  <text x="56" y="140" fill="#ffffff" font-size="50" font-weight="700">fleet_database</text>
+  <text x="58" y="182" fill="#a0c4e8" font-size="21">storage of the fms:</text>
+  <text x="58" y="210" fill="#a0c4e8" font-size="21">PostgreSQL behind gRPC, one writer per field</text>
+  <g font-size="14" font-weight="600" text-anchor="middle">
+    <rect x="58" y="236" width="112" height="28" rx="14" fill="#b794f4" fill-opacity="0.15" stroke="#b794f4"/>
+    <text x="114" y="255" fill="#b794f4">PostgreSQL</text>
+    <rect x="180" y="236" width="70" height="28" rx="14" fill="#63b3ed" fill-opacity="0.15" stroke="#63b3ed"/>
+    <text x="215" y="255" fill="#63b3ed">gRPC</text>
+    <rect x="260" y="236" width="86" height="28" rx="14" fill="#4fd1c5" fill-opacity="0.15" stroke="#4fd1c5"/>
+    <text x="303" y="255" fill="#4fd1c5">libpqxx</text>
+    <rect x="356" y="236" width="76" height="28" rx="14" fill="#a0c4e8" fill-opacity="0.15" stroke="#a0c4e8"/>
+    <text x="394" y="255" fill="#a0c4e8">C++23</text>
+  </g>
+</svg>
