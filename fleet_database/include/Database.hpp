@@ -6,6 +6,8 @@
 
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/awaitable.hpp>
+#include <functional>
 #include <pqxx/pqxx>
 #include <string>
 #include <thread>
@@ -20,7 +22,7 @@ public:
 
     void start();
     void stop();
-
+    asio::awaitable<void> run(std::function<void(pqxx::work&)> query);
     asio::io_context& context() { return context_; }
     pqxx::connection& connection() { return connection_; }
 

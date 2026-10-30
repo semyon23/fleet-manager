@@ -7,7 +7,8 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
-
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/use_awaitable.hpp>
 #include "spdlog/spdlog.h"
 
 Database::Database(const std::string& url)
@@ -63,4 +64,16 @@ void Database::stop() {
     if (thread_.joinable()) {
         thread_.join();
     }
+}
+
+asio::awaitable<void> Database::run(std::function<void(pqxx::work&)> query){
+    co_await asio::co_spawn(
+          context_,
+          [this, query = std::move(query)]() -> asio::awaitable<void> {
+              pqxx::work tx{connection_};
+              query(tx);
+              tx.commit();
+              co_return;
+          },
+          asio::use_awaitable);
 }

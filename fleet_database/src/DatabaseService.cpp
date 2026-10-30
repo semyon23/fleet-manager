@@ -4,7 +4,7 @@
 
 #include "../include/DatabaseService.hpp"
 #include "DatabaseService.hpp"
-
+#include "../include/RobotTable.hpp"
 #include "spdlog/spdlog.h"
 
 using Registry = dbv1::RobotRegistry::AsyncService;
@@ -31,6 +31,19 @@ const auto on_handler_done = [](std::exception_ptr error) {
         spdlog::error("[database_service] rpc handler failed: {}", e.what());
     }
 };
+
+grpc::Status database_error(const std::exception& e) {
+    if (dynamic_cast<const pqxx::unique_violation*>(&e)) {
+        return {grpc::StatusCode::ALREADY_EXISTS, "robot_id or manufacturer + serial_number already registered"};
+    }
+    if (dynamic_cast<const pqxx::broken_connection*>(&e)) {
+        spdlog::error("[database_service] database connection lost: {}", e.what());
+        return {grpc::StatusCode::UNAVAILABLE, "database unavailable, try again later"};
+    }
+    spdlog::error("[database_service] database error: {}", e.what());
+    return {grpc::StatusCode::INTERNAL, "database error"};
+}
+
 
 grpc::Status unimplemented(const char* name) {
     return {grpc::StatusCode::UNIMPLEMENTED, std::string(name) + ": not implemented yet"};
@@ -155,29 +168,106 @@ void DatabaseService::start() {
 
 // ==================================================================== RobotRegistry (DB-2)
 
-asio::awaitable<grpc::Status> DatabaseService::create_robot(const dbv1::CreateRobotRequest&, dbv1::CreateRobotResponse&) {
-    co_return unimplemented("CreateRobot");
+asio::awaitable<grpc::Status> DatabaseService::create_robot(const dbv1::CreateRobotRequest& request, dbv1::CreateRobotResponse& response) {
+    const auto& spec = request.spec();
+    if (spec.robot_id().empty() || spec.manufacturer().empty() || spec.serial_number().empty()) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT,
+                               "robot_id, manufacturer and serial_number are required"};
+    }
+    try {
+        dbv1::RobotSpec created;
+        co_await database_.run([&](pqxx::work& tx) { created = insert_robot(tx, spec); });
+        *response.mutable_spec() = created;
+    } catch (const std::exception& e) {
+        co_return database_error(e);
+    }
+    spdlog::info("[database_service] robot {} created", spec.robot_id());
+    co_return grpc::Status::OK;
 }
 
-asio::awaitable<grpc::Status> DatabaseService::update_robot(const dbv1::UpdateRobotRequest&, dbv1::UpdateRobotResponse&) {
-    co_return unimplemented("UpdateRobot");
+asio::awaitable<grpc::Status> DatabaseService::update_robot(const dbv1::UpdateRobotRequest& request,
+                                                            dbv1::UpdateRobotResponse& response) {
+    if (request.spec().robot_id().empty()) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "robot_id is required"};
+    }
+    std::optional<dbv1::RobotSpec> updated;
+    try {
+        co_await database_.run([&](pqxx::work& tx) { updated = ::update_robot(tx, request.spec()); });
+    } catch (const std::exception& e) {
+        co_return database_error(e);
+    }
+    if (!updated) {
+        co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "robot " + request.spec().robot_id() + " not found"};
+    }
+    *response.mutable_spec() = *updated;
+    co_return grpc::Status::OK;
 }
 
-asio::awaitable<grpc::Status> DatabaseService::set_robot_deleting(const dbv1::SetRobotDeletingRequest&,
+
+asio::awaitable<grpc::Status> DatabaseService::set_robot_deleting(const dbv1::SetRobotDeletingRequest& request,
                                                                   dbv1::SetRobotDeletingResponse&) {
-    co_return unimplemented("SetRobotDeleting");
+    bool found = false;
+    try {
+        co_await database_.run([&](pqxx::work& tx) { found = ::set_robot_deleting(tx, request.robot_id()); });
+    } catch (const std::exception& e) {
+        co_return database_error(e);
+    }
+    if (!found) {
+        co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "robot " + request.robot_id() + " not found"};
+    }
+    spdlog::info("[database_service] robot {} is pending delete", request.robot_id());
+    co_return grpc::Status::OK;
 }
 
-asio::awaitable<grpc::Status> DatabaseService::delete_robot(const dbv1::DeleteRobotRequest&, dbv1::DeleteRobotResponse&) {
-    co_return unimplemented("DeleteRobot");
+asio::awaitable<grpc::Status> DatabaseService::delete_robot(const dbv1::DeleteRobotRequest& request,
+                                                            dbv1::DeleteRobotResponse&) {
+    DeleteResult result{};
+    try {
+        co_await database_.run([&](pqxx::work& tx) { result = ::delete_robot(tx, request.robot_id()); });
+    } catch (const std::exception& e) {
+        co_return database_error(e);
+    }
+    switch (result) {
+    case DeleteResult::NotFound:
+        co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "robot " + request.robot_id() + " not found"};
+    case DeleteResult::NotDeleting:
+        co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
+                               "robot " + request.robot_id() + " must be marked with SetRobotDeleting first"};
+    case DeleteResult::Deleted:
+        break;
+    }
+    spdlog::info("[database_service] robot {} deleted", request.robot_id());
+    co_return grpc::Status::OK;
 }
 
-asio::awaitable<grpc::Status> DatabaseService::get_robot(const dbv1::GetRobotRequest&, dbv1::GetRobotResponse&) {
-    co_return unimplemented("GetRobot");
+
+asio::awaitable<grpc::Status> DatabaseService::get_robot(const dbv1::GetRobotRequest& request,
+                                                         dbv1::GetRobotResponse& response) {
+    std::optional<dbv1::RobotSpec> robot;
+    try {
+        co_await database_.run([&](pqxx::work& tx) { robot = select_robot(tx, request.robot_id()); });
+    } catch (const std::exception& e) {
+        co_return database_error(e);
+    }
+    if (!robot) {
+        co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "robot " + request.robot_id() + " not found"};
+    }
+    *response.mutable_robot()->mutable_spec() = *robot;   // статус от dispatch — на DB-3
+    co_return grpc::Status::OK;
 }
 
-asio::awaitable<grpc::Status> DatabaseService::list_robots(const dbv1::ListRobotsRequest&, dbv1::ListRobotsResponse&) {
-    co_return unimplemented("ListRobots");
+asio::awaitable<grpc::Status> DatabaseService::list_robots(const dbv1::ListRobotsRequest& request,
+                                                           dbv1::ListRobotsResponse& response) {
+    std::vector<dbv1::RobotSpec> robots;
+    try {
+        co_await database_.run([&](pqxx::work& tx) { robots = select_robots(tx, request.include_deleting()); });
+    } catch (const std::exception& e) {
+        co_return database_error(e);
+    }
+    for (auto& robot : robots) {
+        *response.add_robots()->mutable_spec() = std::move(robot);
+    }
+    co_return grpc::Status::OK;
 }
 
 asio::awaitable<grpc::Status> DatabaseService::get_factsheet(const dbv1::GetFactsheetRequest&, dbv1::GetFactsheetResponse&) {

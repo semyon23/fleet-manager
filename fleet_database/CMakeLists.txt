@@ -5,6 +5,7 @@ add_executable(fleet_database
         fdb_main.cpp
         src/Database.cpp
         src/DatabaseService.cpp
+        include/RobotTable.cpp
 )
 
 target_include_directories(fleet_database PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
