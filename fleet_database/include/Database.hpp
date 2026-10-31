@@ -27,6 +27,7 @@ public:
     pqxx::connection& connection() { return connection_; }
 
 private:
+    std::string url_;
     pqxx::connection connection_;
     asio::io_context context_;
     asio::executor_work_guard<asio::io_context::executor_type> work_;

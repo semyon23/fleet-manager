@@ -1,12 +1,7 @@
-//
-// Created by ubuntu on 2026-10-30.
-//
-
 #include "../include/DatabaseService.hpp"
-#include "DatabaseService.hpp"
 #include "../include/RobotTable.hpp"
 #include "spdlog/spdlog.h"
-
+#include <google/protobuf/util/time_util.h>
 using Registry = dbv1::RobotRegistry::AsyncService;
 using Storage = dbv1::DispatchStorage::AsyncService;
 
@@ -36,6 +31,14 @@ grpc::Status database_error(const std::exception& e) {
     if (dynamic_cast<const pqxx::unique_violation*>(&e)) {
         return {grpc::StatusCode::ALREADY_EXISTS, "robot_id or manufacturer + serial_number already registered"};
     }
+
+    if (dynamic_cast<const pqxx::foreign_key_violation*>(&e)) {
+        return {grpc::StatusCode::NOT_FOUND, "robot not found"};
+    }
+    if (dynamic_cast<const pqxx::data_exception*>(&e)) {
+        return {grpc::StatusCode::INVALID_ARGUMENT, e.what()};
+    }
+
     if (dynamic_cast<const pqxx::broken_connection*>(&e)) {
         spdlog::error("[database_service] database connection lost: {}", e.what());
         return {grpc::StatusCode::UNAVAILABLE, "database unavailable, try again later"};
@@ -53,7 +56,6 @@ DatabaseService::DatabaseService(agrpc::GrpcContext& grpc_context, Database& dat
     : grpc_context_(grpc_context), database_(database) {}
 
 void DatabaseService::start() {
-    // ---------------------------------------------------------------- RobotRegistry
 
     agrpc::register_awaitable_rpc_handler<CreateRobotRPC>(
         grpc_context_, registry_,
@@ -240,10 +242,9 @@ asio::awaitable<grpc::Status> DatabaseService::delete_robot(const dbv1::DeleteRo
     co_return grpc::Status::OK;
 }
 
-
 asio::awaitable<grpc::Status> DatabaseService::get_robot(const dbv1::GetRobotRequest& request,
                                                          dbv1::GetRobotResponse& response) {
-    std::optional<dbv1::RobotSpec> robot;
+    std::optional<dbv1::RobotRecord> robot;
     try {
         co_await database_.run([&](pqxx::work& tx) { robot = select_robot(tx, request.robot_id()); });
     } catch (const std::exception& e) {
@@ -252,28 +253,40 @@ asio::awaitable<grpc::Status> DatabaseService::get_robot(const dbv1::GetRobotReq
     if (!robot) {
         co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "robot " + request.robot_id() + " not found"};
     }
-    *response.mutable_robot()->mutable_spec() = *robot;   // статус от dispatch — на DB-3
+    *response.mutable_robot() = std::move(*robot);
     co_return grpc::Status::OK;
 }
 
 asio::awaitable<grpc::Status> DatabaseService::list_robots(const dbv1::ListRobotsRequest& request,
                                                            dbv1::ListRobotsResponse& response) {
-    std::vector<dbv1::RobotSpec> robots;
+    std::vector<dbv1::RobotRecord> robots;
     try {
         co_await database_.run([&](pqxx::work& tx) { robots = select_robots(tx, request.include_deleting()); });
     } catch (const std::exception& e) {
         co_return database_error(e);
     }
     for (auto& robot : robots) {
-        *response.add_robots()->mutable_spec() = std::move(robot);
+        *response.add_robots() = std::move(robot);
     }
     co_return grpc::Status::OK;
 }
 
-asio::awaitable<grpc::Status> DatabaseService::get_factsheet(const dbv1::GetFactsheetRequest&, dbv1::GetFactsheetResponse&) {
-    co_return unimplemented("GetFactsheet");
-}
 
+asio::awaitable<grpc::Status> DatabaseService::get_factsheet(const dbv1::GetFactsheetRequest& request,
+                                                             dbv1::GetFactsheetResponse& response)
+{
+    std::optional<dbv1::GetFactsheetResponse> factsheet;
+    try {
+        co_await database_.run([&](pqxx::work& tx) { factsheet = select_factsheet(tx, request.robot_id()); });
+    } catch (const std::exception& e) {
+        co_return database_error(e);
+    }
+    if (!factsheet) {
+        co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "no factsheet for robot " + request.robot_id()};
+    }
+    response = std::move(*factsheet);
+    co_return grpc::Status::OK;
+}
 // ==================================================================== DispatchStorage (DB-3 и позже)
 
 asio::awaitable<grpc::Status> DatabaseService::load_dispatch_snapshot(const dbv1::LoadDispatchSnapshotRequest&,
@@ -281,13 +294,35 @@ asio::awaitable<grpc::Status> DatabaseService::load_dispatch_snapshot(const dbv1
     co_return unimplemented("LoadDispatchSnapshot");
 }
 
-asio::awaitable<grpc::Status> DatabaseService::save_robot_status(const dbv1::SaveRobotStatusRequest&,
-                                                                 dbv1::SaveRobotStatusResponse&) {
-    co_return unimplemented("SaveRobotStatus");
+asio::awaitable<grpc::Status> DatabaseService::save_robot_status(const dbv1::SaveRobotStatusRequest& request, dbv1::SaveRobotStatusResponse&) {
+    const auto& status = request.status();
+    if (status.robot_id().empty()) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "status.robot_id is required"};
+    }
+    try {
+        co_await database_.run([&](pqxx::work& tx) { ::save_robot_status(tx, status); });
+    } catch (const std::exception& e) {
+        co_return database_error(e);
+    }
+    co_return grpc::Status::OK;   // без лога: dispatch пишет статус часто
 }
 
-asio::awaitable<grpc::Status> DatabaseService::save_factsheet(const dbv1::SaveFactsheetRequest&, dbv1::SaveFactsheetResponse&) {
-    co_return unimplemented("SaveFactsheet");
+asio::awaitable<grpc::Status> DatabaseService::save_factsheet(const dbv1::SaveFactsheetRequest& request, dbv1::SaveFactsheetResponse&) {
+    if (request.robot_id().empty()) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "robot_id is required"};
+    }
+    using google::protobuf::util::TimeUtil;
+    const auto received_at = request.has_received_at() ? request.received_at() : TimeUtil::GetCurrentTime();
+    try {
+        co_await database_.run([&](pqxx::work& tx) {
+            ::save_factsheet(tx, request.robot_id(), request.factsheet_json(),
+                             TimeUtil::TimestampToMilliseconds(received_at));
+        });
+    } catch (const std::exception& e) {
+        co_return database_error(e);
+    }
+    spdlog::info("[database_service] factsheet of robot {} saved", request.robot_id());
+    co_return grpc::Status::OK;
 }
 
 asio::awaitable<grpc::Status> DatabaseService::save_mission_execution(const dbv1::SaveMissionExecutionRequest&,

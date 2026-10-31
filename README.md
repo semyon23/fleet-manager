@@ -31,7 +31,7 @@ flowchart LR
 | [`proto`](proto) | gRPC contracts between the services | v1 |
 | [`vda5050`](vda5050) | Header-only C++ structs for VDA 5050 v3 messages (nlohmann/json) | ✅ |
 | [`shared`](shared) | Common code, e.g. the MQTT client | |
-| [`tests`](tests) | End-to-end Python tests of the robot protocol | ✅ |
+| [`tests`](robot_simulation/tests) | End-to-end Python tests of the robot protocol | ✅ |
 
 ## Tech stack
 

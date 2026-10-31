@@ -12,7 +12,7 @@
 #include "spdlog/spdlog.h"
 
 Database::Database(const std::string& url)
-    : connection_(url), work_(asio::make_work_guard(context_)) {
+    : url_(url), connection_(url), work_(asio::make_work_guard(context_)){
     spdlog::info("[database] connected to {} on {}", connection_.dbname(), connection_.hostname());
 }
 
@@ -70,10 +70,14 @@ asio::awaitable<void> Database::run(std::function<void(pqxx::work&)> query){
     co_await asio::co_spawn(
           context_,
           [this, query = std::move(query)]() -> asio::awaitable<void> {
+              if (!connection_.is_open()) {
+                  connection_ = pqxx::connection{url_};
+                  spdlog::info("[database] reconnected to {} on {}", connection_.dbname(), connection_.hostname());
+              }
               pqxx::work tx{connection_};
               query(tx);
               tx.commit();
               co_return;
           },
           asio::use_awaitable);
-}
+};

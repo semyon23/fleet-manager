@@ -1,6 +1,7 @@
 # Тесты fleet_database
 
-Тесты работают **вместо fleet_control**: вызывают gRPC `RobotRegistry` и проверяют ответы.
+Тесты работают **вместо fleet_control и fleet_dispatch**: вызывают gRPC `RobotRegistry` и `DispatchStorage`
+и проверяют ответы.
 Нужен только запущенный `fleet_database` (и PostgreSQL за ним). Брокер и симулятор не нужны.
 
 Python-классы gRPC генерируются из `proto/*.proto` при каждом запуске (в `_gen/`), отдельный шаг не нужен.
@@ -41,6 +42,7 @@ python3 -m venv .venv
 | Файл | Что |
 |---|---|
 | `test_robot_registry.py` | `CreateRobot`: что сохранилось, игнор `lifecycle` и времени, кавычки и юникод в имени и метках, занятый `robot_id`, тот же физический робот под другим id, обязательные поля, одновременные создания; `GetRobot` / `ListRobots`: совпадение с созданным, сортировка, `NOT_FOUND`; `UpdateRobot`: меняет только имя и метки (метки целиком), растёт `updated_at`; удаление в два шага: `FAILED_PRECONDITION` без пометки, скрытие `PENDING_DELETE` из списка, повторная пометка, повторная регистрация после удаления |
+| `test_dispatch_storage.py` | `SaveRobotStatus`: статус целиком возвращается в `GetRobot` и `ListRobots`, новый заменяет старый полностью, запись для `PENDING_DELETE`, неизвестный робот → `NOT_FOUND`; `SaveFactsheet` / `GetFactsheet`: сохранить и прочитать, замена, время по умолчанию, не JSON → `INVALID_ARGUMENT`, нет factsheet → `NOT_FOUND`; статус и factsheet удаляются вместе с роботом |
 
 Что пока не автоматизировано: данные переживают перезапуск сервиса и `UNAVAILABLE` при остановленном
 PostgreSQL — проверяются руками (см. [README сервиса](../README.md)).

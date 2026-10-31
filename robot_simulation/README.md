@@ -12,7 +12,7 @@ To the fms they look like real robots. They connect to the broker, accept orders
 
 - **Develop the fms without robots.** Run and debug fleet_dispatch and fleet_control on a laptop; three robots start with a single command.
 - **Reproduce the hard cases.** Pausing during a pick, cancelling an order while driving, an order update at the decision point, a rejected order. On a real shop floor these are slow and awkward to set up; here each one is a few-second scenario.
-- **Keep the protocol honest.** The simulator follows the VDA 5050 v3 specification, and 70 automated end-to-end tests check it (`tests/` at the repository root).
+- **Keep the protocol honest.** The simulator follows the VDA 5050 v3 specification, and 70 automated end-to-end tests check it (`tests` at the repository root).
 
 ## Features
 
@@ -239,7 +239,7 @@ The simulator does not check the values of `headerId` and `timestamp`, so any va
 
 ## Tests
 
-The Python end-to-end tests live in [`tests/`](../tests) at the repository root. They act as a small fms: they send orders to a robot and check its responses against the specification. On top of that, general rules are checked for **every** message the robot sends: `headerId` grows by 1, `sequenceId` ordering, mandatory fields, and so on.
+The Python end-to-end tests live in [`tests`](tests) at the repository root. They act as a small fms: they send orders to a robot and check its responses against the specification. On top of that, general rules are checked for **every** message the robot sends: `headerId` grows by 1, `sequenceId` ordering, mandatory fields, and so on.
 
 ```bash
 cd tests && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
@@ -249,7 +249,7 @@ cd tests && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 VDA_BROKER_HOST=localhost VDA_MANUFACTURER=ktc VDA_SERIAL=amr1 .venv/bin/python -m pytest -v
 ```
 
-Current status: **70 passed, 1 skipped**. The skipped test checks that state arrives at least every 30 s; it takes half a minute and is enabled with `VDA_RUN_SLOW=1`. See [`tests/README.md`](../tests/README.md) for details and settings.
+Current status: **70 passed, 1 skipped**. The skipped test checks that state arrives at least every 30 s; it takes half a minute and is enabled with `VDA_RUN_SLOW=1`. See [`tests`](tests/README.md) for details and settings.
 
 When a test fails, the full MQTT exchange during that test is saved to `tests/logs/<test name>.log`.
 

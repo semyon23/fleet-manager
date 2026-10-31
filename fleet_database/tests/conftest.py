@@ -99,15 +99,26 @@ class Robots:
 # ------------------------------------------------------------------ фикстуры
 
 @pytest.fixture(scope="session")
-def registry():
+def channel():
     address = os.environ.get("DATABASE_ADDRESS", "localhost:5002")
     channel = grpc.insecure_channel(address)
     try:
         grpc.channel_ready_future(channel).result(timeout=5)
     except grpc.FutureTimeoutError:
         pytest.exit(f"fleet_database is not reachable at {address} — is it running?", returncode=2)
-    yield dbgrpc.RobotRegistryStub(channel)
+    yield channel
     channel.close()
+
+
+@pytest.fixture(scope="session")
+def registry(channel):
+    return dbgrpc.RobotRegistryStub(channel)
+
+
+@pytest.fixture(scope="session")
+def storage(channel):
+    """DispatchStorage — то, что пишет dispatch. Тесты здесь работают вместо него."""
+    return dbgrpc.DispatchStorageStub(channel)
 
 
 @pytest.fixture
