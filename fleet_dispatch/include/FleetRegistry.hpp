@@ -19,7 +19,8 @@ enum class AddResult {
 
 class FleetRegistry {
 public:
-    FleetRegistry(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, MissionStatusHub& mission_hub);
+    FleetRegistry(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, MissionStatusHub& mission_hub,
+                  DatabaseWriter& database);
 
     AddResult add(const std::string& robot_id, const std::string& manufacturer, const std::string& serial_number);
     bool remove(const std::string& robot_id);
@@ -37,6 +38,7 @@ private:
     RobotStatusHub& status_hub_;
     MissionStatusHub& mission_hub_;
     std::unordered_map<std::string, std::shared_ptr<RobotSession>> sessions_;
+    DatabaseWriter& database_;
 };
 
 

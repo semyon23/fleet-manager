@@ -1,12 +1,14 @@
 #include "../include/RobotSession.hpp"
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
 #include "spdlog/spdlog.h"
 #include "../include/VdaTopics.hpp"
 #include "../include/RobotStatusBuilder.hpp"
 #include "../include/OrderBuilder.hpp"
+#include <google/protobuf/util/message_differencer.h>
 #include <google/protobuf/util/time_util.h>
 using google::protobuf::util::TimeUtil;
 
@@ -32,12 +34,29 @@ std::uint64_t next_action_number() {
     return ++number;
 }
 
-RobotSession::RobotSession(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, MissionStatusHub& mission_hub, std::string robot_id,
-                           std::string manufacturer, std::string serial_number)
+// DB-4: поля, которые меняются почти в каждом state — в базу их пишем не чаще раза в 5 с
+fms::v1::RobotStatus without_frequent_fields(fms::v1::RobotStatus status) {
+    status.clear_pose();
+    status.clear_last_state_at();
+    status.mutable_power()->clear_state_of_charge();
+    status.mutable_power()->clear_voltage();
+    status.mutable_power()->clear_range();
+    return status;
+}
+
+// DB-4: MessageDifferencer, а не сравнение SerializeAsString(): порядок map при сериализации не гарантирован
+bool important_change(const fms::v1::RobotStatus& saved, const fms::v1::RobotStatus& current) {
+    return !google::protobuf::util::MessageDifferencer::Equals(without_frequent_fields(saved),
+                                                               without_frequent_fields(current));
+}
+
+RobotSession::RobotSession(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, MissionStatusHub& mission_hub,
+                           DatabaseWriter& database, std::string robot_id, std::string manufacturer, std::string serial_number)
     : io_context_(io_context),
       outbox_(outbox),
       status_hub_(status_hub),
       mission_hub_(mission_hub),
+      database_(database),
       robot_id_(std::move(robot_id)),
       manufacturer_(std::move(manufacturer)),
       serial_number_(std::move(serial_number)),
@@ -57,7 +76,7 @@ void RobotSession::start() {
     request(MqttAction::Subscribe, connection_topic_);
     request(MqttAction::Subscribe, factsheet_topic_);
 
-    status_hub_.publish(status_);
+    publish_status();   // DB-4
     auto log_if_failed = [id = robot_id_](std::exception_ptr error) {
         if (!error) return;
         try {
@@ -109,7 +128,7 @@ asio::awaitable<void> RobotSession::watchdog() {
         if (online && silent) {
             status_.set_connection(fms::v1::CONNECTION_STATE_STALE);
             spdlog::warn("[{}] no state for 60 s, robot is STALE", robot_id_);
-            status_hub_.publish(status_);
+            publish_status();   // DB-4
         }
         if (mission_ && mission_->on_tick(std::chrono::steady_clock::now())) {
             on_mission_changed();
@@ -150,14 +169,44 @@ void RobotSession::handle(const VdaMessage& message) {
             log_status();
         } else if (message.topic == factsheet_topic_) {
             factsheet_ = json.get<vda5050::Factsheet>();
-            *status_.mutable_factsheet_received_at() = TimeUtil::GetCurrentTime();
             spdlog::info("[{}] factsheet received", robot_id_);
+            save_factsheet(message.payload);   // DB-4: factsheet_received_at — после записи в базу
         }
     } catch (const std::exception& e) {
         count_invalid_message(message.topic, e.what());
     }
 
+    publish_status();   // DB-4
+}
+
+// DB-4: в стрим — всегда; в базу — сразу, если изменилось важное, иначе не чаще раза в 5 с
+void RobotSession::publish_status() {
     status_hub_.publish(status_);
+
+    auto now = std::chrono::steady_clock::now();
+    if (important_change(saved_status_, status_) || now - saved_at_ >= std::chrono::seconds(5)) {
+        database_.save_status(status_);
+        saved_status_ = status_;
+        saved_at_ = now;
+    }
+}
+
+// DB-4: control, увидев новое factsheet_received_at, читает factsheet из базы — он уже должен быть там
+void RobotSession::save_factsheet(std::string json) {
+    auto received_at = TimeUtil::MillisecondsToTimestamp(TimeUtil::TimestampToMilliseconds(TimeUtil::GetCurrentTime()));
+    asio::co_spawn(
+        io_context_,
+        [self = shared_from_this(), json = std::move(json), received_at]() -> asio::awaitable<void> {
+            if (!co_await self->database_.save_factsheet(self->robot_id_, json, received_at)) {
+                co_return;   // не записан — время в стрим не идёт (причина в логе)
+            }
+            if (self->stopped_) {
+                co_return;   // робота удалили, пока шла запись
+            }
+            *self->status_.mutable_factsheet_received_at() = received_at;
+            self->publish_status();
+        },
+        asio::detached);
 }
 
 bool RobotSession::send(const std::string& kind, std::string payload) {
@@ -221,8 +270,6 @@ std::string RobotSession::send_instant_action(const std::string& action_type, st
 
     vda5050::Action action;
     action.action_type = action_type;
-
-   // action.action_id = robot_id_ + "-" + action_type + "-" + std::to_string(message.header.header_id);
     action.action_id = robot_id_ + "-" + action_type + "-" + std::to_string(next_action_number());
     action.blocking_type = vda5050::BlockingType::None;
     if (!parameters.empty()) {
@@ -235,8 +282,6 @@ std::string RobotSession::send_instant_action(const std::string& action_type, st
     pending_actions_[action.action_id] = action_type;
     spdlog::info("[{}] {} sent ({})", robot_id_, action_type, action.action_id);
     return action.action_id;
-
-
 }
 
 void RobotSession::check_instant_actions(const vda5050::State& state) {
@@ -265,7 +310,7 @@ bool RobotSession::start_mission(const fms::v1::Mission& mission) {
         return false;
     }
     status_.set_mission_id(mission.mission_id());
-    status_hub_.publish(status_);
+    publish_status();   // DB-4
     mission_hub_.publish(mission_->status());
     spdlog::info("[{}] mission {} started, {} steps", robot_id_, mission.mission_id(), mission.nodes_size());
     return true;
@@ -297,7 +342,7 @@ void RobotSession::on_mission_changed() {
         }
         mission_.reset();
         status_.clear_mission_id();
-        status_hub_.publish(status_);
+        publish_status();   // DB-4
     }
 }
 

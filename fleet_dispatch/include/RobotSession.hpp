@@ -8,7 +8,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <memory>
 #include <string>
-
+#include "DatabaseWriter.hpp"
 #include "RobotMessages.hpp"
 #include "RobotStatusHub.hpp"
 #include "MissionStatusHub.hpp"
@@ -19,8 +19,8 @@
 
 class RobotSession : public std::enable_shared_from_this<RobotSession> {
 public:
-    RobotSession(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, MissionStatusHub& mission_hub, std::string robot_id,
-                 std::string manufacturer, std::string serial_number);
+    RobotSession(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, MissionStatusHub& mission_hub,
+                 DatabaseWriter& database, std::string robot_id, std::string manufacturer, std::string serial_number);
 
     void start();
     void stop();
@@ -47,6 +47,8 @@ private:
     void handle(const VdaMessage& message);
     void count_invalid_message(const std::string& topic, const std::string& error);
     void log_status() const;
+    void publish_status();                 // DB-4: в стрим всегда, в базу — важное сразу, остальное раз в 5 с
+    void save_factsheet(std::string json); // DB-4: сначала база, потом factsheet_received_at в стрим
 
     bool send(const std::string& kind, std::string payload);
     bool request(MqttAction action, const std::string& topic, std::string payload = {});
@@ -54,13 +56,14 @@ private:
     std::string send_instant_action(const std::string& action_type, std::vector<vda5050::ActionParameter> parameters = {});
     void check_instant_actions(const vda5050::State& state);
     void on_mission_changed();
+
     using Inbox = asio::experimental::channel<void(boost::system::error_code, VdaMessage)>;
 
     asio::io_context& io_context_;
-
     Outbox& outbox_;
     RobotStatusHub& status_hub_;
     MissionStatusHub& mission_hub_;
+    DatabaseWriter& database_;
     std::string robot_id_;
     std::string manufacturer_;
     std::string serial_number_;
@@ -69,6 +72,8 @@ private:
     std::string factsheet_topic_;
     Inbox inbox_;
     fms::v1::RobotStatus status_;
+    fms::v1::RobotStatus saved_status_;                   // DB-4: последний отданный в базу
+    std::chrono::steady_clock::time_point saved_at_{};    // DB-4: когда; {} — ещё не отдавали
     std::optional<vda5050::Factsheet> factsheet_;
 
     asio::steady_timer watchdog_timer_;
@@ -78,10 +83,5 @@ private:
     std::unordered_map<std::string, std::string> pending_actions_;
     std::unique_ptr<ActiveMission> mission_;
     bool stopped_ = false;
-
-
-
-
-
 };
 #endif //ROBOTSESSION_HPP

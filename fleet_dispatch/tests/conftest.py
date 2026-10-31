@@ -1,7 +1,9 @@
 """Настройка тестов dispatch. Всё задаётся переменными окружения (см. README.md).
 
-Нужны: запущенный fleet_dispatch, симулятор и MQTT-брокер, к которому подключены оба.
-Тесты работают вместо fleet_control: вызывают gRPC dispatch и смотрят его стримы.
+Нужны: запущенный fleet_dispatch, симулятор и MQTT-брокер, к которому подключены оба,
+и fleet_database, в который пишет dispatch.
+Тесты работают вместо fleet_control: регистрируют робота в fleet_database, вызывают gRPC dispatch
+и смотрят его стримы.
 Кроме того, они видят state робота напрямую из брокера — чтобы проверять, что робот
 на самом деле сделал то, что сообщает dispatch.
 """
@@ -37,8 +39,10 @@ def _generate_stubs() -> None:
 
 _generate_stubs()
 sys.path.insert(0, str(GENERATED))
-sys.path.insert(0, str(REPO / "tests"))   # FmsClient и помощники из тестов симулятора
+sys.path.insert(0, str(REPO / "robot_simulation" / "tests"))   # FmsClient и помощники из тестов симулятора
 
+import fleet_database_pb2 as db  # noqa: E402
+import fleet_database_pb2_grpc as dbgrpc  # noqa: E402
 import fleet_dispatch_pb2 as dpb  # noqa: E402
 import fleet_dispatch_pb2_grpc as dgrpc  # noqa: E402
 import fms_types_pb2 as fms  # noqa: E402
@@ -57,6 +61,7 @@ ORIGIN = "origin"   # узел, на который тест ставит роб
 class Settings:
     def __init__(self) -> None:
         self.dispatch_address = env("DISPATCH_ADDRESS", "localhost:5001")
+        self.database_address = env("DATABASE_ADDRESS", "localhost:5002")
         self.map_id = env("VDA_MAP_ID", "map_1")
         self.second_serial = env("VDA_SERIAL2", "amr2")
         self.timeout_scale = float(env("VDA_TIMEOUT_SCALE", "1.0"))
@@ -80,16 +85,39 @@ class Settings:
 
 
 class Robot:
-    """Робот симулятора, зарегистрированный в dispatch под id test-<serial>."""
+    """Робот симулятора, зарегистрированный в fleet_database и dispatch под id test-<serial>."""
 
-    def __init__(self, dispatch, settings: Settings, mqtt: FmsClient, serial: str):
+    def __init__(self, dispatch, database, settings: Settings, mqtt: FmsClient, serial: str):
         self.dispatch = dispatch
+        self.database = database
         self.settings = settings
         self.mqtt = mqtt
         self.serial = serial
         self.robot_id = f"test-{serial}"
         self.missions: list[str] = []          # запущенные тестом — отменить в конце
         self._streams: list[UpdateStream] = []
+
+    # ------------------------------------------------------------- fleet_database
+
+    def register(self) -> None:
+        """Как control: сначала робот в базе, потом в dispatch — иначе dispatch не сможет сохранить его данные."""
+        spec = db.RobotSpec(robot_id=self.robot_id, manufacturer=self.settings.target.manufacturer,
+                            serial_number=self.serial)
+        try:
+            self.database.CreateRobot(db.CreateRobotRequest(spec=spec))
+        except grpc.RpcError as e:
+            if e.code() == grpc.StatusCode.ALREADY_EXISTS:
+                pytest.fail(f"{self.settings.target.manufacturer}/{self.serial} is registered in fleet_database "
+                            f"under another robot_id — delete it there first")
+            raise
+
+    def unregister(self) -> None:
+        try:
+            self.database.SetRobotDeleting(db.SetRobotDeletingRequest(robot_id=self.robot_id))
+            self.database.DeleteRobot(db.DeleteRobotRequest(robot_id=self.robot_id))
+        except grpc.RpcError as e:
+            if e.code() != grpc.StatusCode.NOT_FOUND:
+                raise
 
     # ------------------------------------------------------------------ dispatch
 
@@ -148,8 +176,10 @@ class Robot:
     # ------------------------------------------------------------- подготовка
 
     def prepare(self) -> None:
-        """Робот добавлен в dispatch, ONLINE и стоит на узле ORIGIN в (0, 0)."""
+        """Робот зарегистрирован в базе, добавлен в dispatch, ONLINE и стоит на узле ORIGIN в (0, 0)."""
         self.remove()                                   # остатки прошлого прогона
+        self.unregister()
+        self.register()
         self.wait_idle(self.settings.drive_timeout(30))
         updates = self.robot_updates()
         self.add()
@@ -168,6 +198,7 @@ class Robot:
         for stream in self._streams:
             stream.close()
         self.remove()
+        self.unregister()
 
 
 # ------------------------------------------------------------------ фикстуры
@@ -190,6 +221,19 @@ def dispatch(settings: Settings):
 
 
 @pytest.fixture(scope="session")
+def database(settings: Settings):
+    """RobotRegistry fleet_database: тесты регистрируют в нём роботов вместо control."""
+    channel = grpc.insecure_channel(settings.database_address)
+    try:
+        grpc.channel_ready_future(channel).result(timeout=5)
+    except grpc.FutureTimeoutError:
+        pytest.exit(f"fleet_database is not reachable at {settings.database_address} — is it running?",
+                    returncode=2)
+    yield dbgrpc.RobotRegistryStub(channel)
+    channel.close()
+
+
+@pytest.fixture(scope="session")
 def mqtt(settings: Settings):
     client = FmsClient(settings.target, client_id=f"dispatch-tests-{uuid.uuid4().hex[:6]}")
     client.connect()
@@ -205,22 +249,24 @@ def mqtt(settings: Settings):
 
 
 @pytest.fixture
-def robot(dispatch, settings: Settings, mqtt: FmsClient):
-    """Перед тестом: робот в dispatch, ONLINE, стоит на ORIGIN. После: миссии отменены, робот удалён."""
-    r = Robot(dispatch, settings, mqtt, settings.target.serial)
+def robot(dispatch, database, settings: Settings, mqtt: FmsClient):
+    """Перед тестом: робот в базе и в dispatch, ONLINE, стоит на ORIGIN. После: миссии отменены, робот удалён."""
+    r = Robot(dispatch, database, settings, mqtt, settings.target.serial)
     r.prepare()
     yield r
     r.cleanup()
 
 
 @pytest.fixture
-def second_robot(dispatch, settings: Settings):
-    """Второй робот симулятора, только в dispatch (его state тестам не нужен)."""
+def second_robot(dispatch, database, settings: Settings):
+    """Второй робот симулятора, в базе и в dispatch (его state тестам не нужен)."""
     target = RobotTarget(**{**settings.target.__dict__, "serial": settings.second_serial})
     client = FmsClient(target, client_id=f"dispatch-tests-2-{uuid.uuid4().hex[:6]}")
     client.connect()
-    r = Robot(dispatch, settings, client, settings.second_serial)
+    r = Robot(dispatch, database, settings, client, settings.second_serial)
     r.remove()
+    r.unregister()
+    r.register()
     updates = r.robot_updates()
     r.add()
     try:

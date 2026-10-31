@@ -2,8 +2,9 @@
 #include "spdlog/spdlog.h"
 #include "../include/VdaTopics.hpp"
 
-FleetRegistry::FleetRegistry(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, MissionStatusHub& mission_hub)
-    : io_context_(io_context), outbox_(outbox),  status_hub_(status_hub), mission_hub_(mission_hub) {}
+FleetRegistry::FleetRegistry(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, MissionStatusHub& mission_hub,
+                  DatabaseWriter& database)
+    : io_context_(io_context), outbox_(outbox),  status_hub_(status_hub), mission_hub_(mission_hub), database_(database)  {}
 
 AddResult FleetRegistry::add(const std::string& robot_id, const std::string& manufacturer,
                              const std::string& serial_number) {
@@ -16,7 +17,7 @@ AddResult FleetRegistry::add(const std::string& robot_id, const std::string& man
     if (find_by_vda(manufacturer, serial_number)) {
         return AddResult::Conflict;
     }
-    auto session = std::make_shared<RobotSession>(io_context_, outbox_, status_hub_, mission_hub_, robot_id, manufacturer, serial_number);
+    auto session = std::make_shared<RobotSession>(io_context_, outbox_, status_hub_, mission_hub_, database_, robot_id, manufacturer, serial_number);
     sessions_[robot_id] = session;
     session->start();
     spdlog::info("[registry] robot {} added, total {}", robot_id, sessions_.size());

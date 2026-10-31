@@ -4,11 +4,12 @@
 его стримы статусов. Заодно они подписаны на топики робота в брокере и видят его `state` напрямую —
 чтобы проверить, что робот на самом деле сделал то, о чём сообщает dispatch (остановился, бросил order).
 
-Нужны три вещи, подключённые к **одному** брокеру:
+Нужны три вещи, подключённые к **одному** брокеру, и fleet_database, в который пишет dispatch:
 
 1. MQTT-брокер;
 2. симулятор `robot_simulation`;
-3. `fleet_dispatch`.
+3. `fleet_dispatch`;
+4. `fleet_database` (и PostgreSQL за ним).
 
 Python-классы gRPC генерируются из `proto/*.proto` при каждом запуске (в `_gen/`), отдельный шаг не нужен.
 
@@ -29,8 +30,11 @@ VDA_BROKER_HOST=127.0.0.1 VDA_USER=user VDA_PASSWORD=... .venv/bin/python -m pyt
 
 Одна группа: `pytest -v test_missions.py`. Остановиться на первой ошибке: `pytest -x`.
 
-Перед каждым тестом робот добавляется в dispatch как `test-<serial>` и ставится на узел `origin` в (0, 0)
-через `InitializePosition`. После теста его миссии отменяются, а сам он удаляется из dispatch. Симулятор
+Перед каждым тестом робот регистрируется в fleet_database и добавляется в dispatch как `test-<serial>` —
+так же, как это делает control, и ставится на узел `origin` в (0, 0)
+через `InitializePosition`. После теста его миссии отменяются, а сам он удаляется из dispatch и из базы.
+Если в базе уже есть тот же робот (manufacturer + serial) под другим `robot_id`, тест падает с просьбой
+удалить его — чужие записи тесты не трогают. Симулятор
 при этом не перезапускается: если робот после прошлого теста ещё едет, следующий тест ждёт, пока он остановится.
 
 Маршруты в тестах — вдоль оси X от (0, 0), до 15 м. Препятствий в симуляторе нет, так что место не нужно.
@@ -40,6 +44,7 @@ VDA_BROKER_HOST=127.0.0.1 VDA_USER=user VDA_PASSWORD=... .venv/bin/python -m pyt
 | Переменная | По умолчанию | Что это |
 |---|---|---|
 | `DISPATCH_ADDRESS` | `localhost:5001` | gRPC fleet_dispatch |
+| `DATABASE_ADDRESS` | `localhost:5002` | gRPC fleet_database |
 | `VDA_BROKER_HOST` / `VDA_BROKER_PORT` | `localhost` / `1883` | Брокер |
 | `VDA_USER` / `VDA_PASSWORD` | — | Логин брокера |
 | `VDA_INTERFACE` / `VDA_MAJOR` | `amr` / `v3` | Начало топика |
@@ -57,6 +62,7 @@ VDA_BROKER_HOST=127.0.0.1 VDA_USER=user VDA_PASSWORD=... .venv/bin/python -m pyt
 | `test_robots.py` | `AddRobot` повторно и с конфликтом, обязательные поля, `RemoveRobot`; `StreamRobotStatus`: снимок первым, каждый state доходит, `removed_robot_id`, два подписчика, фильтр, битое сообщение считается в `protocol` |
 | `test_instant_actions.py` | Пауза и снятие паузы на ходу; `InitializePosition` ставит робота на узел, проверка полей, отказ робота во время езды |
 | `test_missions.py` | Миссия с маршрутом и действием до `COMPLETED` с прогрессом по узлам; `ActionStep`; отказ робота → `ORDER_REJECTED`; завершённая миссия в снимке; робот занят; маршрут не от того узла; некорректные миссии; та же миссия на другом роботе; `CancelMission` → `CANCELING` → `CANCELED`; `RemoveRobot` посреди миссии → `ROBOT_REMOVED` |
+| `test_database.py` | dispatch пишет в базу: статус после подключения, важное изменение — сразу, `RemoveRobot` не стирает статус; factsheet уже в базе, когда в стриме появилось новое `factsheet_received_at`, время совпадает до миллисекунды |
 | `test_stale.py` | Замороженный симулятор (`SIGSTOP`) → `STALE`, размороженный → `ONLINE`. Медленный, только с `DISPATCH_RUN_SLOW=1`, и тесты должны работать на той же машине, что и симулятор |
 
 ## Если тест упал

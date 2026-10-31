@@ -18,6 +18,8 @@ add_executable(fleet_dispatch fd_main.cpp
         src/OrderTracker.cpp
         src/ActiveMission.cpp
         src/MissionStatusHub.cpp
+        src/DatabaseWriter.cpp
+        include/DatabaseWriter.hpp
 )
 
 target_link_libraries(fleet_dispatch

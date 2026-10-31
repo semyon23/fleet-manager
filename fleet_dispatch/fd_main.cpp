@@ -24,7 +24,11 @@ int main(){
         GrpcServer grpc_server{"0.0.0.0:5001"};
         agrpc::GrpcContext grpc_context{grpc_server.add_completion_queue()};
 
-        FleetRegistry registry{io_context, outbox, status_hub, mission_hub};
+        const char* database_address = std::getenv("DATABASE_ADDRESS");
+        DatabaseWriter database{grpc_context, io_context, database_address ? database_address : "127.0.0.1:5002"};
+
+
+        FleetRegistry registry{io_context, outbox, status_hub, mission_hub, database};
         RobotMessageRouter message_router{io_context, mqtt, registry, outbox};
         DispatchService dispatch_service{grpc_context, registry, status_hub, mission_hub};
         grpc_server.add_service(dispatch_service.grpc_service());
@@ -32,6 +36,7 @@ int main(){
 
         mqtt.start();
         message_router.start();
+        database.start();
         grpc_server.start();
         dispatch_service.start();
         grpc_server.set_serving(true);
@@ -44,6 +49,7 @@ int main(){
             grpc_server.shutdown();
             status_hub.close_all();
             mission_hub.close_all();
+            database.stop();
             registry.stop_all();
             outbox.close();
             mqtt.stop();
