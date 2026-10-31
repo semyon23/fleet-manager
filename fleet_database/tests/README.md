@@ -35,7 +35,7 @@ python3 -m venv .venv
 .venv/bin/python -m pytest -v
 ```
 
-Другой адрес сервиса — `DATABASE_ADDRESS` (по умолчанию `localhost:5002`).
+Другой адрес сервиса — `DATABASE_ADDRESS` (gRPC, по умолчанию `localhost:5002`) и `DATABASE_HTTP` (REST, по умолчанию `http://localhost:8002`).
 
 ## Что проверяется
 
@@ -43,6 +43,7 @@ python3 -m venv .venv
 |---|---|
 | `test_robot_registry.py` | `CreateRobot`: что сохранилось, игнор `lifecycle` и времени, кавычки и юникод в имени и метках, занятый `robot_id`, тот же физический робот под другим id, обязательные поля, одновременные создания; `GetRobot` / `ListRobots`: совпадение с созданным, сортировка, `NOT_FOUND`; `UpdateRobot`: меняет только имя и метки (метки целиком), растёт `updated_at`; удаление в два шага: `FAILED_PRECONDITION` без пометки, скрытие `PENDING_DELETE` из списка, повторная пометка, повторная регистрация после удаления |
 | `test_dispatch_storage.py` | `SaveRobotStatus`: статус целиком возвращается в `GetRobot` и `ListRobots`, новый заменяет старый полностью, запись для `PENDING_DELETE`, неизвестный робот → `NOT_FOUND`; `SaveFactsheet` / `GetFactsheet`: сохранить и прочитать, замена, время по умолчанию, не JSON → `INVALID_ARGUMENT`, нет factsheet → `NOT_FOUND`; статус и factsheet удаляются вместе с роботом |
+| `test_rest.py` | REST для UI: робот в формате контракта (поля, `name` по умолчанию = id, `PENDING_DELETE` в списке), статус (enum без префиксов, `null` вместо пустых значений, время с миллисекундами), factsheet, 404 в формате `{code, message, details}`, CORS preflight, методов записи нет |
 
 Что пока не автоматизировано: данные переживают перезапуск сервиса и `UNAVAILABLE` при остановленном
 PostgreSQL — проверяются руками (см. [README сервиса](../README.md)).
