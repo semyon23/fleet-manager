@@ -8,8 +8,8 @@
 #include "DatabaseService.hpp"
 #include "GrpcServer.hpp"
 #include "spdlog/spdlog.h"
+#include "http_server.hpp"
 
-// Значение переменной окружения или fallback, если её нет
 std::string env_or(const char* name, const char* fallback) {
     const char* value = std::getenv(name);
     return value ? value : fallback;

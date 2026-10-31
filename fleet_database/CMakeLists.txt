@@ -11,6 +11,7 @@ add_executable(fleet_database
 target_include_directories(fleet_database PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 target_link_libraries(fleet_database PRIVATE
+        http_server
         grpc_server            # GrpcServer из shared, путь shared/include
         proto_lib              # сгенерированные классы и путь к *.pb.h
         asio-grpc::asio-grpc   # agrpc + макрос бэкенда Boost.Asio
