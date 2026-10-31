@@ -8,6 +8,9 @@ __pycache__/
 /fleet_dispatch/tests/_gen
 /fleet_dispatch/tests/.pytest_cache
 
+/robot_simulation/tests/.venv
+/robot_simulation/tests/logs
+
 /fleet_database/tests/.venv
 /fleet_database/tests/_gen
 /fleet_database/tests/.pytest_cache
