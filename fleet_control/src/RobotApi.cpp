@@ -104,6 +104,14 @@ RobotApi::RobotApi(Services& services, ApiRouter& router) : services_(services) 
         [this](const HttpRequest& req, const PathParams&) { return create_robot(req); });
     router.add_route(http::verb::patch, "/api/fms/robots/{id}",
         [this](const HttpRequest& req, const PathParams& params) { return update_robot(req, params.at("id")); });
+
+    router.add_route(http::verb::delete_, "/api/fms/robots/{id}",
+    [this](const HttpRequest& req, const PathParams& params) { return delete_robot(req, params.at("id")); });
+    router.add_route(http::verb::post, "/api/fms/robots/{id}/pause",
+        [this](const HttpRequest& req, const PathParams& params) { return pause_robot(req, params.at("id"), true); });
+    router.add_route(http::verb::post, "/api/fms/robots/{id}/resume",
+        [this](const HttpRequest& req, const PathParams& params) { return pause_robot(req, params.at("id"), false); });
+
 }
 
 // ==================================================================== POST /robots
@@ -206,4 +214,87 @@ asio::awaitable<HttpResponse> RobotApi::update_robot(const HttpRequest& req, std
     dbv1::RobotRecord record = current.robot();   // статус — тот, что был; spec — новый
     *record.mutable_spec() = updated.spec();
     co_return json_response(req, http::status::ok, robot_json(record).dump());
+}
+
+asio::awaitable<HttpResponse> RobotApi::delete_robot(const HttpRequest& req, std::string robot_id) {
+    dbv1::GetRobotRequest get;
+    get.set_robot_id(robot_id);
+    dbv1::GetRobotResponse current;
+    grpc::Status status = co_await services_.call<&Registry::PrepareAsyncGetRobot>(*services_.registry, get, current);
+    if (!status.ok()) {
+        co_return grpc_error(req, status);
+    }
+
+    // Занят ли робот — пока по статусу от dispatch (миссий control ещё нет)
+    const std::string& mission_id = current.robot().status().mission_id();
+    bool force = query_param(req, "force") == "true";
+    if (!mission_id.empty() && !force) {
+        co_return error_response(req, http::status::conflict, "ROBOT_BUSY",
+                                 "robot " + robot_id + " is executing mission " + mission_id +
+                                 "; use ?force=true to cancel it");
+    }
+
+    // С этого шага удаление принято: дальше отвечаем 202, даже если dispatch не ответит
+    dbv1::SetRobotDeletingRequest mark;
+    mark.set_robot_id(robot_id);
+    dbv1::SetRobotDeletingResponse marked;
+    status = co_await services_.call<&Registry::PrepareAsyncSetRobotDeleting>(*services_.registry, mark, marked);
+    if (!status.ok()) {
+        co_return grpc_error(req, status);
+    }
+    spdlog::info("[robot_api] robot {} is being deleted{}", robot_id,
+                 mission_id.empty() ? "" : ", its mission " + mission_id + " is canceled");
+
+    co_await finish_delete(robot_id);
+
+    dbv1::RobotRecord record = current.robot();
+    record.mutable_spec()->set_lifecycle(dbv1::ROBOT_LIFECYCLE_PENDING_DELETE);
+    co_return json_response(req, http::status::accepted, robot_json(record).dump());
+}
+
+// dispatch завершает миссию (ROBOT_REMOVED) и отписывается от робота, потом запись удаляется из базы.
+// Не вышло — робот остаётся PENDING_DELETE: повторный DELETE или сверка с dispatch (C-3) доведут удаление.
+asio::awaitable<void> RobotApi::finish_delete(const std::string& robot_id) {
+    dpv1::RemoveRobotRequest remove;
+    remove.set_robot_id(robot_id);
+    dpv1::RemoveRobotResponse removed;
+    grpc::Status status = co_await services_.call<&Dispatch::PrepareAsyncRemoveRobot>(*services_.dispatch, remove, removed);
+    if (!status.ok() && status.error_code() != grpc::StatusCode::NOT_FOUND) {   // NOT_FOUND: dispatch его и не знал
+        spdlog::warn("[robot_api] robot {} stays PENDING_DELETE, dispatch did not remove it: {}", robot_id,
+                     status.error_message());
+        co_return;
+    }
+
+    dbv1::DeleteRobotRequest erase;
+    erase.set_robot_id(robot_id);
+    dbv1::DeleteRobotResponse erased;
+    status = co_await services_.call<&Registry::PrepareAsyncDeleteRobot>(*services_.registry, erase, erased);
+    if (!status.ok()) {
+        spdlog::warn("[robot_api] robot {} stays PENDING_DELETE, database did not delete it: {}", robot_id,
+                     status.error_message());
+        co_return;
+    }
+    spdlog::info("[robot_api] robot {} deleted", robot_id);
+}
+
+// ==================================================================== pause / resume
+
+// VDA startPause / stopPause. 202 — команда отправлена; результат — status.paused при следующем опросе
+asio::awaitable<HttpResponse> RobotApi::pause_robot(const HttpRequest& req, std::string robot_id, bool pause) {
+    grpc::Status status;
+    if (pause) {
+        dpv1::PauseRobotRequest request;
+        request.set_robot_id(robot_id);
+        dpv1::PauseRobotResponse response;
+        status = co_await services_.call<&Dispatch::PrepareAsyncPauseRobot>(*services_.dispatch, request, response);
+    } else {
+        dpv1::ResumeRobotRequest request;
+        request.set_robot_id(robot_id);
+        dpv1::ResumeRobotResponse response;
+        status = co_await services_.call<&Dispatch::PrepareAsyncResumeRobot>(*services_.dispatch, request, response);
+    }
+    if (!status.ok()) {
+        co_return grpc_error(req, status);   // NOT_FOUND — dispatch не знает робота
+    }
+    co_return json_response(req, http::status::accepted, "{}");
 }

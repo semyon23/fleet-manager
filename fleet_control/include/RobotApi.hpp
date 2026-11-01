@@ -18,6 +18,10 @@ private:
     asio::awaitable<HttpResponse> update_robot(const HttpRequest& req, std::string robot_id);
     asio::awaitable<void> add_to_dispatch(const fms::database::v1::RobotSpec& spec);
 
+    asio::awaitable<HttpResponse> delete_robot(const HttpRequest& req, std::string robot_id);
+    asio::awaitable<HttpResponse> pause_robot(const HttpRequest& req, std::string robot_id, bool pause);
+    asio::awaitable<void> finish_delete(const std::string& robot_id);
+
     Services& services_;
 };
 

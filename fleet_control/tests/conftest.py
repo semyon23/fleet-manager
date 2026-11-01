@@ -1,8 +1,9 @@
 """Настройка тестов fleet_control. Тесты работают вместо UI: вызывают REST control.
 
-Нужны запущенные fleet_control, fleet_database (и PostgreSQL) и fleet_dispatch. Брокер и симулятор
-этим тестам не нужны: роботы регистрируются с выдуманными serialNumber, dispatch просто подписывается
-на их топики. Проверяют тесты по базе (REST и gRPC) и по dispatch (gRPC).
+Нужны запущенные fleet_control, fleet_database (и PostgreSQL) и fleet_dispatch. Большинству тестов
+брокер и симулятор не нужны: роботы регистрируются с выдуманными serialNumber, dispatch просто подписывается
+на их топики. Тесты, которым нужен живой робот (фикстура sim_robot), без симулятора пропускаются.
+Проверяют тесты по базе (REST и gRPC) и по dispatch (gRPC).
 
 Таблицу роботов не чистим: у каждого теста свои роботы test-ctl-<случайное> (производитель test),
 после теста они удаляются из dispatch и из базы.
@@ -13,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -51,6 +53,9 @@ import fleet_dispatch_pb2_grpc as dgrpc  # noqa: E402
 CONTROL = os.environ.get("CONTROL_HTTP", "http://localhost:8003")
 DATABASE_HTTP = os.environ.get("DATABASE_HTTP", "http://localhost:8002")
 MANUFACTURER = "test"
+SIM_MANUFACTURER = os.environ.get("VDA_MANUFACTURER", "ktc")   # робот симулятора
+SIM_SERIAL = os.environ.get("VDA_SERIAL", "amr1")
+SIM_MAP = os.environ.get("VDA_MAP_ID", "map_1")
 
 
 def http(method: str, url: str, body=None):
@@ -91,9 +96,29 @@ class Robots:
     def patch(self, robot_id: str, body):
         return http("PATCH", f"{CONTROL}/api/fms/robots/{robot_id}", body)
 
+    def delete(self, robot_id: str, force: bool = False):
+        query = "?force=true" if force else ""
+        return http("DELETE", f"{CONTROL}/api/fms/robots/{robot_id}{query}")
+
+    def command(self, robot_id: str, name: str):
+        """pause / resume"""
+        return http("POST", f"{CONTROL}/api/fms/robots/{robot_id}/{name}")
+
     def from_database(self, robot_id: str):
         """GET базы — то, что увидит UI."""
         return http("GET", f"{DATABASE_HTTP}/api/fms/robots/{robot_id}")
+
+    def wait_status(self, robot_id: str, condition, timeout: float, what: str) -> dict:
+        """Ждать, пока статус робота в базе (его пишет dispatch) удовлетворит condition."""
+        deadline = time.monotonic() + timeout
+        status = None
+        while time.monotonic() < deadline:
+            code, robot = self.from_database(robot_id)
+            status = robot.get("status") if code == 200 else None
+            if status and condition(status):
+                return status
+            time.sleep(0.2)
+        raise TimeoutError(f"timeout {timeout:.0f}s waiting for {what}\nlast status: {status}")
 
     def cleanup(self) -> None:
         for robot_id in self.ids:
@@ -146,3 +171,17 @@ def robots(registry, dispatch):
     r = Robots(registry, dispatch)
     yield r
     r.cleanup()
+
+
+@pytest.fixture
+def sim_robot(robots) -> str:
+    """Робот симулятора, зарегистрированный через control и ONLINE в базе. Нет симулятора — тест пропускается."""
+    code, body = robots.register(manufacturer=SIM_MANUFACTURER, serialNumber=SIM_SERIAL)
+    if code == 409:
+        pytest.fail(f"{SIM_MANUFACTURER}/{SIM_SERIAL} is already registered under another id — delete it first: {body}")
+    assert code == 201, body
+    try:
+        robots.wait_status(body["id"], lambda s: s["connection"] == "ONLINE", 10, "ONLINE")
+    except TimeoutError:
+        pytest.skip(f"robot {SIM_MANUFACTURER}/{SIM_SERIAL} is not ONLINE — is the simulator running?")
+    return body["id"]
