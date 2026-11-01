@@ -7,6 +7,7 @@ find_package(nlohmann_json CONFIG REQUIRED)
 add_executable(fleet_control fc_main.cpp
         src/Services.cpp
         src/HealthApi.cpp
+        src/RobotApi.cpp
 )
 
 target_link_libraries(fleet_control
@@ -14,6 +15,7 @@ target_link_libraries(fleet_control
         http_server
         grpc_server
         env_config
+        api_json
         asio-grpc::asio-grpc
         nlohmann_json::nlohmann_json
         proto_lib

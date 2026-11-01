@@ -5,6 +5,7 @@
 #include <string>
 
 #include "include/HealthApi.hpp"
+#include "include/RobotApi.hpp"
 #include "include/Services.hpp"
 #include "env_config.hpp"
 #include "http_server.hpp"
@@ -24,6 +25,7 @@ int main() {
         Services services{grpc_context, database_address, dispatch_address};
         ApiRouter router;
         HealthApi health_api{services, router};
+        RobotApi robot_api{services, router};
         HttpServer http_server{endpoint_from(http_address), io_context, router};
 
         http_server.start();

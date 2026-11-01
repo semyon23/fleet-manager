@@ -4,6 +4,11 @@ __pycache__/
 /.idea/
 /tests/.venv
 /tests/logs
+
+/fleet_control/tests/.venv
+/fleet_control/tests/_gen
+/fleet_control/tests/.pytest_cache
+
 /fleet_dispatch/tests/.venv
 /fleet_dispatch/tests/_gen
 /fleet_dispatch/tests/.pytest_cache

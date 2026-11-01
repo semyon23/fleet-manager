@@ -22,3 +22,10 @@ target_link_libraries(http_server PUBLIC Boost::headers spdlog::spdlog)
 add_library(env_config INTERFACE)
 target_include_directories(env_config INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(env_config INTERFACE Boost::headers)
+
+add_library(api_json STATIC
+        src/api_json.cpp
+        include/api_json.hpp
+)
+target_include_directories(api_json PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(api_json PUBLIC proto_lib)

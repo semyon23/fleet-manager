@@ -28,6 +28,7 @@ HttpResponse json_response(const HttpRequest& req, http::status status, std::str
 // Ошибка по контракту UI: {"code": ..., "message": ..., "details": {}}
 HttpResponse error_response(const HttpRequest& req, http::status status, std::string_view code, std::string_view message);
 
+
 // Маршруты сервиса: метод + шаблон пути ("/api/fms/robots/{id}") → обработчик
 class ApiRouter {
 public:

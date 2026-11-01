@@ -51,11 +51,27 @@ HttpResponse error_response(const HttpRequest& req, http::status status, std::st
     return json_response(req, status, body.dump());
 }
 
+std::optional<std::string> query_param(const HttpRequest& req, std::string_view name) {
+    std::string_view target = req.target();
+    auto question = target.find('?');
+    if (question == std::string_view::npos) {
+        return std::nullopt;
+    }
+    for (auto part : std::views::split(target.substr(question + 1), '&')) {
+        std::string_view pair(part.begin(), part.end());
+        auto equals = pair.find('=');
+        if (pair.substr(0, equals) == name) {
+            return equals == std::string_view::npos ? std::string{} : std::string(pair.substr(equals + 1));
+        }
+    }
+    return std::nullopt;
+}
+
 // ==================================================================== ApiRouter
 
 void ApiRouter::add_route(http::verb method, std::string_view pattern, RouteCallback callback) {
     routes_.push_back({method, split_path(pattern), std::move(callback)});
-    spdlog::debug("[api_router] {} {}", http::to_string(method), pattern);
+    spdlog::debug("[api_router] registry endpoint - {} {}", http::to_string(method), pattern);
 }
 
 asio::awaitable<HttpResponse> ApiRouter::route_request(const HttpRequest& req) {

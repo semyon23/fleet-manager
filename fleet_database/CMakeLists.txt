@@ -6,8 +6,6 @@ add_executable(fleet_database
         src/Database.cpp
         src/DatabaseService.cpp
         src/RobotTable.cpp
-        src/ApiJson.cpp
-        include/ApiJson.hpp
         src/RestApi.cpp
         include/RestApi.hpp
 )
@@ -18,6 +16,7 @@ target_link_libraries(fleet_database PRIVATE
         http_server
         grpc_server
         env_config
+        api_json
         proto_lib
         asio-grpc::asio-grpc
         Boost::headers
