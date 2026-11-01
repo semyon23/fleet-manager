@@ -9,17 +9,7 @@
 #include "GrpcServer.hpp"
 #include "spdlog/spdlog.h"
 #include "RestApi.hpp"
-
-std::string env_or(const char* name, const char* fallback) {
-    const char* value = std::getenv(name);
-    return value ? value : fallback;
-}
-
-ip::tcp::endpoint endpoint_from(const std::string& address) {
-    auto colon = address.rfind(':');
-    return {ip::make_address(address.substr(0, colon)),
-            static_cast<unsigned short>(std::stoi(address.substr(colon + 1)))};
-}
+#include "env_config.hpp"
 
 int main() {
     try {

@@ -18,3 +18,7 @@ add_library(http_server STATIC
 )
 target_include_directories(http_server PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(http_server PUBLIC Boost::headers spdlog::spdlog)
+
+add_library(env_config INTERFACE)
+target_include_directories(env_config INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(env_config INTERFACE Boost::headers)

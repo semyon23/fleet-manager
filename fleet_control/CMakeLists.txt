@@ -4,23 +4,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Boost REQUIRED COMPONENTS headers)
 find_package(asio-grpc CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
-add_executable(fleet_control fsm_main.cpp
-        src/api/HttpSession.cpp
-        src/api/ApiController.cpp
-        src/api/RobotApiHandler.cpp
-        src/core/RobotsService.cpp
-        src/core/MissionService.cpp
-        src/core/FleetDispatchClient.cpp
-        include/core/FleetDispatchClient.hpp
-        src/api/WebSocketBroadcaster.cpp
-        include/api/WebSocketBroadcaster.hpp
-
+add_executable(fleet_control fc_main.cpp
 
 )
 
 target_link_libraries(fleet_control
         PRIVATE
-
+        http_server
+        grpc_server
+        env_config
         asio-grpc::asio-grpc
         nlohmann_json::nlohmann_json
         proto_lib

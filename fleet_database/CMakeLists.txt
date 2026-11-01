@@ -16,9 +16,10 @@ target_include_directories(fleet_database PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/in
 
 target_link_libraries(fleet_database PRIVATE
         http_server
-        grpc_server            # GrpcServer из shared, путь shared/include
-        proto_lib              # сгенерированные классы и путь к *.pb.h
-        asio-grpc::asio-grpc   # agrpc + макрос бэкенда Boost.Asio
+        grpc_server
+        env_config
+        proto_lib
+        asio-grpc::asio-grpc
         Boost::headers
         libpqxx::pqxx
         spdlog::spdlog
