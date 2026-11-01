@@ -3,44 +3,48 @@
 #include <boost/asio/signal_set.hpp>
 #include <cstdlib>
 #include <string>
-#include "GrpcServer.hpp"
+
+#include "include/HealthApi.hpp"
+#include "include/Services.hpp"
+#include "env_config.hpp"
 #include "http_server.hpp"
 #include "spdlog/spdlog.h"
-#include "env_config.hpp"
-
-namespace asio  = boost::asio;
 
 int main() {
-    const std::string grpc_address = env_or("GRPC_ADDRESS", "0.0.0.0:5003");
-    const std::string http_address = env_or("HTTP_ADDRESS", "0.0.0.0:8003");
+    try {
+        const std::string http_address = env_or("HTTP_ADDRESS", "0.0.0.0:8003");
+        const std::string database_address = env_or("DATABASE_ADDRESS", "127.0.0.1:5002");
+        const std::string dispatch_address = env_or("DISPATCH_ADDRESS", "127.0.0.1:5001");
 
-    asio::io_context io_context{1};
-    GrpcServer grpc_server{grpc_address};
-    agrpc::GrpcContext grpc_context{grpc_server.add_completion_queue()};
-
-    ApiRouter router;
-   // RestApi rest_api{database, router};
-    HttpServer http_server{endpoint_from(http_address), io_context, router};
-
-    grpc_server.start();
-    http_server.start();
-    grpc_server.set_serving(true);
+        asio::io_context io_context{1};
+        agrpc::GrpcContext grpc_context;
+        auto grpc_work = asio::make_work_guard(grpc_context);
 
 
-    asio::signal_set signals{io_context, SIGINT, SIGTERM};
-    signals.async_wait([&](const boost::system::error_code&, int signal) {
-        spdlog::info("signal {} received, stopping", signal);
-        grpc_server.shutdown();
-    });
+        Services services{grpc_context, database_address, dispatch_address};
+        ApiRouter router;
+        HealthApi health_api{services, router};
+        HttpServer http_server{endpoint_from(http_address), io_context, router};
 
-    spdlog::info("fleet_control started: gRPC {}, HTTP {}", grpc_address, http_address);
-    agrpc::run(grpc_context, io_context, [&] { return grpc_context.is_stopped(); });
+        http_server.start();
 
-    grpc_server.destroy();
+        bool stopping = false;
+        asio::signal_set signals{io_context, SIGINT, SIGTERM};
+        signals.async_wait([&](const boost::system::error_code&, int signal) {
+            spdlog::info("signal {} received, stopping", signal);
+            http_server.stop();
+            grpc_work.reset();
+            stopping = true;
+        });
 
-    http_server.stop();
-    spdlog::info("[fleet control] stopped");
+        spdlog::info("fleet_control started: HTTP {}; database {}, dispatch {}",
+                     http_address, database_address, dispatch_address);
+        agrpc::run(grpc_context, io_context, [&] { return grpc_context.is_stopped(); });
 
-
-    return EXIT_SUCCESS;
+        spdlog::info("fleet_control stopped");
+        return EXIT_SUCCESS;
+    } catch (const std::exception& e) {
+        spdlog::error("fleet_control failed: {}", e.what());
+        return EXIT_FAILURE;
+    }
 }

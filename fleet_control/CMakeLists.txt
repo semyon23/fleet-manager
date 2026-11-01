@@ -5,7 +5,8 @@ find_package(Boost REQUIRED COMPONENTS headers)
 find_package(asio-grpc CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 add_executable(fleet_control fc_main.cpp
-
+        src/Services.cpp
+        src/HealthApi.cpp
 )
 
 target_link_libraries(fleet_control
