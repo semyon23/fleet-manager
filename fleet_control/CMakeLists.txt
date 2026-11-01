@@ -8,6 +8,7 @@ add_executable(fleet_control fc_main.cpp
         src/Services.cpp
         src/HealthApi.cpp
         src/RobotApi.cpp
+        src/FleetSync.cpp
 )
 
 target_link_libraries(fleet_control

@@ -99,7 +99,7 @@ void require(const std::string& value, const char* name, FieldErrors& errors) {
 
 }  // namespace
 
-RobotApi::RobotApi(Services& services, ApiRouter& router) : services_(services) {
+RobotApi::RobotApi(Services& services, FleetSync& sync, ApiRouter& router) : services_(services), sync_(sync){
     router.add_route(http::verb::post, "/api/fms/robots",
         [this](const HttpRequest& req, const PathParams&) { return create_robot(req); });
     router.add_route(http::verb::patch, "/api/fms/robots/{id}",
@@ -147,25 +147,13 @@ asio::awaitable<HttpResponse> RobotApi::create_robot(const HttpRequest& req) {
     }
     spdlog::info("[robot_api] robot {} registered ({} / {})", spec.robot_id(), spec.manufacturer(), spec.serial_number());
 
-    co_await add_to_dispatch(created.spec());
+    co_await sync_.add_to_dispatch(created.spec());;
 
     dbv1::RobotRecord record;
     *record.mutable_spec() = created.spec();
     co_return json_response(req, http::status::created, robot_json(record).dump());
 }
 
-asio::awaitable<void> RobotApi::add_to_dispatch(const dbv1::RobotSpec& spec) {
-    dpv1::AddRobotRequest request;
-    request.set_robot_id(spec.robot_id());
-    request.set_manufacturer(spec.manufacturer());
-    request.set_serial_number(spec.serial_number());
-    dpv1::AddRobotResponse response;
-    grpc::Status status = co_await services_.call<&Dispatch::PrepareAsyncAddRobot>(*services_.dispatch, request, response);
-    if (!status.ok()) {
-        spdlog::warn("[robot_api] robot {} is registered but not added to dispatch: {}", spec.robot_id(),
-                     status.error_message());
-    }
-}
 
 // ==================================================================== PATCH /robots/{id}
 
@@ -245,37 +233,13 @@ asio::awaitable<HttpResponse> RobotApi::delete_robot(const HttpRequest& req, std
     spdlog::info("[robot_api] robot {} is being deleted{}", robot_id,
                  mission_id.empty() ? "" : ", its mission " + mission_id + " is canceled");
 
-    co_await finish_delete(robot_id);
+    co_await sync_.finish_delete(robot_id);
 
     dbv1::RobotRecord record = current.robot();
     record.mutable_spec()->set_lifecycle(dbv1::ROBOT_LIFECYCLE_PENDING_DELETE);
     co_return json_response(req, http::status::accepted, robot_json(record).dump());
 }
 
-// dispatch завершает миссию (ROBOT_REMOVED) и отписывается от робота, потом запись удаляется из базы.
-// Не вышло — робот остаётся PENDING_DELETE: повторный DELETE или сверка с dispatch (C-3) доведут удаление.
-asio::awaitable<void> RobotApi::finish_delete(const std::string& robot_id) {
-    dpv1::RemoveRobotRequest remove;
-    remove.set_robot_id(robot_id);
-    dpv1::RemoveRobotResponse removed;
-    grpc::Status status = co_await services_.call<&Dispatch::PrepareAsyncRemoveRobot>(*services_.dispatch, remove, removed);
-    if (!status.ok() && status.error_code() != grpc::StatusCode::NOT_FOUND) {   // NOT_FOUND: dispatch его и не знал
-        spdlog::warn("[robot_api] robot {} stays PENDING_DELETE, dispatch did not remove it: {}", robot_id,
-                     status.error_message());
-        co_return;
-    }
-
-    dbv1::DeleteRobotRequest erase;
-    erase.set_robot_id(robot_id);
-    dbv1::DeleteRobotResponse erased;
-    status = co_await services_.call<&Registry::PrepareAsyncDeleteRobot>(*services_.registry, erase, erased);
-    if (!status.ok()) {
-        spdlog::warn("[robot_api] robot {} stays PENDING_DELETE, database did not delete it: {}", robot_id,
-                     status.error_message());
-        co_return;
-    }
-    spdlog::info("[robot_api] robot {} deleted", robot_id);
-}
 
 // ==================================================================== pause / resume
 

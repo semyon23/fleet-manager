@@ -7,6 +7,7 @@
 #include "include/HealthApi.hpp"
 #include "include/RobotApi.hpp"
 #include "include/Services.hpp"
+#include "include/FleetSync.hpp"
 #include "env_config.hpp"
 #include "http_server.hpp"
 #include "spdlog/spdlog.h"
@@ -21,20 +22,22 @@ int main() {
         agrpc::GrpcContext grpc_context;
         auto grpc_work = asio::make_work_guard(grpc_context);
 
-
         Services services{grpc_context, database_address, dispatch_address};
+        FleetSync fleet_sync{io_context, services};
         ApiRouter router;
         HealthApi health_api{services, router};
-        RobotApi robot_api{services, router};
+        RobotApi robot_api{services, fleet_sync, router};
         HttpServer http_server{endpoint_from(http_address), io_context, router};
 
         http_server.start();
+        fleet_sync.start();
 
         bool stopping = false;
         asio::signal_set signals{io_context, SIGINT, SIGTERM};
         signals.async_wait([&](const boost::system::error_code&, int signal) {
             spdlog::info("signal {} received, stopping", signal);
             http_server.stop();
+            fleet_sync.stop();
             grpc_work.reset();
             stopping = true;
         });
