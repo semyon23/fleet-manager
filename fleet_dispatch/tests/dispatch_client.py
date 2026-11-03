@@ -84,6 +84,17 @@ def robot_status(robot_id: str, condition: Callable = lambda s: True) -> Callabl
     return lambda u: u.HasField("status") and u.status.robot_id == robot_id and condition(u.status)
 
 
+def robot_in_update(robot_id: str, condition: Callable = lambda s: True) -> Callable:
+    """Как robot_status, но смотрит и в снимок. Нужно при подготовке робота: если запущен fleet_control,
+    его сверка может добавить робота в dispatch раньше теста — тогда робот приходит уже в первом снимке,
+    а AddRobot теста ничего не меняет и отдельного обновления статуса не будет."""
+    def check(update) -> bool:
+        if update.HasField("snapshot"):
+            return any(r.robot_id == robot_id and condition(r) for r in update.snapshot.robots)
+        return update.HasField("status") and update.status.robot_id == robot_id and condition(update.status)
+    return check
+
+
 def mission_status(mission_id: str, condition: Callable = lambda s: True) -> Callable:
     return lambda u: u.HasField("status") and u.status.mission_id == mission_id and condition(u.status)
 

@@ -47,7 +47,7 @@ import fleet_dispatch_pb2 as dpb  # noqa: E402
 import fleet_dispatch_pb2_grpc as dgrpc  # noqa: E402
 import fms_types_pb2 as fms  # noqa: E402
 from action_helpers import send_instant_actions  # noqa: E402
-from dispatch_client import UpdateStream, robot_status  # noqa: E402
+from dispatch_client import UpdateStream, robot_in_update  # noqa: E402
 from fms_client import FmsClient, RobotTarget, is_idle  # noqa: E402
 
 
@@ -177,16 +177,16 @@ class Robot:
 
     def prepare(self) -> None:
         """Робот зарегистрирован в базе, добавлен в dispatch, ONLINE и стоит на узле ORIGIN в (0, 0)."""
-        self.remove()                                   # остатки прошлого прогона
-        self.unregister()
+        self.unregister()                               # остатки прошлого прогона: сначала база, потом dispatch
+        self.remove()
         self.register()
         self.wait_idle(self.settings.drive_timeout(30))
         updates = self.robot_updates()
         self.add()
-        updates.wait(robot_status(self.robot_id, lambda s: s.connection == fms.CONNECTION_STATE_ONLINE),
+        updates.wait(robot_in_update(self.robot_id, lambda s: s.connection == fms.CONNECTION_STATE_ONLINE),
                      self.settings.t(5), what=f"{self.robot_id} ONLINE")
         self.initialize_position(ORIGIN, 0.0, 0.0)
-        updates.wait(robot_status(self.robot_id, lambda s: s.last_node_id == ORIGIN),
+        updates.wait(robot_in_update(self.robot_id, lambda s: s.last_node_id == ORIGIN),
                      self.settings.t(5), what=f"{self.robot_id} on node {ORIGIN}")
 
     def cleanup(self) -> None:
@@ -197,8 +197,9 @@ class Robot:
                 pass   # миссия уже закончилась — это нормально
         for stream in self._streams:
             stream.close()
-        self.remove()
+        # Сначала из базы: если запущен fleet_control, его сверка (C-3) иначе вернула бы робота в dispatch
         self.unregister()
+        self.remove()
 
 
 # ------------------------------------------------------------------ фикстуры
@@ -270,7 +271,7 @@ def second_robot(dispatch, database, settings: Settings):
     updates = r.robot_updates()
     r.add()
     try:
-        updates.wait(robot_status(r.robot_id, lambda s: s.connection == fms.CONNECTION_STATE_ONLINE),
+        updates.wait(robot_in_update(r.robot_id, lambda s: s.connection == fms.CONNECTION_STATE_ONLINE),
                      settings.t(5), what=f"{r.robot_id} ONLINE")
     except TimeoutError:
         r.cleanup()
