@@ -46,10 +46,36 @@ message RobotSpec {
   // Позже: класс робота в fms, разрешённые карты/зоны, зарядная станция по умолчанию, ...
 }
 
-// Всё, что известно о роботе: spec (control) + статус и factsheet (dispatch).
+
+// Может ли робот брать работу и почему нет (контракт UI: availability). Считает и пишет fleet_control.
+enum AvailabilityState {
+  AVAILABILITY_STATE_UNSPECIFIED = 0;
+  AVAILABILITY_STATE_OFFLINE = 1;     // connection не ONLINE
+  AVAILABILITY_STATE_NOT_READY = 2;   // на связи, но работать не может — см. reasons
+  AVAILABILITY_STATE_IDLE = 3;        // свободен, готов к миссии
+  AVAILABILITY_STATE_BUSY = 4;        // выполняет миссию
+  AVAILABILITY_STATE_CHARGING = 5;    // заряжается и свободен
+  AVAILABILITY_STATE_PAUSED = 6;
+  AVAILABILITY_STATE_ERROR = 7;       // ошибка CRITICAL / FATAL или аварийная остановка
+  AVAILABILITY_STATE_DELETING = 8;    // lifecycle PENDING_DELETE
+}
+
+message AvailabilityReason {
+  string code = 1;      // NOT_LOCALIZED, LOW_BATTERY, ... — список расширяемый (контракт UI, раздел 5.1)
+  string message = 2;   // для оператора, по-английски
+}
+
+message RobotAvailability {
+  AvailabilityState state = 1;
+  repeated AvailabilityReason reasons = 2;
+}
+
+
+// Всё, что известно о роботе: spec и availability (control) + статус и factsheet (dispatch).
 message RobotRecord {
   RobotSpec spec = 1;
-  optional fms.v1.RobotStatus status = 2;   // нет — dispatch ещё ничего не записал
+  optional fms.v1.RobotStatus status = 2;          // нет — dispatch ещё ничего не записал
+  optional RobotAvailability availability = 3;     // нет — control ещё не посчитал
 }
 
 service RobotRegistry {
@@ -64,6 +90,7 @@ service RobotRegistry {
   // Factsheet целиком, в исходном виде VDA. Control читает его, когда в стриме от dispatch
   // изменилось RobotStatus.factsheet_received_at.
   rpc GetFactsheet(GetFactsheetRequest) returns (GetFactsheetResponse);
+  rpc SaveRobotAvailability(SaveRobotAvailabilityRequest) returns (SaveRobotAvailabilityResponse);
 }
 
 message CreateRobotRequest { RobotSpec spec = 1; }   // lifecycle, created_at, updated_at игнорируются
@@ -93,6 +120,12 @@ message GetFactsheetResponse {
   string factsheet_json = 1;
   google.protobuf.Timestamp received_at = 2;
 }
+
+message SaveRobotAvailabilityRequest {
+  string robot_id = 1;
+  RobotAvailability availability = 2;
+}
+message SaveRobotAvailabilityResponse {}
 
 // =================================================================== dispatch (пишет dispatch)
 

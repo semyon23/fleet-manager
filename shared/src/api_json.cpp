@@ -78,6 +78,19 @@ json status_json(const fms::v1::RobotStatus& status) {
     };
 }
 
+json availability_json(const dbv1::RobotAvailability& availability){
+    json reasons = json::array();
+    for (const auto& reason : availability.reasons())
+    {
+        reasons.push_back({{"code", reason.code()}, {"message", reason.message()}});
+    }
+    return {
+        {"state", enum_name(dbv1::AvailabilityState_Name(availability.state()), "AVAILABILITY_STATE_")},
+        {"reasons", reasons},
+    };
+}
+
+
 }  // namespace
 
 json robot_json(const dbv1::RobotRecord& record) {
@@ -92,7 +105,7 @@ json robot_json(const dbv1::RobotRecord& record) {
         {"createdAt", iso_time(spec.created_at())},
         {"updatedAt", iso_time(spec.updated_at())},
         {"status", record.has_status() ? status_json(record.status()) : json(nullptr)},
-        {"availability", nullptr},    // считает control — появится вместе с ним
+        {"availability", record.has_availability() ? availability_json(record.availability()) : json(nullptr)},
         {"graphPosition", nullptr},   // тоже control
         {"info", nullptr},            // выжимка из factsheet — когда понадобится карточке робота
     };

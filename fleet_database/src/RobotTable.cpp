@@ -50,29 +50,32 @@ namespace
         return nlohmann::json(labels).dump();
     }
 
+    // C-4a: робот вместе со статусом и готовностью. LEFT JOIN: чего нет — NULL.
+    // Столбец 8 — статус (пишет dispatch), 9 — availability (пишет control); их читает row_to_record.
     const std::string kSelectRecord = std::string("SELECT ") + kColumns +
-        ", robot_status.status::text FROM robots LEFT JOIN robot_status USING (robot_id)";
+        ", robot_status.status::text, robot_availability.availability::text"
+        " FROM robots LEFT JOIN robot_status USING (robot_id) LEFT JOIN robot_availability USING (robot_id)";
 
-    std::string status_to_json(const fms::v1::RobotStatus& status)
+    // C-4a: protobuf → JSON для столбца JSONB: новые поля в proto не требуют миграции
+    std::string to_json(const google::protobuf::Message& message)
     {
         std::string json;
-        if (!google::protobuf::util::MessageToJsonString(status, &json).ok())
+        if (!google::protobuf::util::MessageToJsonString(message, &json).ok())
         {
-            throw std::runtime_error("RobotStatus -> JSON failed");
+            throw std::runtime_error(std::string(message.GetTypeName()) + " -> JSON failed");
         }
         return json;
     }
 
-    fms::v1::RobotStatus status_from_json(const std::string& json)
+    // C-4a: JSON из столбца JSONB → protobuf
+    void from_json(const std::string& json, google::protobuf::Message& message)
     {
-        fms::v1::RobotStatus status;
         google::protobuf::util::JsonParseOptions options;
         options.ignore_unknown_fields = true; // поле удалили из proto — старые записи всё равно читаются
-        if (!google::protobuf::util::JsonStringToMessage(json, &status, options).ok())
+        if (!google::protobuf::util::JsonStringToMessage(json, &message, options).ok())
         {
-            throw std::runtime_error("robot_status: stored JSON does not match RobotStatus");
+            throw std::runtime_error("stored JSON does not match " + std::string(message.GetTypeName()));
         }
-        return status;
     }
 
     dbv1::RobotRecord row_to_record(pqxx::row_ref row)
@@ -81,7 +84,11 @@ namespace
         *record.mutable_spec() = row_to_spec(row);
         if (!row[8].is_null())
         {
-            *record.mutable_status() = status_from_json(row[8].as<std::string>());
+            from_json(row[8].as<std::string>(), *record.mutable_status());
+        }
+        if (!row[9].is_null()) // C-4a
+        {
+            from_json(row[9].as<std::string>(), *record.mutable_availability());
         }
         return record;
     }
@@ -147,7 +154,7 @@ DeleteResult delete_robot(pqxx::work& tx, const std::string& robot_id) {
 void save_robot_status(pqxx::work& tx, const fms::v1::RobotStatus& status) {
     tx.exec("INSERT INTO robot_status (robot_id, status) VALUES ($1, $2::jsonb) "
             "ON CONFLICT (robot_id) DO UPDATE SET status = excluded.status, saved_at = now()",
-            pqxx::params{status.robot_id(), status_to_json(status)});
+            pqxx::params{status.robot_id(), to_json(status)});
 }
 
 void save_factsheet(pqxx::work& tx, const std::string& robot_id, const std::string& factsheet_json,
@@ -169,4 +176,12 @@ std::optional<dbv1::GetFactsheetResponse> select_factsheet(pqxx::work& tx, const
     factsheet.set_factsheet_json(rows[0][0].as<std::string>());
     *factsheet.mutable_received_at() = TimeUtil::MillisecondsToTimestamp(rows[0][1].as<long long>());
     return factsheet;
+}
+
+// C-4a: готовность пишет control; запись не меняет updated_at робота — это не изменение spec
+void save_robot_availability(pqxx::work& tx, const std::string& robot_id,
+                             const dbv1::RobotAvailability& availability) {
+    tx.exec("INSERT INTO robot_availability (robot_id, availability) VALUES ($1, $2::jsonb) "
+            "ON CONFLICT (robot_id) DO UPDATE SET availability = excluded.availability, saved_at = now()",
+            pqxx::params{robot_id, to_json(availability)});
 }

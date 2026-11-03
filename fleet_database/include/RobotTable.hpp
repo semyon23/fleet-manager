@@ -35,4 +35,8 @@ void save_robot_status(pqxx::work& tx, const fms::v1::RobotStatus& status);
 void save_factsheet(pqxx::work& tx, const std::string& robot_id, const std::string& factsheet_json, long long received_at_ms);   // не JSON — бросает pqxx::data_exception
 std::optional<dbv1::GetFactsheetResponse> select_factsheet(pqxx::work& tx, const std::string& robot_id);
 
+// Бросает pqxx::foreign_key_violation, если такого робота нет
+void save_robot_availability(pqxx::work& tx, const std::string& robot_id,
+                             const dbv1::RobotAvailability& availability);
+
 #endif //FLEETMANAGERSYSTEM_ROBOTTABLE_HPP

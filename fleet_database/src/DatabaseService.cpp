@@ -17,7 +17,7 @@ using SaveRobotStatusRPC      = agrpc::ServerRPC<&Storage::RequestSaveRobotStatu
 using SaveFactsheetRPC        = agrpc::ServerRPC<&Storage::RequestSaveFactsheet>;
 using SaveMissionExecutionRPC = agrpc::ServerRPC<&Storage::RequestSaveMissionExecution>;
 using ReserveHeaderIdsRPC     = agrpc::ServerRPC<&Storage::RequestReserveHeaderIds>;
-
+using SaveRobotAvailabilityRPC = agrpc::ServerRPC<&Registry::RequestSaveRobotAvailability>;
 const auto on_handler_done = [](std::exception_ptr error) {
     if (!error) return;
     try {
@@ -166,6 +166,16 @@ void DatabaseService::start() {
             co_await rpc.finish(response, status);
         },
         on_handler_done);
+
+    agrpc::register_awaitable_rpc_handler<SaveRobotAvailabilityRPC>(
+        grpc_context_, registry_,
+        [this](SaveRobotAvailabilityRPC& rpc, SaveRobotAvailabilityRPC::Request& request) -> asio::awaitable<void> {
+            SaveRobotAvailabilityRPC::Response response;
+            grpc::Status status = co_await save_robot_availability(request, response);
+            co_await rpc.finish(response, status);
+        },
+        on_handler_done);
+
 }
 
 // ==================================================================== RobotRegistry (DB-2)
@@ -333,4 +343,18 @@ asio::awaitable<grpc::Status> DatabaseService::save_mission_execution(const dbv1
 asio::awaitable<grpc::Status> DatabaseService::reserve_header_ids(const dbv1::ReserveHeaderIdsRequest&,
                                                                   dbv1::ReserveHeaderIdsResponse&) {
     co_return unimplemented("ReserveHeaderIds");
+}
+
+asio::awaitable<grpc::Status> DatabaseService::save_robot_availability(const dbv1::SaveRobotAvailabilityRequest& request, dbv1::SaveRobotAvailabilityResponse&) {
+    if (request.robot_id().empty() || request.availability().state() == dbv1::AVAILABILITY_STATE_UNSPECIFIED) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "robot_id and availability.state are required"};
+    }
+    try {
+        co_await database_.run([&](pqxx::work& tx) {
+            ::save_robot_availability(tx, request.robot_id(), request.availability());
+        });
+    } catch (const std::exception& e) {
+        co_return database_error(e);   // нет робота — foreign_key_violation → NOT_FOUND
+    }
+    co_return grpc::Status::OK;        // без лога: control пишет при каждом изменении
 }

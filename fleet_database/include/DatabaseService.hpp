@@ -36,6 +36,8 @@ private:
     asio::awaitable<grpc::Status> save_mission_execution(const dbv1::SaveMissionExecutionRequest& request, dbv1::SaveMissionExecutionResponse& response);
     asio::awaitable<grpc::Status> reserve_header_ids(const dbv1::ReserveHeaderIdsRequest& request, dbv1::ReserveHeaderIdsResponse& response);
 
+    asio::awaitable<grpc::Status> save_robot_availability(const dbv1::SaveRobotAvailabilityRequest& request,dbv1::SaveRobotAvailabilityResponse& response);
+
     agrpc::GrpcContext& grpc_context_;
     Database& database_;
     dbv1::RobotRegistry::AsyncService registry_;
