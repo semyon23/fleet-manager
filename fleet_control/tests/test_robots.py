@@ -29,8 +29,10 @@ def test_registered_robot_is_in_database(robots):
     _, robot = robots.register(name="r")
     status, stored = robots.from_database(robot["id"])
     assert status == 200
-    stored.pop("status")          # dispatch мог уже записать статус (UNKNOWN) — сравниваем остальное
-    robot.pop("status")
+    # status пишет dispatch, availability — control уже после ответа на POST; сравниваем остальное
+    for field in ("status", "availability"):
+        stored.pop(field)
+        robot.pop(field)
     assert stored == robot
 
 

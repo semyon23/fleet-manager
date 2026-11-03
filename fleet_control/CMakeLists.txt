@@ -5,23 +5,23 @@ find_package(Boost REQUIRED COMPONENTS headers)
 find_package(asio-grpc CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 add_executable(fleet_control fc_main.cpp
-        src/Services.cpp
-        src/HealthApi.cpp
-        src/RobotApi.cpp
-        src/FleetSync.cpp
+        services/Services.cpp
+        api/HealthApi.cpp
+        api/RobotApi.cpp
+        fleet/FleetSync.cpp
+        fleet/Availability.cpp
+        fleet/AvailabilityTracker.cpp
 )
-
-target_link_libraries(fleet_control
-        PRIVATE
-        http_server
-        grpc_server
-        env_config
-        api_json
-        asio-grpc::asio-grpc
-        nlohmann_json::nlohmann_json
-        proto_lib
-        gRPC::grpc++_reflection
-)
-
 target_include_directories(fleet_control PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(fleet_control PRIVATE Boost::headers)
+target_link_libraries(fleet_control PRIVATE
+        http_server
+        api_json
+        env_config
+        proto_lib
+        gRPC::grpc++
+        asio-grpc::asio-grpc
+        Boost::headers
+        nlohmann_json::nlohmann_json
+        spdlog::spdlog
+)
+

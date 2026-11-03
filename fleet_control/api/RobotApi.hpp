@@ -5,14 +5,14 @@
 #include <boost/asio/awaitable.hpp>
 #include <string>
 
-#include "Services.hpp"
-#include "FleetSync.hpp"
+#include "services/Services.hpp"
+#include "fleet/FleetSync.hpp"
 #include "http_server.hpp"
 
 
 class RobotApi {
 public:
-    RobotApi(Services& services, FleetSync& sync, ApiRouter& router);
+    RobotApi(Services& services, FleetSync& sync, AvailabilityTracker& availability, ApiRouter& router);
 
 private:
     asio::awaitable<HttpResponse> create_robot(const HttpRequest& req);
@@ -24,6 +24,7 @@ private:
 
     Services& services_;
     FleetSync& sync_;
+    AvailabilityTracker& availability_;
 };
 
 

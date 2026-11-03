@@ -1,4 +1,4 @@
-#include "../include/RobotApi.hpp"
+#include "RobotApi.hpp"
 #include <algorithm>
 #include <cctype>
 #include <map>
@@ -99,7 +99,8 @@ void require(const std::string& value, const char* name, FieldErrors& errors) {
 
 }  // namespace
 
-RobotApi::RobotApi(Services& services, FleetSync& sync, ApiRouter& router) : services_(services), sync_(sync){
+RobotApi::RobotApi(Services& services, FleetSync& sync, AvailabilityTracker& availability, ApiRouter& router)
+    : services_(services), sync_(sync), availability_(availability){
     router.add_route(http::verb::post, "/api/fms/robots",
         [this](const HttpRequest& req, const PathParams&) { return create_robot(req); });
     router.add_route(http::verb::patch, "/api/fms/robots/{id}",
@@ -148,8 +149,10 @@ asio::awaitable<HttpResponse> RobotApi::create_robot(const HttpRequest& req) {
     spdlog::info("[robot_api] robot {} registered ({} / {})", spec.robot_id(), spec.manufacturer(), spec.serial_number());
 
     co_await sync_.add_to_dispatch(created.spec());;
-
     dbv1::RobotRecord record;
+    *record.mutable_spec() = created.spec();
+    availability_.on_robot(record);   // C-4b: availability есть сразу — по контракту она не null
+
     *record.mutable_spec() = created.spec();
     co_return json_response(req, http::status::created, robot_json(record).dump());
 }
@@ -233,6 +236,7 @@ asio::awaitable<HttpResponse> RobotApi::delete_robot(const HttpRequest& req, std
     spdlog::info("[robot_api] robot {} is being deleted{}", robot_id,
                  mission_id.empty() ? "" : ", its mission " + mission_id + " is canceled");
 
+    availability_.set_deleting(robot_id);   // C-4b
     co_await sync_.finish_delete(robot_id);
 
     dbv1::RobotRecord record = current.robot();

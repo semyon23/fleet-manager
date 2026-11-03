@@ -18,7 +18,7 @@ It is also the entry point for actions: the web UI registers, changes, pauses an
 | Routes on the map graph | planned |
 | Traffic: node reservations, no deadlocks | planned |
 
-> **Work in progress.** Health and robots work: register, change, delete, pause. The robots in fleet_dispatch follow the database, also after restarts. Next: robot availability, then missions, task allocation, routes and traffic.
+> **Work in progress.** Health and robots work: register, change, delete, pause. The robots in fleet_dispatch follow the database, also after restarts, and every robot has its `availability`. Next: missions, task allocation, routes and traffic.
 
 ## How it works
 
@@ -44,6 +44,7 @@ flowchart LR
 |---|---|
 | `HttpServer`, `ApiRouter` | HTTP server and route table (shared with fleet_database, from `shared/`) |
 | `RobotApi` | robots: check the request, change them in fleet_database (`CreateRobot`, `UpdateRobot`, soft delete) and in fleet_dispatch (`AddRobot`, `RemoveRobot`, pause); answers in the contract format |
+| `AvailabilityTracker`, `availability_of` | whether each robot can work and why not: recomputed when its status (stream of dispatch), its lifecycle or the connection to dispatch changes; only changes are written to fleet_database |
 | `FleetSync` | keeps fleet_dispatch in line with the database: watches the robot status stream of dispatch, and right after connecting and then every 10 s adds robots dispatch does not know and finishes interrupted deletions |
 | `HealthApi` | `GET /api/health`: control itself and whether fleet_database and fleet_dispatch are serving |
 | `Services` | gRPC clients: one channel per service, stubs, `call<…>()` — one unary call with a 3 s deadline |
@@ -51,6 +52,24 @@ flowchart LR
 Everything runs on **one thread**: `agrpc::run` drives the gRPC client context and the Asio context of the HTTP server, so there are no mutexes. fleet_control has no gRPC server of its own — nobody calls it over gRPC.
 
 **fleet_database is the source of truth.** A robot is registered as soon as it is in the database. If fleet_dispatch is down at that moment, the registration still succeeds (201) and `FleetSync` adds the robot to dispatch as soon as dispatch is back. Deletion works the same way: once the robot is marked `PENDING_DELETE` the deletion is accepted (202); if dispatch does not answer, the robot stays `PENDING_DELETE` until a repeated `DELETE` or `FleetSync` finishes it. After a restart of fleet_dispatch, `FleetSync` adds all robots of the database to it again — within seconds, nobody has to register them again. Robots that dispatch knows but the database does not (added to dispatch directly, e.g. by its tests) are left alone.
+
+## Availability
+
+Whether a robot can take work (UI contract, section 5.1). The first rule that matches sets the state:
+
+| # | Condition | `state` | `reasons` |
+|---|---|---|---|
+| 1 | the robot is being deleted | `DELETING` | |
+| 2 | fleet_control has no connection to fleet_dispatch | `OFFLINE` | `DISPATCH_UNAVAILABLE` |
+| 3 | no status yet, or `connection` is not `ONLINE` | `OFFLINE` | `NO_CONNECTION` |
+| 4 | an error of level `CRITICAL` / `FATAL`, or an emergency stop | `ERROR` | `FATAL_ERROR`, `EMERGENCY_STOP` |
+| 5 | paused | `PAUSED` | |
+| 6 | has a mission | `BUSY` | |
+| 7 | any of: no factsheet, starting up or not in automatic mode, not localized, not on a graph node, low battery and not charging | `NOT_READY` | all that apply: `NO_FACTSHEET`, `STARTUP`, `MODE_NOT_AUTOMATIC`, `NOT_LOCALIZED`, `NOT_ON_GRAPH`, `LOW_BATTERY` |
+| 8 | charging | `CHARGING` | |
+| 9 | otherwise | `IDLE` | |
+
+`SEMIAUTOMATIC` counts as automatic: in VDA 5050 the robot then still follows orders, only the speed is set by an operator. `NOT_ON_GRAPH` only checks that the robot has a last node; with maps it will check the graph itself. `UNKNOWN_MAP` and `MISSING_ACTIONS` come with maps.
 
 ## REST API
 
@@ -84,6 +103,7 @@ Environment variables, with defaults for development:
 | `HTTP_ADDRESS` | `0.0.0.0:8003` | REST listen address |
 | `DATABASE_ADDRESS` | `127.0.0.1:5002` | gRPC of fleet_database |
 | `DISPATCH_ADDRESS` | `127.0.0.1:5001` | gRPC of fleet_dispatch |
+| `LOW_BATTERY_PERCENT` | `15` | below this, a robot that is not charging is `NOT_READY` (`LOW_BATTERY`) |
 
 fleet_control starts even when the other services are not running yet; gRPC connects to them on the first call and reconnects after they restart.
 
@@ -125,15 +145,21 @@ Automated tests: [`tests/`](tests) (pytest, instead of the UI).
 
 ## Layout
 
+The service is one process split into modules; each module is a folder, and an include names its module: `#include "fleet/FleetSync.hpp"`. Modules talk through narrow interfaces and run on one thread.
+
 ```
 fleet_control/
-├── fc_main.cpp          configuration, start and shutdown order
-├── include/             headers
-├── src/
-│   ├── Services.cpp     gRPC clients of fleet_database and fleet_dispatch
-│   ├── FleetSync.cpp    robots in dispatch = robots in the database
-│   ├── HealthApi.cpp    GET /api/health
-│   └── RobotApi.cpp     robots: POST, PATCH, DELETE, pause, resume
-├── docs/                banner
-└── tests/               pytest: REST of control, checked in the database and dispatch
+├── fc_main.cpp                configuration, start and shutdown order
+├── api/                       REST only: transport and input checks, no logic
+│   ├── HealthApi              GET /api/health
+│   └── RobotApi               robots: POST, PATCH, DELETE, pause, resume
+├── fleet/                     the robots of the fleet
+│   ├── FleetSync              robots in dispatch = robots in the database
+│   ├── AvailabilityTracker    availability of every robot, written on change
+│   └── Availability           availability_of(): status → state + reasons
+├── services/                  gRPC clients of fleet_database and fleet_dispatch
+├── docs/                      banner
+└── tests/                     pytest: REST of control, checked in the database and dispatch
 ```
+
+Planned modules: `missions/`, `allocation/`, `routing/`, `traffic/`, `maps/`, `energy/` (charging, parking, hibernation).

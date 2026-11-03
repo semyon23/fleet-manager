@@ -361,6 +361,8 @@ void RobotSession::abort_mission(const std::string &message) {
     if (!mission_) {
         return;
     }
+
+    send_instant_action(vda5050::action_type::kCancelOrder);
     mission_->abort(fms::v1::MISSION_ERROR_CODE_ROBOT_REMOVED, message);
     on_mission_changed();
 }

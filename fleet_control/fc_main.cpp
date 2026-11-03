@@ -4,10 +4,10 @@
 #include <cstdlib>
 #include <string>
 
-#include "include/HealthApi.hpp"
-#include "include/RobotApi.hpp"
-#include "include/Services.hpp"
-#include "include/FleetSync.hpp"
+#include "api/HealthApi.hpp"
+#include "api/RobotApi.hpp"
+#include "services//Services.hpp"
+#include "fleet//FleetSync.hpp"
 #include "env_config.hpp"
 #include "http_server.hpp"
 #include "spdlog/spdlog.h"
@@ -17,19 +17,21 @@ int main() {
         const std::string http_address = env_or("HTTP_ADDRESS", "0.0.0.0:8003");
         const std::string database_address = env_or("DATABASE_ADDRESS", "127.0.0.1:5002");
         const std::string dispatch_address = env_or("DISPATCH_ADDRESS", "127.0.0.1:5001");
-
+        const double low_battery_percent = std::stod(env_or("LOW_BATTERY_PERCENT", "15"));
         asio::io_context io_context{1};
         agrpc::GrpcContext grpc_context;
         auto grpc_work = asio::make_work_guard(grpc_context);
 
         Services services{grpc_context, database_address, dispatch_address};
-        FleetSync fleet_sync{io_context, services};
+        AvailabilityTracker availability{io_context, services, low_battery_percent};
+        FleetSync fleet_sync{io_context, services, availability};
         ApiRouter router;
         HealthApi health_api{services, router};
-        RobotApi robot_api{services, fleet_sync, router};
+        RobotApi robot_api{services, fleet_sync, availability, router};
         HttpServer http_server{endpoint_from(http_address), io_context, router};
 
         http_server.start();
+        availability.start();
         fleet_sync.start();
 
         bool stopping = false;
@@ -38,6 +40,7 @@ int main() {
             spdlog::info("signal {} received, stopping", signal);
             http_server.stop();
             fleet_sync.stop();
+            availability.stop();
             grpc_work.reset();
             stopping = true;
         });

@@ -1,4 +1,4 @@
-#include "../include/FleetSync.hpp"
+#include "FleetSync.hpp"
 
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -13,8 +13,9 @@ using Dispatch = dpv1::FleetDispatch::Stub;
 constexpr auto kSyncInterval = std::chrono::seconds(10);
 constexpr auto kReconnectDelay = std::chrono::seconds(2);
 
-FleetSync::FleetSync(asio::io_context& io_context, Services& services)
-    : io_context_(io_context), services_(services), reconnect_timer_(io_context), sync_timer_(io_context) {}
+FleetSync::FleetSync(asio::io_context& io_context, Services& services, AvailabilityTracker& availability)
+    : io_context_(io_context), services_(services), availability_(availability),
+      reconnect_timer_(io_context), sync_timer_(io_context) {}
 
 void FleetSync::start() {
     auto log_if_failed = [](std::exception_ptr error) {
@@ -56,6 +57,7 @@ asio::awaitable<void> FleetSync::watch_dispatch() {
 
         if (connected_) {
             spdlog::warn("[fleet_sync] dispatch stream closed: {}", status.error_message());
+            availability_.set_dispatch_connected(false);   // C-4b: без dispatch все роботы OFFLINE
         }
         connected_ = false;
         in_dispatch_.clear();
@@ -75,9 +77,14 @@ void FleetSync::on_update(const dpv1::RobotStatusUpdate& update) {
         }
         connected_ = true;
         spdlog::info("[fleet_sync] connected to dispatch, it has {} robots", in_dispatch_.size());
-        sync_timer_.cancel();   // сверить сейчас, не дожидаясь 10 с
+        availability_.set_dispatch_connected(true);   // C-4b
+        for (const auto& robot : update.snapshot().robots()) {
+            availability_.on_status(robot);
+        }
+        sync_timer_.cancel();
     } else if (update.has_status()) {
         in_dispatch_.insert(update.status().robot_id());
+        availability_.on_status(update.status());   // C-4b
     } else if (update.has_removed_robot_id()) {
         in_dispatch_.erase(update.removed_robot_id());
     }
@@ -112,8 +119,11 @@ asio::awaitable<void> FleetSync::sync() {
         database_ok_ = true;
     }
 
+    std::set<std::string> in_database;
     for (const auto& record : response.robots()) {
         const auto& spec = record.spec();
+        in_database.insert(spec.robot_id());
+        availability_.on_robot(record);   // C-4b: lifecycle и статус из базы
         if (spec.lifecycle() == dbv1::ROBOT_LIFECYCLE_PENDING_DELETE) {
             spdlog::info("[fleet_sync] finishing delete of robot {}", spec.robot_id());
             co_await finish_delete(spec.robot_id());
@@ -122,6 +132,7 @@ asio::awaitable<void> FleetSync::sync() {
             co_await add_to_dispatch(spec);
         }
     }
+    availability_.keep_only(in_database);
 }
 
 // ==================================================================== общие шаги

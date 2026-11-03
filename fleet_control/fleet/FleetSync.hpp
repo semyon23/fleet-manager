@@ -8,12 +8,12 @@
 #include <boost/asio/steady_timer.hpp>
 #include <set>
 #include <string>
-
-#include "Services.hpp"
+#include "fleet/AvailabilityTracker.hpp"
+#include "services/Services.hpp"
 
 class FleetSync {
 public:
-    FleetSync(asio::io_context& io_context, Services& services);
+    FleetSync(asio::io_context& io_context, Services& services, AvailabilityTracker& availability);
 
     void start();
     void stop();
@@ -31,6 +31,7 @@ private:
 
     asio::io_context& io_context_;
     Services& services_;
+    AvailabilityTracker& availability_;
     std::set<std::string> in_dispatch_;   // кого dispatch ведёт — по стриму
     bool connected_ = false;              // стрим открыт и снимок получен
     bool database_ok_ = true;             // для лога: база пропала / вернулась
