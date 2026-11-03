@@ -76,7 +76,8 @@ void RobotSession::start() {
     request(MqttAction::Subscribe, connection_topic_);
     request(MqttAction::Subscribe, factsheet_topic_);
 
-    publish_status();   // DB-4
+    send_instant_action(vda5050::action_type::kStateRequest);
+    publish_status();
     auto log_if_failed = [id = robot_id_](std::exception_ptr error) {
         if (!error) return;
         try {

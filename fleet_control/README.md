@@ -18,7 +18,7 @@ It is also the entry point for actions: the web UI registers, changes, pauses an
 | Routes on the map graph | planned |
 | Traffic: node reservations, no deadlocks | planned |
 
-> **Work in progress.** Health and robot registration work; deleting and pausing robots come next, then missions, task allocation, routes and traffic.
+> **Work in progress.** Health and robots work: register, change, delete, pause. The robots in fleet_dispatch follow the database, also after restarts. Next: robot availability, then missions, task allocation, routes and traffic.
 
 ## How it works
 
@@ -43,13 +43,14 @@ flowchart LR
 | Part | Responsibility |
 |---|---|
 | `HttpServer`, `ApiRouter` | HTTP server and route table (shared with fleet_database, from `shared/`) |
-| `RobotApi` | robots: check the request, `CreateRobot` / `UpdateRobot` in fleet_database, `AddRobot` in fleet_dispatch; answers in the contract format |
+| `RobotApi` | robots: check the request, change them in fleet_database (`CreateRobot`, `UpdateRobot`, soft delete) and in fleet_dispatch (`AddRobot`, `RemoveRobot`, pause); answers in the contract format |
+| `FleetSync` | keeps fleet_dispatch in line with the database: watches the robot status stream of dispatch, and right after connecting and then every 10 s adds robots dispatch does not know and finishes interrupted deletions |
 | `HealthApi` | `GET /api/health`: control itself and whether fleet_database and fleet_dispatch are serving |
 | `Services` | gRPC clients: one channel per service, stubs, `call<…>()` — one unary call with a 3 s deadline |
 
 Everything runs on **one thread**: `agrpc::run` drives the gRPC client context and the Asio context of the HTTP server, so there are no mutexes. fleet_control has no gRPC server of its own — nobody calls it over gRPC.
 
-**fleet_database is the source of truth.** A robot is registered as soon as it is in the database. If fleet_dispatch is down at that moment, the registration still succeeds (201) and the robot gets to dispatch later, when fleet_control reconciles the database with dispatch (next step).
+**fleet_database is the source of truth.** A robot is registered as soon as it is in the database. If fleet_dispatch is down at that moment, the registration still succeeds (201) and `FleetSync` adds the robot to dispatch as soon as dispatch is back. Deletion works the same way: once the robot is marked `PENDING_DELETE` the deletion is accepted (202); if dispatch does not answer, the robot stays `PENDING_DELETE` until a repeated `DELETE` or `FleetSync` finishes it. After a restart of fleet_dispatch, `FleetSync` adds all robots of the database to it again — within seconds, nobody has to register them again. Robots that dispatch knows but the database does not (added to dispatch directly, e.g. by its tests) are left alone.
 
 ## REST API
 
@@ -60,8 +61,8 @@ Format and errors — the UI contract: `camelCase`, enums without prefixes, time
 | `GET /api/health` | `{"status": "OK" \| "DEGRADED", "services": {"control", "database", "dispatch"}}` | ✅ |
 | `POST /api/fms/robots` | register: `{id, manufacturer, serialNumber, name?, labels?}` → 201 `Robot` | ✅ |
 | `PATCH /api/fms/robots/{id}` | change `name` and `labels`; `id`, `manufacturer`, `serialNumber` cannot change | ✅ |
-| `DELETE /api/fms/robots/{id}` | soft delete → 202; 409 `ROBOT_BUSY` while it has a mission, `?force=true` cancels it | next |
-| `POST /api/fms/robots/{id}/pause`, `/resume` | VDA `startPause` / `stopPause` → 202 | next |
+| `DELETE /api/fms/robots/{id}` | soft delete → 202; 409 `ROBOT_BUSY` while it has a mission, `?force=true` cancels it | ✅ |
+| `POST /api/fms/robots/{id}/pause`, `/resume` | VDA `startPause` / `stopPause` → 202 | ✅ |
 | missions, maps, alarms | | planned |
 
 | Error | When |
@@ -69,6 +70,7 @@ Format and errors — the UI contract: `camelCase`, enums without prefixes, time
 | 400 `INVALID_INPUT` | body is not a JSON object or fields are wrong; all wrong fields at once in `details` |
 | 404 `NOT_FOUND` | no such robot |
 | 409 `ALREADY_EXISTS` | `id` is taken, or the pair `manufacturer + serialNumber` is already registered |
+| 409 `ROBOT_BUSY` | `DELETE` while the robot has a mission (without `?force=true`) |
 | 503 `UNAVAILABLE` | fleet_database or fleet_dispatch does not answer — retry later |
 
 There is no authentication in the service: the gateway checks the JWT. Do not expose the HTTP port directly.
@@ -129,8 +131,9 @@ fleet_control/
 ├── include/             headers
 ├── src/
 │   ├── Services.cpp     gRPC clients of fleet_database and fleet_dispatch
+│   ├── FleetSync.cpp    robots in dispatch = robots in the database
 │   ├── HealthApi.cpp    GET /api/health
-│   └── RobotApi.cpp     robots: POST, PATCH
+│   └── RobotApi.cpp     robots: POST, PATCH, DELETE, pause, resume
 ├── docs/                banner
 └── tests/               pytest: REST of control, checked in the database and dispatch
 ```
