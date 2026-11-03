@@ -61,6 +61,7 @@ Rules: an applied file is never edited — every change is a new file with the n
 |---|---|
 | `001_robots.sql` | `robots` |
 | `002_robot_status.sql` | `robot_status`, `robot_factsheets` — the latest of each, deleted together with the robot |
+| `003_robot_availability.sql` | `robot_availability` — whether the robot can work and why not; written by fleet_control |
 | next | mission execution, `headerId` counters |
 
 ## gRPC API
@@ -68,6 +69,7 @@ Rules: an applied file is never edited — every change is a new file with the n
 | RPC | Status |
 |---|---|
 | `RobotRegistry`: `CreateRobot`, `UpdateRobot`, `SetRobotDeleting`, `DeleteRobot`, `GetRobot`, `ListRobots`, `GetFactsheet` | done |
+| `RobotRegistry`: `SaveRobotAvailability` | done; fleet_control writes it |
 | `DispatchStorage`: `SaveRobotStatus`, `SaveFactsheet` | done; fleet_dispatch writes them |
 | `DispatchStorage`: `SaveMissionExecution`, `ReserveHeaderIds`, `LoadDispatchSnapshot` | planned, together with dispatch recovery |
 
@@ -83,7 +85,7 @@ The format is the UI contract (`docs/API_CONTRACT.md` in the UI repository, sect
 | `GET /api/fms/robots/{id}` | `Robot`; 404 `NOT_FOUND` |
 | `GET /api/fms/robots/{id}/factsheet` | the factsheet as the robot sent it (VDA 5050 JSON); 404 if none yet |
 
-`availability`, `graphPosition` (computed by fleet_control) and `info` (factsheet summary) are `null` for now.
+`availability` is `null` until fleet_control has written it; `graphPosition` (computed by fleet_control) and `info` (factsheet summary) are `null` for now.
 
 There is no authentication in the service: the gateway checks the JWT. Do not expose the HTTP port directly — only behind the gateway.
 
