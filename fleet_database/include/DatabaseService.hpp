@@ -46,6 +46,11 @@ private:
     asio::awaitable<grpc::Status> get_map(const dbv1::GetMapRequest& request, dbv1::GetMapResponse& response);
     asio::awaitable<grpc::Status> list_maps(const dbv1::ListMapsRequest& request, dbv1::ListMapsResponse& response);
 
+    // ControlStorage (M-3)
+    asio::awaitable<grpc::Status> save_mission(const dbv1::SaveMissionRequest& request, dbv1::SaveMissionResponse& response);
+    asio::awaitable<grpc::Status> get_mission(const dbv1::GetMissionRequest& request, dbv1::GetMissionResponse& response);
+    asio::awaitable<grpc::Status> list_active_missions(const dbv1::ListActiveMissionsRequest& request, dbv1::ListActiveMissionsResponse& response);
+
     agrpc::GrpcContext& grpc_context_;
     Database& database_;
     dbv1::RobotRegistry::AsyncService registry_;

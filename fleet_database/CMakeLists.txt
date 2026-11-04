@@ -8,8 +8,10 @@ add_executable(fleet_database
         src/RobotTable.cpp
         src/RestApi.cpp
         include/RestApi.hpp
-        include/MapTable.cpp
+        src/MapTable.cpp
         include/MapTable.hpp
+        include/MissionTable.cpp
+        include/MissionTable.hpp
 )
 
 target_include_directories(fleet_database PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

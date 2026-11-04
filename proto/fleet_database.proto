@@ -3,7 +3,7 @@
 //
 // Один писатель на каждое поле, поэтому сервисы разделены по владельцу:
 //   DispatchStorage — пишет fleet_dispatch: статус робота, factsheet, выполнение миссий, headerId.
-//   ControlStorage  — пишет fleet_control: карты; позже миссии control, резервации, тревоги.
+//   ControlStorage  — пишет fleet_control: карты, миссии; позже резервации, тревоги.
 // Читать может любой сервис. Позже: ControlStorage (миссии control, карты, граф, зоны, резервации,
 // аварии) — отдельным сервисом, когда дойдём до control.
 //
@@ -239,6 +239,13 @@ service ControlStorage {
   rpc DeleteMap(DeleteMapRequest) returns (DeleteMapResponse);   // NOT_FOUND — нет такой карты
   rpc GetMap(GetMapRequest) returns (GetMapResponse);
   rpc ListMaps(ListMapsRequest) returns (ListMapsResponse);      // все карты, с body_json, без image
+
+  // Миссии. Пишет только control: создать или заменить целиком (по mission_id).
+  rpc SaveMission(SaveMissionRequest) returns (SaveMissionResponse);
+  rpc GetMission(GetMissionRequest) returns (GetMissionResponse);   // NOT_FOUND — нет такой миссии
+  // Незавершённые (QUEUED, ASSIGNED, RUNNING, PAUSED, CANCELING) — control читает при старте.
+  // Списки для UI с фильтрами и страницами — только REST базы, через gRPC не нужны.
+  rpc ListActiveMissions(ListActiveMissionsRequest) returns (ListActiveMissionsResponse);
 }
 
 message CreateMapRequest { MapRecord map = 1; }   // version, created_at, updated_at игнорируются
@@ -259,3 +266,34 @@ message GetMapResponse { MapRecord map = 1; }
 
 message ListMapsRequest {}
 message ListMapsResponse { repeated MapRecord maps = 1; }   // по map_id
+
+// =================================================================== миссии (пишет control)
+
+// Миссия fms (контракт UI, раздел 7): кто, куда, что сделать. Её создаёт оператор (или сам fms:
+// зарядка, парковка), control выбирает робота и ведёт до конца. Не путать с MissionExecution —
+// это выполнение в dispatch, его собственные данные.
+//
+// Документ — объект Mission контракта целиком (JSON), как у карт: собирает control, UI читает как есть.
+// Остальные поля — копии полей документа для фильтров и сортировки списка; их держит control.
+message MissionRecord {
+  string mission_id = 1;
+  string map_id = 2;
+  string robot_id = 3;          // назначенный робот; пусто — ещё не назначен
+  // Как в контракте: QUEUED | ASSIGNED | RUNNING | PAUSED | CANCELING | COMPLETED | FAILED | CANCELED
+  string state = 4;
+  uint32 priority = 5;          // LOW 0, NORMAL 1, HIGH 2, CRITICAL 3
+  string body_json = 6;         // Mission контракта: id, name, steps, stepStates, error, ...
+  // Времена ставит control: они же лежат в документе (createdAt, updatedAt, finishedAt)
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp updated_at = 8;
+  optional google.protobuf.Timestamp finished_at = 9;   // только у завершённых
+}
+
+message SaveMissionRequest { MissionRecord mission = 1; }
+message SaveMissionResponse {}
+
+message GetMissionRequest { string mission_id = 1; }
+message GetMissionResponse { MissionRecord mission = 1; }
+
+message ListActiveMissionsRequest {}
+message ListActiveMissionsResponse { repeated MissionRecord missions = 1; }   // по created_at

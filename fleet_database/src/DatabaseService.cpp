@@ -1,6 +1,7 @@
 #include "../include/DatabaseService.hpp"
 #include "../include/RobotTable.hpp"
 #include "../include/MapTable.hpp"
+#include "../include/MissionTable.hpp"
 #include "spdlog/spdlog.h"
 #include <google/protobuf/util/time_util.h>
 using Registry = dbv1::RobotRegistry::AsyncService;
@@ -27,6 +28,10 @@ using UpdateMapRPC = agrpc::ServerRPC<&Control::RequestUpdateMap>;
 using DeleteMapRPC = agrpc::ServerRPC<&Control::RequestDeleteMap>;
 using GetMapRPC    = agrpc::ServerRPC<&Control::RequestGetMap>;
 using ListMapsRPC  = agrpc::ServerRPC<&Control::RequestListMaps>;
+
+using SaveMissionRPC        = agrpc::ServerRPC<&Control::RequestSaveMission>;
+using GetMissionRPC         = agrpc::ServerRPC<&Control::RequestGetMission>;
+using ListActiveMissionsRPC = agrpc::ServerRPC<&Control::RequestListActiveMissions>;
 
 const auto on_handler_done = [](std::exception_ptr error) {
     if (!error) return;
@@ -229,6 +234,35 @@ void DatabaseService::start() {
         [this](ListMapsRPC& rpc, ListMapsRPC::Request& request) -> asio::awaitable<void> {
             ListMapsRPC::Response response;
             grpc::Status status = co_await list_maps(request, response);
+            co_await rpc.finish(response, status);
+        },
+        on_handler_done);
+
+    // ---------------------------------------------------------------- ControlStorage (M-3)
+
+    agrpc::register_awaitable_rpc_handler<SaveMissionRPC>(
+        grpc_context_, control_,
+        [this](SaveMissionRPC& rpc, SaveMissionRPC::Request& request) -> asio::awaitable<void> {
+            SaveMissionRPC::Response response;
+            grpc::Status status = co_await save_mission(request, response);
+            co_await rpc.finish(response, status);
+        },
+        on_handler_done);
+
+    agrpc::register_awaitable_rpc_handler<GetMissionRPC>(
+        grpc_context_, control_,
+        [this](GetMissionRPC& rpc, GetMissionRPC::Request& request) -> asio::awaitable<void> {
+            GetMissionRPC::Response response;
+            grpc::Status status = co_await get_mission(request, response);
+            co_await rpc.finish(response, status);
+        },
+        on_handler_done);
+
+    agrpc::register_awaitable_rpc_handler<ListActiveMissionsRPC>(
+        grpc_context_, control_,
+        [this](ListActiveMissionsRPC& rpc, ListActiveMissionsRPC::Request& request) -> asio::awaitable<void> {
+            ListActiveMissionsRPC::Response response;
+            grpc::Status status = co_await list_active_missions(request, response);
             co_await rpc.finish(response, status);
         },
         on_handler_done);
@@ -511,6 +545,58 @@ asio::awaitable<grpc::Status> DatabaseService::list_maps(const dbv1::ListMapsReq
     }
     for (auto& map : maps) {
         *response.add_maps() = std::move(map);
+    }
+    co_return grpc::Status::OK;
+}
+
+// ==================================================================== ControlStorage (M-3)
+
+asio::awaitable<grpc::Status> DatabaseService::save_mission(const dbv1::SaveMissionRequest& request,
+                                                            dbv1::SaveMissionResponse&) {
+    const auto& mission = request.mission();
+    if (mission.mission_id().empty() || mission.map_id().empty() || mission.body_json().empty() ||
+        !mission.has_created_at() || !mission.has_updated_at()) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT,
+                               "mission_id, map_id, body_json, created_at and updated_at are required"};
+    }
+    try {
+        co_await database_.run([&](pqxx::work& tx) { ::save_mission(tx, mission); });
+    } catch (const pqxx::check_violation&) {
+        // CHECK в таблице: ошибка в control, а не в данных оператора
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT,
+                               "mission " + mission.mission_id() + ": invalid state '" + mission.state() +
+                               "' or priority " + std::to_string(mission.priority())};
+    } catch (const std::exception& e) {
+        co_return database_error(e);   // body_json не JSON — data_exception → INVALID_ARGUMENT
+    }
+    co_return grpc::Status::OK;        // без лога: control пишет при каждом изменении миссии
+}
+
+asio::awaitable<grpc::Status> DatabaseService::get_mission(const dbv1::GetMissionRequest& request,
+                                                           dbv1::GetMissionResponse& response) {
+    std::optional<dbv1::MissionRecord> mission;
+    try {
+        co_await database_.run([&](pqxx::work& tx) { mission = select_mission(tx, request.mission_id()); });
+    } catch (const std::exception& e) {
+        co_return database_error(e);
+    }
+    if (!mission) {
+        co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "mission " + request.mission_id() + " not found"};
+    }
+    *response.mutable_mission() = std::move(*mission);
+    co_return grpc::Status::OK;
+}
+
+asio::awaitable<grpc::Status> DatabaseService::list_active_missions(const dbv1::ListActiveMissionsRequest&,
+                                                                    dbv1::ListActiveMissionsResponse& response) {
+    std::vector<dbv1::MissionRecord> missions;
+    try {
+        co_await database_.run([&](pqxx::work& tx) { missions = select_active_missions(tx); });
+    } catch (const std::exception& e) {
+        co_return database_error(e);
+    }
+    for (auto& mission : missions) {
+        *response.add_missions() = std::move(mission);
     }
     co_return grpc::Status::OK;
 }
