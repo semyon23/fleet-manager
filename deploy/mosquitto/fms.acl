@@ -1,0 +1,35 @@
+# Права на топики брокера fms. Кладётся в /etc/mosquitto/fms.acl.
+# Топики роботов — VDA 5050 v3: amr/v3/{manufacturer}/{serialNumber}/{topic}.
+# Чего нет в списке — запрещено. Запрещённую публикацию mosquitto молча отбрасывает, клиент ошибки не видит.
+
+# fleet_dispatch: читает всё, что шлют роботы, отправляет order и instantActions.
+# connection и factsheet пишет, чтобы при удалении робота стереть его retained-сообщения (пустым сообщением).
+user fleet-dispatch
+topic read  amr/v3/+/+/state
+topic read  amr/v3/+/+/visualization
+topic readwrite amr/v3/+/+/connection
+topic readwrite amr/v3/+/+/factsheet
+topic write amr/v3/+/+/order
+topic write amr/v3/+/+/instantActions
+
+# fleet_control: позже публикует события fms для UI (контракт UI, раздел 9.2).
+user fleet-control
+topic write fms/v1/#
+
+# Веб-UI: только чтение — даже если пароль утечёт из браузера, команду роботу с ним не отправить.
+user fleet-ui
+topic read amr/v3/+/+/visualization
+topic read amr/v3/+/+/connection
+topic read fms/v1/#
+
+# Симулятор и тесты: одно подключение за многих роботов и за «fms». Только для стенда, не для склада.
+user fms-dev
+topic readwrite amr/v3/#
+
+# Настоящие роботы: логин робота = его serialNumber (%u), каждый пишет и читает только свои топики.
+pattern write amr/v3/+/%u/state
+pattern write amr/v3/+/%u/visualization
+pattern write amr/v3/+/%u/connection
+pattern write amr/v3/+/%u/factsheet
+pattern read  amr/v3/+/%u/order
+pattern read  amr/v3/+/%u/instantActions
