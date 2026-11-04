@@ -20,6 +20,7 @@ struct Services {
 
     agrpc::GrpcContext& grpc_context;
     std::unique_ptr<fms::database::v1::RobotRegistry::Stub> registry;
+    std::unique_ptr<fms::database::v1::ControlStorage::Stub> control;
     std::unique_ptr<fms::dispatch::v1::FleetDispatch::Stub> dispatch;
     std::unique_ptr<grpc::health::v1::Health::Stub> database_health;
     std::unique_ptr<grpc::health::v1::Health::Stub> dispatch_health;

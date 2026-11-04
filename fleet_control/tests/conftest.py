@@ -19,6 +19,7 @@ import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 import grpc
 import pytest
@@ -135,6 +136,59 @@ class Robots:
                     raise
 
 
+class Maps:
+    """Карты одного теста (M-1): пишутся через REST control, читаются из базы. Удаляются в cleanup()
+    через DELETE control — чтобы и граф в памяти control не остался."""
+
+    def __init__(self):
+        self.ids: list[str] = []
+
+    @staticmethod
+    def document(**fields) -> dict:
+        """Карта, как её шлёт редактор UI: два узла, ребро туда и обратно, станция у n2."""
+        values = {
+            "name": "Test map",
+            "width": 200, "height": 100,
+            "meta": {"resolution": 0.05, "origin": [-1.0, -2.0, 0.0]},
+            "waypoints": [{"id": "n1", "u": 10, "v": 20}, {"id": "n2", "u": 50, "v": 20, "theta": 1.57}],
+            "edges": [{"id": "e1", "from": "n1", "to": "n2", "maxSpeed": 0.5},
+                      {"id": "e2", "from": "n2", "to": "n1"}],
+            "stations": [{"id": "st1", "u": 60, "v": 30, "kind": "charge", "interactionNodeIds": ["n2"]}],
+            "zones": [],
+            "assignedRobots": [],
+        }
+        values.update(fields)
+        return values
+
+    def create(self, **fields):
+        """POST /maps → (код, тело). id по умолчанию уникальный; id=None — не присылать (сгенерирует сервер)."""
+        body = self.document(**fields)
+        body.setdefault("id", f"test-ctl-map-{uuid.uuid4().hex[:8]}")
+        if body["id"] is None:
+            del body["id"]
+        elif isinstance(body["id"], str):
+            self.ids.append(body["id"])
+        code, created = http("POST", f"{CONTROL}/api/fms/maps", body)
+        if code == 201 and created["id"] not in self.ids:
+            self.ids.append(created["id"])
+        return code, created
+
+    def patch(self, map_id: str, body):
+        return http("PATCH", f"{CONTROL}/api/fms/maps/{quote(map_id, safe='')}", body)
+
+    def delete(self, map_id: str):
+        return http("DELETE", f"{CONTROL}/api/fms/maps/{quote(map_id, safe='')}")
+
+    def from_database(self, map_id: str):
+        """GET базы — то, что увидит UI."""
+        return http("GET", f"{DATABASE_HTTP}/api/fms/maps/{quote(map_id, safe='')}")
+
+    def cleanup(self) -> None:
+        for map_id in self.ids:
+            code, body = self.delete(map_id)
+            assert code in (204, 404), f"cannot delete test map {map_id}: {code} {body}"
+
+
 def _channel(address: str, what: str):
     channel = grpc.insecure_channel(address)
     try:
@@ -171,6 +225,13 @@ def robots(registry, dispatch):
     r = Robots(registry, dispatch)
     yield r
     r.cleanup()
+
+
+@pytest.fixture
+def maps():
+    m = Maps()
+    yield m
+    m.cleanup()
 
 
 @pytest.fixture

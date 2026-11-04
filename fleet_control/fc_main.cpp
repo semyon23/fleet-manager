@@ -6,10 +6,12 @@
 
 #include "api/HealthApi.hpp"
 #include "api/RobotApi.hpp"
+#include "api/MapApi.hpp"
 #include "services//Services.hpp"
 #include "fleet//FleetSync.hpp"
 #include "env_config.hpp"
 #include "http_server.hpp"
+#include "maps/MapStore.hpp"
 #include "spdlog/spdlog.h"
 
 int main() {
@@ -25,24 +27,27 @@ int main() {
         Services services{grpc_context, database_address, dispatch_address};
         AvailabilityTracker availability{io_context, services, low_battery_percent};
         FleetSync fleet_sync{io_context, services, availability};
+        MapStore maps{io_context, services};
         ApiRouter router;
         HealthApi health_api{services, router};
         RobotApi robot_api{services, fleet_sync, availability, router};
+        MapApi map_api{services, maps, router};
         HttpServer http_server{endpoint_from(http_address), io_context, router};
 
         http_server.start();
         availability.start();
         fleet_sync.start();
+        maps.start();
 
-        bool stopping = false;
+
         asio::signal_set signals{io_context, SIGINT, SIGTERM};
         signals.async_wait([&](const boost::system::error_code&, int signal) {
             spdlog::info("signal {} received, stopping", signal);
             http_server.stop();
             fleet_sync.stop();
+            maps.stop();
             availability.stop();
             grpc_work.reset();
-            stopping = true;
         });
 
         spdlog::info("fleet_control started: HTTP {}; database {}, dispatch {}",
