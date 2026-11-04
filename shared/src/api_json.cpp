@@ -110,3 +110,23 @@ json robot_json(const dbv1::RobotRecord& record) {
         {"info", nullptr},            // выжимка из factsheet — когда понадобится карточке робота
     };
 }
+
+json map_json(const dbv1::MapRecord& map, bool full) {
+    json result = json::parse(map.body_json());   // документ редактора как есть; база хранит его как JSONB
+    if (!result.is_object()) {
+        result = json::object();
+    }
+    result["id"] = map.map_id();
+    result["name"] = map.name();
+    result["version"] = map.version();
+    result["createdAt"] = iso_time(map.created_at());
+    result["updatedAt"] = iso_time(map.updated_at());
+    if (full) {
+        result["pgmDataUrl"] = map.image().empty() ? json(nullptr) : json(map.image());
+    } else {
+        result.erase("waypoints");
+        result.erase("edges");
+        result.erase("zones");
+    }
+    return result;
+}

@@ -1,7 +1,7 @@
 # Тесты fleet_database
 
-Тесты работают **вместо fleet_control и fleet_dispatch**: вызывают gRPC `RobotRegistry` и `DispatchStorage`
-и проверяют ответы.
+Тесты работают **вместо fleet_control и fleet_dispatch**: вызывают gRPC `RobotRegistry`, `DispatchStorage`
+и `ControlStorage` и проверяют ответы.
 Нужен только запущенный `fleet_database` (и PostgreSQL за ним). Брокер и симулятор не нужны.
 
 Python-классы gRPC генерируются из `proto/*.proto` при каждом запуске (в `_gen/`), отдельный шаг не нужен.
@@ -13,11 +13,17 @@ Python-классы gRPC генерируются из `proto/*.proto` при к
 смотрит только на них и в конце удаляет их через API (`SetRobotDeleting` + `DeleteRobot`).
 Поэтому тесты можно гонять на той же базе, с которой работает dispatch, и повторять сколько угодно.
 
+Карты — так же: `test-map-<случайное>`, из `ListMaps` тест смотрит только на свои, в конце удаляет их `DeleteMap`.
+
 Если тест упал на середине, его роботы всё равно удаляются. Если оборвать сам прогон (Ctrl+C),
 могут остаться записи с производителем `test`:
 
 ```bash
 psql postgresql://fms:fms@127.0.0.1:5432/fms -c "DELETE FROM robots WHERE manufacturer = 'test'"
+```
+
+```bash
+psql postgresql://fms:fms@127.0.0.1:5432/fms -c "DELETE FROM maps WHERE map_id LIKE 'test-map-%'"
 ```
 
 ## Установка
@@ -44,6 +50,7 @@ python3 -m venv .venv
 | `test_robot_registry.py` | `CreateRobot`: что сохранилось, игнор `lifecycle` и времени, кавычки и юникод в имени и метках, занятый `robot_id`, тот же физический робот под другим id, обязательные поля, одновременные создания; `GetRobot` / `ListRobots`: совпадение с созданным, сортировка, `NOT_FOUND`; `UpdateRobot`: меняет только имя и метки (метки целиком), растёт `updated_at`; удаление в два шага: `FAILED_PRECONDITION` без пометки, скрытие `PENDING_DELETE` из списка, повторная пометка, повторная регистрация после удаления |
 | `test_dispatch_storage.py` | `SaveRobotStatus`: статус целиком возвращается в `GetRobot` и `ListRobots`, новый заменяет старый полностью, запись для `PENDING_DELETE`, неизвестный робот → `NOT_FOUND`; `SaveFactsheet` / `GetFactsheet`: сохранить и прочитать, замена, время по умолчанию, не JSON → `INVALID_ARGUMENT`, нет factsheet → `NOT_FOUND`; статус и factsheet удаляются вместе с роботом |
 | `test_robot_availability.py` | `SaveRobotAvailability` (пишет control): сохранить и прочитать через `GetRobot` и `ListRobots`, новая заменяет старую, spec не трогает, `DELETING` для робота на удалении, неизвестный робот → `NOT_FOUND`, без id или состояния → `INVALID_ARGUMENT`, удаляется вместе с роботом; в REST — `{state, reasons}` по контракту, без записи — `null` |
+| `test_maps.py` | `ControlStorage` (пишет control): `CreateMap` — версия 1, документ сохраняется как есть, занятый id, обязательные поля, не JSON; `GetMap` с картинкой, `ListMaps` с графом, но без картинки, по `map_id`; `UpdateMap` — версия + 1, картинка прежняя без `new_image`, замена и очистка картинки, устаревшая версия → `ABORTED` без изменений, 10 одновременных сохранений — применяется одно; `DeleteMap`; карта на 5 МБ проходит, на 40 МБ — `RESOURCE_EXHAUSTED` (лимит сервера 32 МБ); REST: список без графа и картинки, карта целиком, `pgmDataUrl: null` без картинки, новая версия, 404 |
 | `test_rest.py` | REST для UI: робот в формате контракта (поля, `name` по умолчанию = id, `PENDING_DELETE` в списке), статус (enum без префиксов, `null` вместо пустых значений, время с миллисекундами), factsheet, 404 в формате `{code, message, details}`, CORS preflight, методов записи нет |
 
 Что пока не автоматизировано: данные переживают перезапуск сервиса и `UNAVAILABLE` при остановленном

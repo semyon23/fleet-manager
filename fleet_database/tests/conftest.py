@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import uuid
@@ -96,12 +97,73 @@ class Robots:
                     raise
 
 
+class Maps:
+    """Карты одного теста (ControlStorage — то, что пишет control). Всё созданное удаляется в cleanup()."""
+
+    # Документ редактора UI — как его сохраняет фронт (без полей записи: id, name, version, ...)
+    BODY = {
+        "width": 200, "height": 100,
+        "meta": {"resolution": 0.05, "origin": [-1.0, -2.0, 0.0]},
+        "waypoints": [{"id": "n1", "u": 10, "v": 20}, {"id": "n2", "u": 50, "v": 20, "theta": 1.57}],
+        "edges": [{"id": "e1", "from": "n1", "to": "n2", "maxSpeed": 0.5}],
+        "stations": [{"id": "st1", "u": 60, "v": 30, "kind": "charge", "interactionNodeIds": ["n2"]}],
+        "zones": [],
+        "assignedRobots": [],
+    }
+
+    def __init__(self, control: dbgrpc.ControlStorageStub):
+        self.control = control
+        self.ids: list[str] = []
+
+    def record(self, **fields) -> db.MapRecord:
+        """MapRecord с уникальным map_id и документом BODY; fields заменяют любые поля."""
+        values = {"map_id": unique("test-map"), "name": "Test map", "body_json": json.dumps(self.BODY)}
+        values.update(fields)
+        self.ids.append(values["map_id"])
+        return db.MapRecord(**values)
+
+    def create(self, **fields) -> db.MapRecord:
+        return self.control.CreateMap(db.CreateMapRequest(map=self.record(**fields))).map
+
+    def get(self, map_id: str) -> db.MapRecord:
+        return self.control.GetMap(db.GetMapRequest(map_id=map_id)).map
+
+    def listed(self) -> list[db.MapRecord]:
+        """ListMaps, но только карты этого теста."""
+        return [m for m in self.control.ListMaps(db.ListMapsRequest()).maps if m.map_id in self.ids]
+
+    def update(self, map_id: str, expected_version: int, new_image: str | None = None, **fields) -> db.MapRecord:
+        values = {"map_id": map_id, "name": "Test map", "body_json": json.dumps(self.BODY)}
+        values.update(fields)
+        request = db.UpdateMapRequest(map=db.MapRecord(**values), expected_version=expected_version)
+        if new_image is not None:
+            request.new_image = new_image
+        return self.control.UpdateMap(request).map
+
+    def delete(self, map_id: str) -> None:
+        self.control.DeleteMap(db.DeleteMapRequest(map_id=map_id))
+
+    def cleanup(self) -> None:
+        for map_id in self.ids:
+            try:
+                self.delete(map_id)
+            except grpc.RpcError as e:
+                if e.code() != grpc.StatusCode.NOT_FOUND:   # NOT_FOUND — не создана или тест уже удалил
+                    raise
+
+
 # ------------------------------------------------------------------ фикстуры
+
+# Клиент принимает ответы до 64 МБ (по умолчанию в gRPC — 4 МБ): так тест карты на 40 МБ
+# упирается в лимит сервера (32 МБ), а не в свой.
+MAX_MESSAGE = 64 * 1024 * 1024
+
 
 @pytest.fixture(scope="session")
 def channel():
     address = os.environ.get("DATABASE_ADDRESS", "localhost:5002")
-    channel = grpc.insecure_channel(address)
+    channel = grpc.insecure_channel(address, options=[("grpc.max_receive_message_length", MAX_MESSAGE),
+                                                      ("grpc.max_send_message_length", MAX_MESSAGE)])
     try:
         grpc.channel_ready_future(channel).result(timeout=5)
     except grpc.FutureTimeoutError:
@@ -126,3 +188,16 @@ def robots(registry):
     r = Robots(registry)
     yield r
     r.cleanup()
+
+
+@pytest.fixture(scope="session")
+def control(channel):
+    """ControlStorage — то, что пишет control (карты). Тесты здесь работают вместо него."""
+    return dbgrpc.ControlStorageStub(channel)
+
+
+@pytest.fixture
+def maps(control):
+    m = Maps(control)
+    yield m
+    m.cleanup()

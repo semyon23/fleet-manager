@@ -17,6 +17,9 @@ private:
     asio::awaitable<HttpResponse> get_robot(const HttpRequest& req, std::string robot_id);
     asio::awaitable<HttpResponse> get_factsheet(const HttpRequest& req, std::string robot_id);
 
+    asio::awaitable<HttpResponse> list_maps(const HttpRequest& req);
+    asio::awaitable<HttpResponse> get_map(const HttpRequest& req, std::string map_id);
+
     Database& database_;
 };
 
