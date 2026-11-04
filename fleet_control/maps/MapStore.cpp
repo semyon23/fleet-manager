@@ -37,10 +37,12 @@ const Graph* MapStore::find(const std::string& map_id) const {
 void MapStore::put(Graph graph) {
     std::string map_id = graph.map_id;
     graphs_.insert_or_assign(std::move(map_id), std::move(graph));
+    if (on_change) on_change();
 }
 
 void MapStore::remove(const std::string& map_id) {
     graphs_.erase(map_id);
+    if (on_change) on_change();
 }
 
 asio::awaitable<void> MapStore::load() {
@@ -55,6 +57,7 @@ asio::awaitable<void> MapStore::load() {
             }
             loaded_ = true;
             spdlog::info("[map_store] {} of {} maps loaded", graphs_.size(), response.maps_size());
+            if (on_change) on_change();
             co_return;
         }
         if (!warned) {   // база ещё не поднялась — не спамить каждые 2 с

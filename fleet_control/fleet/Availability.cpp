@@ -20,7 +20,7 @@ std::string short_name(const std::string& name, std::string_view prefix) {
 }  // namespace
 
 // Правила по порядку; первое сработавшее задаёт state (таблица — в README, раздел Availability)
-dbv1::RobotAvailability availability_of(const fms1::RobotStatus* status, double low_battery_percent) {
+dbv1::RobotAvailability availability_of(const fms::v1::RobotStatus* status, double low_battery_percent, const MapStore& maps) {
     dbv1::RobotAvailability availability;
 
     // Связь с роботом
@@ -78,9 +78,25 @@ dbv1::RobotAvailability availability_of(const fms1::RobotStatus* status, double 
     if (!status->localized()) {
         add_reason(availability, "NOT_LOCALIZED", "robot is not localized");
     }
-    if (status->last_node_id().empty()) {   // пока без карт: только «стоит на каком-то узле»
+    // M-2. На графе: карта робота (pose.mapId) есть в fms и lastNodeId — её узел.
+    // Пока карты не загружены — только «стоит на каком-то узле».
+    const std::string& last_node = status->last_node_id();
+    if (maps.loaded() && status->has_pose()) {
+        const std::string& map_id = status->pose().map_id();
+        const Graph* graph = maps.find(map_id);
+        if (!graph) {
+            add_reason(availability, "UNKNOWN_MAP",
+                       map_id.empty() ? "robot reports no mapId"
+                                      : "robot map " + map_id + " is not in fms: create the map with this id");
+        } else if (last_node.empty() || !graph->nodes.contains(last_node)) {
+            add_reason(availability, "NOT_ON_GRAPH",
+                       "robot is not on a node of map " + map_id + ", set its position first");
+        }
+    } else if (last_node.empty()) {
         add_reason(availability, "NOT_ON_GRAPH", "robot is not on a graph node, set its position first");
     }
+
+
     const auto& power = status->power();
     if (!power.charging() && power.state_of_charge() < low_battery_percent) {
         add_reason(availability, "LOW_BATTERY",

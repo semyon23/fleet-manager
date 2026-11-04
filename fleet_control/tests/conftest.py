@@ -105,6 +105,30 @@ class Robots:
         """pause / resume"""
         return http("POST", f"{CONTROL}/api/fms/robots/{robot_id}/{name}")
 
+    def position(self, robot_id: str, body):
+        """M-2: поставить робота на узел карты"""
+        return http("POST", f"{CONTROL}/api/fms/robots/{robot_id}/position", body)
+
+    def until_applied(self, robot_id: str, send, applied, what: str, timeout: float = 40) -> dict:
+        """send() и ждать статуса applied; не дождались за 3 с — send() снова. Робот симулятора, у которого
+        прошлый тест удалили с миссией, ещё до 30 с доделывает её действие (dispatch заказ на роботе
+        не отменяет) и initializePosition отклоняет."""
+        deadline = time.monotonic() + timeout
+        while True:
+            send()
+            try:
+                return self.wait_status(robot_id, applied, 3, what)
+            except TimeoutError:
+                if time.monotonic() > deadline:
+                    raise
+
+    def place(self, robot_id: str, body: dict, applied) -> dict:
+        """POST position, пока статус робота не удовлетворит applied → этот статус."""
+        def send():
+            code, response = self.position(robot_id, body)
+            assert code == 202, response
+        return self.until_applied(robot_id, send, applied, f"position {body}")
+
     def from_database(self, robot_id: str):
         """GET базы — то, что увидит UI."""
         return http("GET", f"{DATABASE_HTTP}/api/fms/robots/{robot_id}")
@@ -189,6 +213,13 @@ class Maps:
             assert code in (204, 404), f"cannot delete test map {map_id}: {code} {body}"
 
 
+def node_xy(map_doc: dict, node_id: str) -> tuple[float, float]:
+    """Координаты узла в метрах — как их считает control (maps/Graph.cpp)."""
+    node = next(n for n in map_doc["waypoints"] + map_doc.get("stations", []) if n["id"] == node_id)
+    resolution, origin = map_doc["meta"]["resolution"], map_doc["meta"]["origin"]
+    return origin[0] + node["u"] * resolution, origin[1] + (map_doc["height"] - node["v"]) * resolution
+
+
 def _channel(address: str, what: str):
     channel = grpc.insecure_channel(address)
     try:
@@ -221,17 +252,18 @@ def control_is_running():
 
 
 @pytest.fixture
-def robots(registry, dispatch):
-    r = Robots(registry, dispatch)
-    yield r
-    r.cleanup()
-
-
-@pytest.fixture
 def maps():
     m = Maps()
     yield m
     m.cleanup()
+
+
+@pytest.fixture
+def robots(registry, dispatch, maps):
+    """Зависит от maps, чтобы роботы удалялись раньше карт: карту, на которой стоит робот, не удалить (409)."""
+    r = Robots(registry, dispatch)
+    yield r
+    r.cleanup()
 
 
 @pytest.fixture
@@ -246,3 +278,16 @@ def sim_robot(robots) -> str:
     except TimeoutError:
         pytest.skip(f"robot {SIM_MANUFACTURER}/{SIM_SERIAL} is not ONLINE — is the simulator running?")
     return body["id"]
+
+
+@pytest.fixture
+def sim_map(maps) -> dict:
+    """Карта робота симулятора (SIM_MAP) в fms, полный документ. Уже есть — берётся как есть и не удаляется
+    (чужая карта), нет — создаётся из Maps.document и удаляется после теста."""
+    code, existing = maps.from_database(SIM_MAP)
+    if code == 200:
+        assert existing["waypoints"], f"map {SIM_MAP} in fms has no waypoints"
+        return existing
+    code, created = maps.create(id=SIM_MAP)
+    assert code == 201, created
+    return created

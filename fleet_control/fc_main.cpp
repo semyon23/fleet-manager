@@ -25,12 +25,13 @@ int main() {
         auto grpc_work = asio::make_work_guard(grpc_context);
 
         Services services{grpc_context, database_address, dispatch_address};
-        AvailabilityTracker availability{io_context, services, low_battery_percent};
-        FleetSync fleet_sync{io_context, services, availability};
         MapStore maps{io_context, services};
+        AvailabilityTracker availability{io_context, services, maps, low_battery_percent};
+        maps.on_change = [&] { availability.recompute_all(); };
+        FleetSync fleet_sync{io_context, services, availability};
         ApiRouter router;
         HealthApi health_api{services, router};
-        RobotApi robot_api{services, fleet_sync, availability, router};
+        RobotApi robot_api{services, fleet_sync, availability, maps, router};
         MapApi map_api{services, maps, router};
         HttpServer http_server{endpoint_from(http_address), io_context, router};
 

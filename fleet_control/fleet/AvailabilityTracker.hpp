@@ -10,15 +10,13 @@
 #include <optional>
 #include <set>
 #include <string>
-
+#include "maps/MapStore.hpp"
 #include "services/Services.hpp"
 
-// Готовность всех роботов. Пересчитывает её, когда меняется статус (стрим dispatch), lifecycle (сверка, DELETE)
-// или связь с dispatch, и пишет в базу только изменения — своей корутиной, чтобы чтение стрима не ждало базу.
-// Позже отсюда же её возьмёт распределение задач.
+
 class AvailabilityTracker {
 public:
-    AvailabilityTracker(asio::io_context& io_context, Services& services, double low_battery_percent);
+    AvailabilityTracker(asio::io_context& io_context, Services& services, const MapStore& maps, double low_battery_percent);
 
     void start();
     void stop();
@@ -27,6 +25,7 @@ public:
     void on_robot(const fms::database::v1::RobotRecord& record);     // робот из базы: регистрация, сверка
     void set_deleting(const std::string& robot_id);                  // DELETE принят
     void set_dispatch_connected(bool connected);                     // нет dispatch — все роботы OFFLINE
+    void recompute_all();
     void keep_only(const std::set<std::string>& robot_ids);          // остальных в базе уже нет
 
 private:
@@ -43,6 +42,7 @@ private:
 
     asio::io_context& io_context_;
     Services& services_;
+    const MapStore& maps_;
     double low_battery_percent_;
     bool dispatch_connected_ = false;
     std::map<std::string, Robot> robots_;

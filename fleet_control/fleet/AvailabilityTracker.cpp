@@ -23,9 +23,11 @@ std::string describe(const dbv1::RobotAvailability& availability) {
 
 }  // namespace
 
-AvailabilityTracker::AvailabilityTracker(asio::io_context& io_context, Services& services, double low_battery_percent)
+AvailabilityTracker::AvailabilityTracker(asio::io_context& io_context, Services& services, const MapStore& maps,
+                                         double low_battery_percent)
     : io_context_(io_context),
       services_(services),
+      maps_(maps),
       low_battery_percent_(low_battery_percent),
       wakeup_(io_context, 1),
       retry_timer_(io_context) {}
@@ -81,6 +83,12 @@ void AvailabilityTracker::set_dispatch_connected(bool connected) {
     }
 }
 
+void AvailabilityTracker::recompute_all() {
+    for (const auto& [robot_id, robot] : robots_) {
+        update(robot_id);   // пишет только изменившиеся
+    }
+}
+
 void AvailabilityTracker::keep_only(const std::set<std::string>& robot_ids) {
     std::erase_if(robots_, [&](const auto& item) { return !robot_ids.contains(item.first); });
     std::erase_if(current_, [&](const auto& item) { return !robot_ids.contains(item.first); });
@@ -100,7 +108,7 @@ void AvailabilityTracker::update(const std::string& robot_id) {
         reason->set_code("DISPATCH_UNAVAILABLE");
         reason->set_message("fms has no connection to fleet_dispatch");
     } else {
-        availability = availability_of(robot.status ? &*robot.status : nullptr, low_battery_percent_);
+        availability = availability_of(robot.status ? &*robot.status : nullptr, low_battery_percent_, maps_);
     }
 
     auto it = current_.find(robot_id);

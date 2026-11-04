@@ -21,7 +21,7 @@ public:
 
 
     bool loaded() const { return loaded_; }
-
+    std::function<void()> on_change;
     const Graph* find(const std::string& map_id) const;
     void put(Graph graph);
     void remove(const std::string& map_id);
@@ -36,6 +36,7 @@ private:
     bool loaded_{false};
     bool stopped_{false};
     asio::steady_timer retry_timer_;
+
 };
 
 

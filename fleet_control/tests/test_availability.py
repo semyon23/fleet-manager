@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import time
 
-import fleet_dispatch_pb2 as dpb
-import fms_types_pb2 as fms
 from conftest import SIM_MAP
 from test_robot_commands import start_mission
 
@@ -25,10 +23,11 @@ def wait_availability(robots, robot_id: str, state: str, timeout: float = 5) -> 
     raise TimeoutError(f"timeout {timeout:.0f}s waiting for availability {state}\nlast: {availability}")
 
 
-def put_on_graph(robots, dispatch, robot_id: str) -> None:
-    dispatch.InitializePosition(dpb.InitializePositionRequest(
-        robot_id=robot_id, pose=fms.Pose(x=0, y=0, theta=0, map_id=SIM_MAP), last_node_id="origin"))
-    robots.wait_status(robot_id, lambda s: s["lastNodeId"] == "origin", 5, "robot on node origin")
+def put_on_graph(robots, robot_id: str, sim_map: dict) -> str:
+    """M-2: на графе — на узле карты робота, которая есть в fms. Ставим через control, как оператор в UI."""
+    node_id = sim_map["waypoints"][0]["id"]
+    robots.place(robot_id, {"mapId": SIM_MAP, "nodeId": node_id}, lambda s: s["lastNodeId"] == node_id)
+    return node_id
 
 
 # ------------------------------------------------------------------ без симулятора
@@ -49,14 +48,14 @@ def test_availability_is_written_right_after_registration(robots):
 
 # ------------------------------------------------------------------ с роботом симулятора
 
-def test_robot_on_graph_is_idle(robots, sim_robot, dispatch):
-    put_on_graph(robots, dispatch, sim_robot)
+def test_robot_on_graph_is_idle(sim_map, robots, sim_robot):
+    put_on_graph(robots, sim_robot, sim_map)
     availability = wait_availability(robots, sim_robot, "IDLE")
     assert availability["reasons"] == []
 
 
-def test_paused_robot(robots, sim_robot, dispatch):
-    put_on_graph(robots, dispatch, sim_robot)
+def test_paused_robot(sim_map, robots, sim_robot):
+    put_on_graph(robots, sim_robot, sim_map)
     wait_availability(robots, sim_robot, "IDLE")
 
     robots.command(sim_robot, "pause")
