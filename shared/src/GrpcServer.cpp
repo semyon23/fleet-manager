@@ -10,6 +10,8 @@ GrpcServer::GrpcServer(std::string address) : address_(std::move(address)) {
     grpc::reflection::InitProtoReflectionServerBuilderPlugin();
     builder_.emplace();
     builder_->AddListeningPort(address_, grpc::InsecureServerCredentials());
+
+    builder_->SetMaxReceiveMessageSize(32 * 1024 * 1024);
 }
 
 std::unique_ptr<grpc::ServerCompletionQueue> GrpcServer::add_completion_queue() {

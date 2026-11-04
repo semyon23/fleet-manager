@@ -29,6 +29,8 @@ int main() {
         DatabaseService database_service{grpc_context, database};
         grpc_server.add_service(database_service.registry_service());
         grpc_server.add_service(database_service.storage_service());
+        grpc_server.add_service(database_service.control_service());
+
 
         ApiRouter router;
         RestApi rest_api{database, router};

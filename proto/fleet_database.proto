@@ -2,8 +2,8 @@
 // напрямую, а сюда — то, что нужно сохранить и прочитать после перезапуска.
 //
 // Один писатель на каждое поле, поэтому сервисы разделены по владельцу:
-//   RobotRegistry   — пишет fleet_control: робот как сущность (spec), его жизненный цикл;
 //   DispatchStorage — пишет fleet_dispatch: статус робота, factsheet, выполнение миссий, headerId.
+//   ControlStorage  — пишет fleet_control: карты; позже миссии control, резервации, тревоги.
 // Читать может любой сервис. Позже: ControlStorage (миссии control, карты, граф, зоны, резервации,
 // аварии) — отдельным сервисом, когда дойдём до control.
 //
@@ -16,6 +16,8 @@
 // Версия v1 — зафиксирована 2026-10-17 для начала реализации. Дальше только совместимые изменения:
 // новые поля — с новыми номерами; номера не переиспользуются; удалённое поле — в `reserved`;
 // смысл существующих полей не меняется. Несовместимое — только в новом пакете (…v2).
+
+
 
 syntax = "proto3";
 
@@ -210,3 +212,50 @@ message ReserveHeaderIdsRequest {
 message ReserveHeaderIdsResponse {
   uint64 first = 1;
 }
+
+// =================================================================== карты (пишет control)
+
+// Карта. map_id — это VDA mapId: под ним карту знают роботы (state.maps, nodePosition.mapId).
+// Карт может быть сколько угодно, все действуют одновременно: на какой карте робот — по его pose.map_id.
+//
+// Документ редактора UI хранится как есть — исключение из правила «без JSON в proto», как factsheet:
+// control берёт из него только граф (узлы, рёбра), остальное (зоны, атрибуты VDA, вид) нужно UI.
+message MapRecord {
+  string map_id = 1;
+  string name = 2;
+  uint32 version = 3;          // ставит база: 1 при создании, +1 при каждом сохранении
+  // width, height, meta {resolution, origin, ...}, waypoints, edges, stations, zones, assignedRobots —
+  // всё, кроме полей записи (id, name, version, pgmDataUrl, createdAt, updatedAt).
+  string body_json = 4;
+  string image = 5;            // pgmDataUrl (data:image/png;base64,...); ListMaps его не отдаёт
+  google.protobuf.Timestamp created_at = 6;   // ставит база
+  google.protobuf.Timestamp updated_at = 7;   // ставит база
+}
+
+service ControlStorage {
+  rpc CreateMap(CreateMapRequest) returns (CreateMapResponse);   // ALREADY_EXISTS — map_id занят
+  // Сохранить, только если в базе всё ещё expected_version; иначе ABORTED — карту сохранили раньше.
+  rpc UpdateMap(UpdateMapRequest) returns (UpdateMapResponse);
+  rpc DeleteMap(DeleteMapRequest) returns (DeleteMapResponse);   // NOT_FOUND — нет такой карты
+  rpc GetMap(GetMapRequest) returns (GetMapResponse);
+  rpc ListMaps(ListMapsRequest) returns (ListMapsResponse);      // все карты, с body_json, без image
+}
+
+message CreateMapRequest { MapRecord map = 1; }   // version, created_at, updated_at игнорируются
+message CreateMapResponse { MapRecord map = 1; }
+
+message UpdateMapRequest {
+  MapRecord map = 1;                // map_id, name, body_json; map.image игнорируется
+  uint32 expected_version = 2;      // версия, которую видел тот, кто правил
+  optional string new_image = 3;    // нет — картинка прежняя: её не гоняем при каждой правке графа
+}
+message UpdateMapResponse { MapRecord map = 1; }
+
+message DeleteMapRequest { string map_id = 1; }
+message DeleteMapResponse {}
+
+message GetMapRequest { string map_id = 1; }
+message GetMapResponse { MapRecord map = 1; }
+
+message ListMapsRequest {}
+message ListMapsResponse { repeated MapRecord maps = 1; }   // по map_id

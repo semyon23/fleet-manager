@@ -17,6 +17,7 @@ public:
 
     grpc::Service& registry_service() { return registry_; }
     grpc::Service& storage_service() { return storage_; }
+    grpc::Service& control_service() { return control_; }
     void start();
 
 private:
@@ -38,9 +39,17 @@ private:
 
     asio::awaitable<grpc::Status> save_robot_availability(const dbv1::SaveRobotAvailabilityRequest& request,dbv1::SaveRobotAvailabilityResponse& response);
 
+    // ControlStorage (M-1)
+    asio::awaitable<grpc::Status> create_map(const dbv1::CreateMapRequest& request, dbv1::CreateMapResponse& response);
+    asio::awaitable<grpc::Status> update_map(const dbv1::UpdateMapRequest& request, dbv1::UpdateMapResponse& response);
+    asio::awaitable<grpc::Status> delete_map(const dbv1::DeleteMapRequest& request, dbv1::DeleteMapResponse& response);
+    asio::awaitable<grpc::Status> get_map(const dbv1::GetMapRequest& request, dbv1::GetMapResponse& response);
+    asio::awaitable<grpc::Status> list_maps(const dbv1::ListMapsRequest& request, dbv1::ListMapsResponse& response);
+
     agrpc::GrpcContext& grpc_context_;
     Database& database_;
     dbv1::RobotRegistry::AsyncService registry_;
     dbv1::DispatchStorage::AsyncService storage_;
+    dbv1::ControlStorage::AsyncService control_;
 };
 #endif //FLEETMANAGERSYSTEM_DATABASESERVICE_HPP

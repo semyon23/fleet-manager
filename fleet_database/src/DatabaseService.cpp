@@ -1,5 +1,6 @@
 #include "../include/DatabaseService.hpp"
 #include "../include/RobotTable.hpp"
+#include "../include/MapTable.hpp"
 #include "spdlog/spdlog.h"
 #include <google/protobuf/util/time_util.h>
 using Registry = dbv1::RobotRegistry::AsyncService;
@@ -18,6 +19,15 @@ using SaveFactsheetRPC        = agrpc::ServerRPC<&Storage::RequestSaveFactsheet>
 using SaveMissionExecutionRPC = agrpc::ServerRPC<&Storage::RequestSaveMissionExecution>;
 using ReserveHeaderIdsRPC     = agrpc::ServerRPC<&Storage::RequestReserveHeaderIds>;
 using SaveRobotAvailabilityRPC = agrpc::ServerRPC<&Registry::RequestSaveRobotAvailability>;
+
+using Control = dbv1::ControlStorage::AsyncService;
+
+using CreateMapRPC = agrpc::ServerRPC<&Control::RequestCreateMap>;
+using UpdateMapRPC = agrpc::ServerRPC<&Control::RequestUpdateMap>;
+using DeleteMapRPC = agrpc::ServerRPC<&Control::RequestDeleteMap>;
+using GetMapRPC    = agrpc::ServerRPC<&Control::RequestGetMap>;
+using ListMapsRPC  = agrpc::ServerRPC<&Control::RequestListMaps>;
+
 const auto on_handler_done = [](std::exception_ptr error) {
     if (!error) return;
     try {
@@ -172,6 +182,53 @@ void DatabaseService::start() {
         [this](SaveRobotAvailabilityRPC& rpc, SaveRobotAvailabilityRPC::Request& request) -> asio::awaitable<void> {
             SaveRobotAvailabilityRPC::Response response;
             grpc::Status status = co_await save_robot_availability(request, response);
+            co_await rpc.finish(response, status);
+        },
+        on_handler_done);
+
+    // ---------------------------------------------------------------- ControlStorage (M-1)
+
+    agrpc::register_awaitable_rpc_handler<CreateMapRPC>(
+        grpc_context_, control_,
+        [this](CreateMapRPC& rpc, CreateMapRPC::Request& request) -> asio::awaitable<void> {
+            CreateMapRPC::Response response;
+            grpc::Status status = co_await create_map(request, response);
+            co_await rpc.finish(response, status);
+        },
+        on_handler_done);
+
+    agrpc::register_awaitable_rpc_handler<UpdateMapRPC>(
+        grpc_context_, control_,
+        [this](UpdateMapRPC& rpc, UpdateMapRPC::Request& request) -> asio::awaitable<void> {
+            UpdateMapRPC::Response response;
+            grpc::Status status = co_await update_map(request, response);
+            co_await rpc.finish(response, status);
+        },
+        on_handler_done);
+
+    agrpc::register_awaitable_rpc_handler<DeleteMapRPC>(
+        grpc_context_, control_,
+        [this](DeleteMapRPC& rpc, DeleteMapRPC::Request& request) -> asio::awaitable<void> {
+            DeleteMapRPC::Response response;
+            grpc::Status status = co_await delete_map(request, response);
+            co_await rpc.finish(response, status);
+        },
+        on_handler_done);
+
+    agrpc::register_awaitable_rpc_handler<GetMapRPC>(
+        grpc_context_, control_,
+        [this](GetMapRPC& rpc, GetMapRPC::Request& request) -> asio::awaitable<void> {
+            GetMapRPC::Response response;
+            grpc::Status status = co_await get_map(request, response);
+            co_await rpc.finish(response, status);
+        },
+        on_handler_done);
+
+    agrpc::register_awaitable_rpc_handler<ListMapsRPC>(
+        grpc_context_, control_,
+        [this](ListMapsRPC& rpc, ListMapsRPC::Request& request) -> asio::awaitable<void> {
+            ListMapsRPC::Response response;
+            grpc::Status status = co_await list_maps(request, response);
             co_await rpc.finish(response, status);
         },
         on_handler_done);
@@ -357,4 +414,103 @@ asio::awaitable<grpc::Status> DatabaseService::save_robot_availability(const dbv
         co_return database_error(e);   // нет робота — foreign_key_violation → NOT_FOUND
     }
     co_return grpc::Status::OK;        // без лога: control пишет при каждом изменении
+}
+
+// ==================================================================== ControlStorage (M-1)
+
+asio::awaitable<grpc::Status> DatabaseService::create_map(const dbv1::CreateMapRequest& request,
+                                                          dbv1::CreateMapResponse& response) {
+    const auto& map = request.map();
+    if (map.map_id().empty() || map.body_json().empty()) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "map_id and body_json are required"};
+    }
+    try {
+        dbv1::MapRecord created;
+        co_await database_.run([&](pqxx::work& tx) { created = insert_map(tx, map); });
+        *response.mutable_map() = std::move(created);
+    } catch (const pqxx::unique_violation&) {
+        // database_error говорит про робота — у карты свой текст
+        co_return grpc::Status{grpc::StatusCode::ALREADY_EXISTS, "map " + map.map_id() + " already exists"};
+    } catch (const std::exception& e) {
+        co_return database_error(e);   // body_json не JSON — data_exception → INVALID_ARGUMENT
+    }
+    spdlog::info("[database_service] map {} created", map.map_id());
+    co_return grpc::Status::OK;
+}
+
+asio::awaitable<grpc::Status> DatabaseService::update_map(const dbv1::UpdateMapRequest& request,
+                                                          dbv1::UpdateMapResponse& response) {
+    const auto& map = request.map();
+    if (map.map_id().empty() || map.body_json().empty()) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "map_id and body_json are required"};
+    }
+    std::optional<std::string> new_image;
+    if (request.has_new_image()) {
+        new_image = request.new_image();
+    }
+    MapUpdateResult result{};
+    try {
+        co_await database_.run([&](pqxx::work& tx) {
+            result = ::update_map(tx, map, request.expected_version(), new_image);
+        });
+    } catch (const std::exception& e) {
+        co_return database_error(e);
+    }
+    switch (result.result) {
+    case MapUpdateResult::NotFound:
+        co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "map " + map.map_id() + " not found"};
+    case MapUpdateResult::VersionConflict:
+        co_return grpc::Status{grpc::StatusCode::ABORTED,
+                               "map " + map.map_id() + " was saved by someone else, expected version " +
+                               std::to_string(request.expected_version())};
+    case MapUpdateResult::Updated:
+        break;
+    }
+    *response.mutable_map() = std::move(result.map);
+    spdlog::info("[database_service] map {} saved, version {}", map.map_id(), response.map().version());
+    co_return grpc::Status::OK;
+}
+
+asio::awaitable<grpc::Status> DatabaseService::delete_map(const dbv1::DeleteMapRequest& request,
+                                                          dbv1::DeleteMapResponse&) {
+    bool found = false;
+    try {
+        co_await database_.run([&](pqxx::work& tx) { found = ::delete_map(tx, request.map_id()); });
+    } catch (const std::exception& e) {
+        co_return database_error(e);
+    }
+    if (!found) {
+        co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "map " + request.map_id() + " not found"};
+    }
+    spdlog::info("[database_service] map {} deleted", request.map_id());
+    co_return grpc::Status::OK;
+}
+
+asio::awaitable<grpc::Status> DatabaseService::get_map(const dbv1::GetMapRequest& request,
+                                                       dbv1::GetMapResponse& response) {
+    std::optional<dbv1::MapRecord> map;
+    try {
+        co_await database_.run([&](pqxx::work& tx) { map = select_map(tx, request.map_id()); });
+    } catch (const std::exception& e) {
+        co_return database_error(e);
+    }
+    if (!map) {
+        co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "map " + request.map_id() + " not found"};
+    }
+    *response.mutable_map() = std::move(*map);
+    co_return grpc::Status::OK;
+}
+
+asio::awaitable<grpc::Status> DatabaseService::list_maps(const dbv1::ListMapsRequest&,
+                                                         dbv1::ListMapsResponse& response) {
+    std::vector<dbv1::MapRecord> maps;
+    try {
+        co_await database_.run([&](pqxx::work& tx) { maps = select_maps(tx); });
+    } catch (const std::exception& e) {
+        co_return database_error(e);
+    }
+    for (auto& map : maps) {
+        *response.add_maps() = std::move(map);
+    }
+    co_return grpc::Status::OK;
 }
