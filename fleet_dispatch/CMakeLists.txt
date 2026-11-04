@@ -7,7 +7,6 @@ find_package(nlohmann_json CONFIG REQUIRED)
 find_package(behaviortree_cpp REQUIRED)
 
 add_executable(fleet_dispatch fd_main.cpp
-#        ../shared/src/GrpcServer.cpp
         src/DispatchService.cpp
         src/RobotSession.cpp
         src/FleetRegistry.cpp
@@ -19,7 +18,6 @@ add_executable(fleet_dispatch fd_main.cpp
         src/ActiveMission.cpp
         src/MissionStatusHub.cpp
         src/DatabaseWriter.cpp
-        include/DatabaseWriter.hpp
 )
 
 target_link_libraries(fleet_dispatch
@@ -28,6 +26,7 @@ target_link_libraries(fleet_dispatch
         spdlog::spdlog
         grpc_server
         mqtt_client
+        env_config
         BT::behaviortree_cpp
         asio-grpc::asio-grpc
         nlohmann_json::nlohmann_json

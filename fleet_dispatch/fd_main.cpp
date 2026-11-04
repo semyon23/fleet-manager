@@ -5,6 +5,7 @@
 #include "include/DispatchService.hpp"
 #include "GrpcServer.hpp"
 #include "include/RobotMessageRouter.hpp"
+#include "env_config.hpp"
 #include "spdlog/spdlog.h"
 
 int main(){
@@ -12,9 +13,12 @@ int main(){
         asio::io_context io_context{1};
 
         MqttClientConfig mqtt_config;
-        mqtt_config.host = "127.0.0.1";
-        mqtt_config.port = 1884;
+        mqtt_config.host = env_or("MQTT_HOST", "127.0.0.1");
+        mqtt_config.port = static_cast<uint>(std::stoi(env_or("MQTT_PORT", "1883")));
         mqtt_config.client_id = "fleet_dispatch";
+        mqtt_config.username = env_or("MQTT_USER", "");
+        mqtt_config.password = env_or("MQTT_PASSWORD", "");
+
         MqttClientHandler mqtt{io_context, mqtt_config};
         Outbox outbox{io_context, 1000};
 
