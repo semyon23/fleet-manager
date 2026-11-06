@@ -88,7 +88,7 @@ dbv1::RobotAvailability availability_of(const fms::v1::RobotStatus* status, doub
             add_reason(availability, "UNKNOWN_MAP",
                        map_id.empty() ? "robot reports no mapId"
                                       : "robot map " + map_id + " is not in fms: create the map with this id");
-        } else if (last_node.empty() || !graph->nodes.contains(last_node)) {
+        } else if (last_node.empty() || !graph->find_node(last_node)) {
             add_reason(availability, "NOT_ON_GRAPH",
                        "robot is not on a node of map " + map_id + ", set its position first");
         }

@@ -241,11 +241,11 @@ asio::awaitable<HttpResponse> RobotApi::set_position(const HttpRequest& req, std
     if (!graph) {
         co_return error_response(req, http::status::not_found, "NOT_FOUND", "map " + map_id + " not found");
     }
-    auto found = graph->nodes.find(node_id);
-    if (found == graph->nodes.end()) {
+    auto index = graph->find_node(node_id);
+    if (!index) {
         co_return invalid_input(req, {{"nodeId", "no node " + node_id + " on map " + map_id}});
     }
-    const GraphNode node = found->second;   // копия: пока ждём gRPC, карту могут сохранить и граф заменится
+    const GraphNode node = graph->nodes[*index];   // копия: пока ждём gRPC, карту могут сохранить и граф заменится
 
     dbv1::GetRobotRequest get;
     get.set_robot_id(robot_id);

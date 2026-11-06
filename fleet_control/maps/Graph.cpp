@@ -147,8 +147,25 @@ MapCheck validate_map(const json& body) {
     return check;
 }
 
+
+std::optional<uint32_t> Graph::find_node(const std::string& id) const {
+    auto it = node_index.find(id);
+    if (it == node_index.end()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+std::vector<uint32_t> Graph::arrival_nodes(uint32_t node) const {
+    const GraphNode& n = nodes[node];
+    if (n.station && !n.has_edges) {
+        return n.interaction_nodes;
+    }
+    return {node};
+}
+
 Graph build_graph(const std::string& map_id, uint32_t version, const json& body) {
-    Graph graph{map_id, version, {}, {}};
+    Graph graph{map_id, version, {}, {}, {}};
     const json& meta = body.at("meta");
     const double resolution = meta.at("resolution").get<double>();
     const double origin_x = meta.at("origin").at(0).get<double>();
@@ -164,10 +181,8 @@ Graph build_graph(const std::string& map_id, uint32_t version, const json& body)
             node.theta = theta->get<double>();
         }
         node.station = station;
-        for (const auto& id : list(item, "interactionNodeIds")) {
-            node.interaction_nodes.push_back(id.get<std::string>());
-        }
-        graph.nodes.emplace(node.id, std::move(node));
+        graph.node_index.emplace(node.id, static_cast<uint32_t>(graph.nodes.size()));
+        graph.nodes.push_back(std::move(node));
     };
     for (const auto& waypoint : list(body, "waypoints")) {
         add_node(waypoint, false);
@@ -176,16 +191,24 @@ Graph build_graph(const std::string& map_id, uint32_t version, const json& body)
         add_node(station, true);
     }
 
+    // Узлы взаимодействия — вторым проходом: станция может ссылаться на узел, описанный позже
+    for (const auto& station : list(body, "stations")) {
+        GraphNode& node = graph.nodes[graph.node_index.at(station.at("id").get<std::string>())];
+        for (const auto& id : list(station, "interactionNodeIds")) {
+            node.interaction_nodes.push_back(graph.node_index.at(id.get<std::string>()));
+        }
+    }
+
     for (const auto& item : list(body, "edges")) {
         GraphEdge edge;
         edge.id = item.at("id").get<std::string>();
-        edge.from = item.at("from").get<std::string>();
-        edge.to = item.at("to").get<std::string>();
+        edge.from = graph.node_index.at(item.at("from").get<std::string>());
+        edge.to = graph.node_index.at(item.at("to").get<std::string>());
         if (edge.from == edge.to) {
             continue;   // петля: по ней никуда не уехать
         }
-        const GraphNode& a = graph.nodes.at(edge.from);
-        const GraphNode& b = graph.nodes.at(edge.to);
+        GraphNode& a = graph.nodes[edge.from];
+        GraphNode& b = graph.nodes[edge.to];
         edge.length = std::hypot(b.x - a.x, b.y - a.y);
         if (const json* speed = field(item, "maxSpeed")) {
             edge.max_speed = speed->get<double>();
@@ -193,7 +216,8 @@ Graph build_graph(const std::string& map_id, uint32_t version, const json& body)
         if (const json* cost = field(item, "cost")) {
             edge.cost = std::max(0.0, cost->get<double>());
         }
-        graph.nodes.at(edge.from).out.push_back(graph.edges.size());
+        a.has_edges = true;
+        b.has_edges = true;
         graph.edges.push_back(std::move(edge));
     }
     return graph;
