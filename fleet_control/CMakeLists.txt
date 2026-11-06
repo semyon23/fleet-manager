@@ -33,3 +33,22 @@ target_link_libraries(fleet_control PRIVATE
         spdlog::spdlog
 )
 
+# Тесты на C++ (Catch2): отдельная программа, в сервис не попадают.
+# Собираются, только если FMS_BUILD_TESTS=ON (корневой CMakeLists.txt)
+if(FMS_BUILD_TESTS)
+    find_package(Catch2 3 CONFIG REQUIRED)
+    include(Catch)
+
+    add_executable(fleet_control_unit
+            unit_tests/test_router.cpp
+            routing/Router.cpp
+            maps/Graph.cpp
+    )
+    target_include_directories(fleet_control_unit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(fleet_control_unit PRIVATE
+            Catch2::Catch2WithMain
+            Boost::headers
+            nlohmann_json::nlohmann_json
+    )
+    catch_discover_tests(fleet_control_unit)
+endif()

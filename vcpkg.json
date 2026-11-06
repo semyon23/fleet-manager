@@ -24,8 +24,13 @@
         "codegen"
       ]
     }
-  ]
+  ],
+  "features": {
+    "tests": {
+      "description": "C++ unit tests (Catch2)",
+      "dependencies": [
+        "catch2"
+      ]
+    }
+  }
 }
-
-
-

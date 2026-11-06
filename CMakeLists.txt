@@ -1,4 +1,12 @@
 cmake_minimum_required(VERSION 3.15)
+
+# Тесты на C++ (Catch2). Выключить для сборки на стенд: -DFMS_BUILD_TESTS=OFF.
+# Должно стоять до project(): vcpkg читает список features в момент project()
+option(FMS_BUILD_TESTS "Build C++ unit tests (Catch2)" ON)
+if(FMS_BUILD_TESTS)
+    list(APPEND VCPKG_MANIFEST_FEATURES "tests")
+endif()
+
 project(FleetManagerSystem CXX)
 #-DCMAKE_TOOLCHAIN_FILE=/home/ubuntu/.vcpkg-clion/vcpkg/scripts/buildsystems/vcpkg.cmake  // home
 #-DCMAKE_TOOLCHAIN_FILE=/home/ubuntu/vcpkg/scripts/buildsystems/vcpkg.cmake               // work
@@ -12,6 +20,11 @@ find_package(Boost REQUIRED COMPONENTS headers)
 find_package(gRPC CONFIG REQUIRED)
 find_package(protobuf CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
+
+# ctest: должно стоять до add_subdirectory, иначе тесты из подпапок не зарегистрируются
+if(FMS_BUILD_TESTS)
+    enable_testing()
+endif()
 
 #add_subdirectory(shared/mqtt_client)
 add_subdirectory(vda5050)
