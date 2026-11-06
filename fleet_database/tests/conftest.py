@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
+import time
 import uuid
+import warnings
 from pathlib import Path
 
 import grpc
@@ -152,6 +155,43 @@ class Maps:
                     raise
 
 
+class Missions:
+    """Миссии одного теста (ControlStorage — то, что пишет control). Удалить миссию через API нельзя:
+    история не удаляется. Поэтому id тестовых миссий — test-mission-<случайное>, а удаляет их
+    фикстура missions_cleanup в конце прогона."""
+
+    def __init__(self, control: dbgrpc.ControlStorageStub):
+        self.control = control
+        self.ids: list[str] = []
+
+    def record(self, created_ms: int | None = None, **fields) -> db.MissionRecord:
+        """MissionRecord с уникальным mission_id; created_at = updated_at = created_ms (по умолчанию — сейчас).
+        body_json — маленький объект Mission контракта; fields заменяют любые поля."""
+        mission_id = fields.pop("mission_id", unique("test-mission"))
+        values = {"mission_id": mission_id, "map_id": "test-map-missions", "state": "QUEUED", "priority": 1,
+                  "body_json": json.dumps({"id": mission_id, "name": "Test mission", "steps": [{"nodeId": "n1"}]})}
+        values.update(fields)
+        record = db.MissionRecord(**values)
+        ms = int(time.time() * 1000) if created_ms is None else created_ms
+        record.created_at.FromMilliseconds(ms)
+        record.updated_at.FromMilliseconds(ms)
+        self.ids.append(mission_id)
+        return record
+
+    def save(self, created_ms: int | None = None, **fields) -> db.MissionRecord:
+        record = self.record(created_ms, **fields)
+        self.control.SaveMission(db.SaveMissionRequest(mission=record))
+        return record
+
+    def get(self, mission_id: str) -> db.MissionRecord:
+        return self.control.GetMission(db.GetMissionRequest(mission_id=mission_id)).mission
+
+    def active(self) -> list[db.MissionRecord]:
+        """ListActiveMissions, но только миссии этого теста — в порядке ответа."""
+        response = self.control.ListActiveMissions(db.ListActiveMissionsRequest())
+        return [m for m in response.missions if m.mission_id in self.ids]
+
+
 # ------------------------------------------------------------------ фикстуры
 
 # Клиент принимает ответы до 64 МБ (по умолчанию в gRPC — 4 МБ): так тест карты на 40 МБ
@@ -201,3 +241,26 @@ def maps(control):
     m = Maps(control)
     yield m
     m.cleanup()
+
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://fms:fms@127.0.0.1:5432/fms")
+
+
+@pytest.fixture(scope="session")
+def missions_cleanup():
+    """В конце прогона — удалить тестовые миссии через psql. Иначе control при старте загрузит
+    незавершённые тестовые миссии как настоящие (ListActiveMissions)."""
+    yield
+    sql = "DELETE FROM missions WHERE mission_id LIKE 'test-mission-%'"
+    try:
+        result = subprocess.run(["psql", DATABASE_URL, "-c", sql], capture_output=True, text=True, timeout=10)
+        failed = result.returncode != 0 and result.stderr
+    except (OSError, subprocess.TimeoutExpired) as e:
+        failed = str(e)
+    if failed:
+        warnings.warn(f"test missions are left in the database ({failed.strip()}), delete them: psql -c \"{sql}\"")
+
+
+@pytest.fixture
+def missions(control, missions_cleanup):
+    return Missions(control)

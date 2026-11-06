@@ -35,6 +35,24 @@ namespace
     bool is_param(const std::string& segment){
         return segment.size() > 2 && segment.front() == '{' && segment.back() == '}';
     }
+
+    std::string url_decode(std::string_view text){
+        std::string result;
+        result.reserve(text.size());
+        for (size_t i = 0; i < text.size(); ++i){
+            unsigned char byte = 0;
+            if (text[i] == '%' && i + 2 < text.size() &&
+                std::from_chars(text.data() + i + 1, text.data() + i + 3, byte, 16).ptr == text.data() + i + 3){
+                result += static_cast<char>(byte);
+                i += 2;
+                } else {
+                    result += text[i] == '+' ? ' ' : text[i];
+                }
+        }
+        return result;
+    }
+
+
 } // namespace
 
 
@@ -61,7 +79,7 @@ std::optional<std::string> query_param(const HttpRequest& req, std::string_view 
         std::string_view pair(part.begin(), part.end());
         auto equals = pair.find('=');
         if (pair.substr(0, equals) == name){
-            return equals == std::string_view::npos ? std::string{} : std::string(pair.substr(equals + 1));
+            return equals == std::string_view::npos ? std::string{} : url_decode(pair.substr(equals + 1));
         }
     }
     return std::nullopt;

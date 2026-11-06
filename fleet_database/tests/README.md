@@ -15,6 +15,11 @@ Python-классы gRPC генерируются из `proto/*.proto` при к
 
 Карты — так же: `test-map-<случайное>`, из `ListMaps` тест смотрит только на свои, в конце удаляет их `DeleteMap`.
 
+Миссии удалить через API нельзя — история не удаляется. Их id — `test-mission-<случайное>`, и в конце прогона
+conftest удаляет их через `psql` (адрес базы — `DATABASE_URL`, по умолчанию `postgresql://fms:fms@127.0.0.1:5432/fms`).
+Это важно: иначе control при старте загрузит незавершённые тестовые миссии как настоящие. Если `psql` не нашёлся
+или не смог подключиться, pytest напишет предупреждение — удалите их сами (команда ниже).
+
 Если тест упал на середине, его роботы всё равно удаляются. Если оборвать сам прогон (Ctrl+C),
 могут остаться записи с производителем `test`:
 
@@ -24,6 +29,10 @@ psql postgresql://fms:fms@127.0.0.1:5432/fms -c "DELETE FROM robots WHERE manufa
 
 ```bash
 psql postgresql://fms:fms@127.0.0.1:5432/fms -c "DELETE FROM maps WHERE map_id LIKE 'test-map-%'"
+```
+
+```bash
+psql postgresql://fms:fms@127.0.0.1:5432/fms -c "DELETE FROM missions WHERE mission_id LIKE 'test-mission-%'"
 ```
 
 ## Установка
@@ -51,6 +60,7 @@ python3 -m venv .venv
 | `test_dispatch_storage.py` | `SaveRobotStatus`: статус целиком возвращается в `GetRobot` и `ListRobots`, новый заменяет старый полностью, запись для `PENDING_DELETE`, неизвестный робот → `NOT_FOUND`; `SaveFactsheet` / `GetFactsheet`: сохранить и прочитать, замена, время по умолчанию, не JSON → `INVALID_ARGUMENT`, нет factsheet → `NOT_FOUND`; статус и factsheet удаляются вместе с роботом |
 | `test_robot_availability.py` | `SaveRobotAvailability` (пишет control): сохранить и прочитать через `GetRobot` и `ListRobots`, новая заменяет старую, spec не трогает, `DELETING` для робота на удалении, неизвестный робот → `NOT_FOUND`, без id или состояния → `INVALID_ARGUMENT`, удаляется вместе с роботом; в REST — `{state, reasons}` по контракту, без записи — `null` |
 | `test_maps.py` | `ControlStorage` (пишет control): `CreateMap` — версия 1, документ сохраняется как есть, занятый id, обязательные поля, не JSON; `GetMap` с картинкой, `ListMaps` с графом, но без картинки, по `map_id`; `UpdateMap` — версия + 1, картинка прежняя без `new_image`, замена и очистка картинки, устаревшая версия → `ABORTED` без изменений, 10 одновременных сохранений — применяется одно; `DeleteMap`; карта на 5 МБ проходит, на 40 МБ — `RESOURCE_EXHAUSTED` (лимит сервера 32 МБ); REST: список без графа и картинки, карта целиком, `pgmDataUrl: null` без картинки, новая версия, 404 |
+| `test_missions.py` | `ControlStorage` (пишет control): `SaveMission` — сохранить и прочитать как есть (времена от control, пустой робот ↔ NULL), замена записи целиком, снятие назначения, неверные `state` / `priority` и не JSON → `INVALID_ARGUMENT` без записи, обязательные поля; `GetMission` → `NOT_FOUND`; `ListActiveMissions` — только незавершённые, по `created_at`, завершённая уходит из списка; REST: миссия — документ control как есть, 404, список новыми сверху, фильтры `state` (и через `%2C`), `robotId`, `mapId` и их сочетание, страницы по курсору без пропусков и повторов (и при одинаковом `created_at`), последняя полная страница без курсора, `limit` по умолчанию 50 и до 200, ошибки параметров 400 с `details` |
 | `test_rest.py` | REST для UI: робот в формате контракта (поля, `name` по умолчанию = id, `PENDING_DELETE` в списке), статус (enum без префиксов, `null` вместо пустых значений, время с миллисекундами), factsheet, 404 в формате `{code, message, details}`, CORS preflight, методов записи нет |
 
 Что пока не автоматизировано: данные переживают перезапуск сервиса и `UNAVAILABLE` при остановленном

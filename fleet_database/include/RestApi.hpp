@@ -20,6 +20,9 @@ private:
     asio::awaitable<HttpResponse> list_maps(const HttpRequest& req);
     asio::awaitable<HttpResponse> get_map(const HttpRequest& req, std::string map_id);
 
+    asio::awaitable<HttpResponse> list_missions(const HttpRequest& req);
+    asio::awaitable<HttpResponse> get_mission(const HttpRequest& req, std::string mission_id);
+
     Database& database_;
 };
 

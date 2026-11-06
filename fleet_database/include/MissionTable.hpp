@@ -12,18 +12,22 @@
 
 namespace dbv1 = fms::database::v1;
 
-// M-3. Миссии пишет control (ControlStorage). body_json — объект Mission контракта UI,
-// остальные поля — его копии для фильтров. Времена ставит control, база хранит как есть.
+struct MissionFilter {
+    std::string states;
+    std::string robot_id;
+    std::string map_id;
+    std::optional<long long> before_created_ms;
+    std::string before_mission_id;
+    int limit = 50;
+};
 
-// Создать или заменить целиком (по mission_id).
-// pqxx::data_exception — body_json не JSON; pqxx::check_violation — неверный state или priority
+
 void save_mission(pqxx::work& tx, const dbv1::MissionRecord& mission);
 
 std::optional<dbv1::MissionRecord> select_mission(pqxx::work& tx, const std::string& mission_id);
 
-// QUEUED, ASSIGNED, RUNNING, PAUSED, CANCELING — по created_at
 std::vector<dbv1::MissionRecord> select_active_missions(pqxx::work& tx);
 
-
+std::vector<dbv1::MissionRecord> select_missions(pqxx::work& tx, const MissionFilter& filter);
 
 #endif //FLEETMANAGERSYSTEM_MISSIONTABLE_HPP

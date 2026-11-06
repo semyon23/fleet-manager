@@ -1,4 +1,4 @@
-#include "MissionTable.hpp"
+#include "../include/MissionTable.hpp"
 #include <google/protobuf/util/time_util.h>
 
 using google::protobuf::util::TimeUtil;
@@ -74,5 +74,23 @@ std::vector<dbv1::MissionRecord> select_active_missions(pqxx::work& tx) {
                                    "ORDER BY created_at")) {
         missions.push_back(row_to_mission(row));
     }
+    return missions;
+}
+
+std::vector<dbv1::MissionRecord> select_missions(pqxx::work& tx, const MissionFilter& filter) {
+    // Один запрос на все сочетания фильтров: пустой фильтр отключает своё условие.
+    // Курсор — сравнение пары, как в индексе missions_by_created (created_at DESC, mission_id DESC)
+    std::vector<dbv1::MissionRecord> missions;
+    for (const auto& row : tx.exec(
+             std::string("SELECT ") + kColumns + " FROM missions "
+             "WHERE ($1 = '' OR state = ANY(string_to_array($1, ','))) "
+             "AND ($2 = '' OR robot_id = $2) "
+             "AND ($3 = '' OR map_id = $3) "
+             "AND ($4::bigint IS NULL OR (created_at, mission_id) < (to_timestamp($4::bigint / 1000.0), $5)) "
+             "ORDER BY created_at DESC, mission_id DESC LIMIT $6",
+             pqxx::params{filter.states, filter.robot_id, filter.map_id, filter.before_created_ms,
+                          filter.before_mission_id, filter.limit})) {
+        missions.push_back(row_to_mission(row));
+                          }
     return missions;
 }

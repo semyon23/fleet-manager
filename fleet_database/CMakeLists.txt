@@ -10,7 +10,7 @@ add_executable(fleet_database
         include/RestApi.hpp
         src/MapTable.cpp
         include/MapTable.hpp
-        include/MissionTable.cpp
+        src/MissionTable.cpp
         include/MissionTable.hpp
 )
 
