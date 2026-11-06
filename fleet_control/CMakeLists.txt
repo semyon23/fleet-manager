@@ -17,6 +17,8 @@ add_executable(fleet_control fc_main.cpp
         maps/MapStore.hpp
         api/MapApi.cpp
         api/MapApi.hpp
+        routing/Router.cpp
+        routing/Router.hpp
 )
 target_include_directories(fleet_control PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(fleet_control PRIVATE

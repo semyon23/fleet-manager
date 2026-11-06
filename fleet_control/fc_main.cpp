@@ -20,12 +20,18 @@ int main() {
         const std::string database_address = env_or("DATABASE_ADDRESS", "127.0.0.1:5002");
         const std::string dispatch_address = env_or("DISPATCH_ADDRESS", "127.0.0.1:5001");
         const double low_battery_percent = std::stod(env_or("LOW_BATTERY_PERCENT", "15"));
+
+        const double default_speed = std::stod(env_or("FMS_DEFAULT_SPEED", "1.0"));
+        if (default_speed <= 0) {
+            throw std::runtime_error("FMS_DEFAULT_SPEED must be > 0");
+        }
+
         asio::io_context io_context{1};
         agrpc::GrpcContext grpc_context;
         auto grpc_work = asio::make_work_guard(grpc_context);
 
         Services services{grpc_context, database_address, dispatch_address};
-        MapStore maps{io_context, services};
+        MapStore maps{io_context, services, default_speed};
         AvailabilityTracker availability{io_context, services, maps, low_battery_percent};
         maps.on_change = [&] { availability.recompute_all(); };
         FleetSync fleet_sync{io_context, services, availability};

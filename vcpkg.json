@@ -12,6 +12,7 @@
     },
     "nlohmann-json",
     "spdlog",
+    "boost-graph",
     "boost-beast",
     "boost-json",
     "boost-uuid",

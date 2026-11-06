@@ -10,8 +10,9 @@ using Control = dbv1::ControlStorage::Stub;
 
 constexpr auto kRetryDelay = std::chrono::seconds(2);
 
-MapStore::MapStore(asio::io_context& io_context, Services& services)
-    : io_context_(io_context), services_(services), retry_timer_(io_context) {}
+MapStore::MapStore(asio::io_context& io_context, Services& services, double default_speed)
+    : io_context_(io_context), services_(services), retry_timer_(io_context), default_speed_(default_speed) {}
+
 
 void MapStore::start() {
     asio::co_spawn(io_context_, load(), [](std::exception_ptr error) {
@@ -30,18 +31,24 @@ void MapStore::stop() {
 }
 
 const Graph* MapStore::find(const std::string& map_id) const {
-    auto it = graphs_.find(map_id);
-    return it == graphs_.end() ? nullptr : &it->second;
+    auto it = maps_.find(map_id);
+    return it == maps_.end() ? nullptr : &it->second.graph;
+}
+
+routing::Router* MapStore::router(const std::string& map_id) {
+    auto it = maps_.find(map_id);
+    return it == maps_.end() ? nullptr : &it->second.router;
 }
 
 void MapStore::put(Graph graph) {
+    routing::Router router(graph, default_speed_);   // строится по графу, ссылку на него не держит
     std::string map_id = graph.map_id;
-    graphs_.insert_or_assign(std::move(map_id), std::move(graph));
+    maps_.insert_or_assign(std::move(map_id), Map{std::move(graph), std::move(router)});
     if (on_change) on_change();
 }
 
 void MapStore::remove(const std::string& map_id) {
-    graphs_.erase(map_id);
+    maps_.erase(map_id);
     if (on_change) on_change();
 }
 
@@ -56,7 +63,7 @@ asio::awaitable<void> MapStore::load() {
                 add_record(map);
             }
             loaded_ = true;
-            spdlog::info("[map_store] {} of {} maps loaded", graphs_.size(), response.maps_size());
+            spdlog::info("[map_store] {} of {} maps loaded", maps_.size(), response.maps_size());
             if (on_change) on_change();
             co_return;
         }

@@ -11,10 +11,11 @@
 
 #include "maps/Graph.hpp"
 #include "services/Services.hpp"
+#include "routing/Router.hpp"
 
 class MapStore {
 public:
-    MapStore(asio::io_context& io_context, Services& services);
+    MapStore(asio::io_context& io_context, Services& services, double default_speed);
 
     void start();
     void stop();
@@ -23,6 +24,7 @@ public:
     bool loaded() const { return loaded_; }
     std::function<void()> on_change;
     const Graph* find(const std::string& map_id) const;
+    routing::Router* router(const std::string& map_id);   // поиск пути по карте; nullptr — карты нет
     void put(Graph graph);
     void remove(const std::string& map_id);
 
@@ -32,11 +34,16 @@ private:
 
     asio::io_context& io_context_;
     Services& services_;
-    std::unordered_map<std::string, Graph> graphs_;
+   // std::unordered_map<std::string, Graph> graphs_;
     bool loaded_{false};
     bool stopped_{false};
     asio::steady_timer retry_timer_;
-
+    struct Map {
+        Graph graph;
+        routing::Router router;
+    };
+    std::unordered_map<std::string, Map> maps_;
+    double default_speed_;
 };
 
 
