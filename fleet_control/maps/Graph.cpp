@@ -114,8 +114,8 @@ MapCheck validate_map(const json& body) {
         if (from && to && *from == *to) {
             warnings.push_back(std::format("edge {}: self-loop, ignored for routes", *id));
         }
-        if (const json* speed = field(edge, "maxSpeed"); speed && (!speed->is_number() || speed->get<double>() < 0)) {
-            errors.push_back(std::format("edge {}: maxSpeed must be a number >= 0", *id));
+        if (const json* speed = field(edge, "maxSpeed"); speed && (!speed->is_number() || speed->get<double>() <= 0)) {
+            errors.push_back(std::format("edge {}: maxSpeed must be a number > 0", *id));
         }
         if (const json* cost = field(edge, "cost"); cost && !cost->is_number()) {
             errors.push_back(std::format("edge {}: cost must be a number", *id));

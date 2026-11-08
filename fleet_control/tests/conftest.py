@@ -184,21 +184,23 @@ class Maps:
         values.update(fields)
         return values
 
-    def create(self, **fields):
-        """POST /maps → (код, тело). id по умолчанию уникальный; id=None — не присылать (сгенерирует сервер)."""
+    def create(self, force: bool = False, **fields):
+        """POST /maps → (код, тело). id по умолчанию уникальный; id=None — не присылать (сгенерирует сервер).
+        force — сохранить, даже если у карты есть последствия (?force=true, иначе 409 CONFIRMATION_REQUIRED)."""
         body = self.document(**fields)
         body.setdefault("id", f"test-ctl-map-{uuid.uuid4().hex[:8]}")
         if body["id"] is None:
             del body["id"]
         elif isinstance(body["id"], str):
             self.ids.append(body["id"])
-        code, created = http("POST", f"{CONTROL}/api/fms/maps", body)
+        code, created = http("POST", f"{CONTROL}/api/fms/maps" + ("?force=true" if force else ""), body)
         if code == 201 and created["id"] not in self.ids:
             self.ids.append(created["id"])
         return code, created
 
-    def patch(self, map_id: str, body):
-        return http("PATCH", f"{CONTROL}/api/fms/maps/{quote(map_id, safe='')}", body)
+    def patch(self, map_id: str, body, force: bool = False):
+        query = "?force=true" if force else ""
+        return http("PATCH", f"{CONTROL}/api/fms/maps/{quote(map_id, safe='')}{query}", body)
 
     def delete(self, map_id: str):
         return http("DELETE", f"{CONTROL}/api/fms/maps/{quote(map_id, safe='')}")

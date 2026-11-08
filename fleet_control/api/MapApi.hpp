@@ -19,7 +19,7 @@ private:
     asio::awaitable<HttpResponse> update_map(const HttpRequest& req, std::string map_id);
     asio::awaitable<HttpResponse> delete_map(const HttpRequest& req, std::string map_id);
     asio::awaitable<HttpResponse> conflict_with_current(const HttpRequest& req, const std::string& map_id);
-
+    asio::awaitable<std::pair<grpc::Status, std::vector<std::string>>> robots_losing_node(const std::string& map_id,const Graph& graph);
     Services& services_;
     MapStore& maps_;
 };

@@ -138,7 +138,7 @@ def test_availability_follows_maps(maps, robots, sim_robot, dispatch):
 
     code, updated = maps.patch(SIM_MAP, {"version": created["version"],
                                          "waypoints": [w for w in created["waypoints"] if w["id"] != "n1"],
-                                         "edges": []})
+                                         "edges": []}, force=True)
     assert code == 200, updated
     wait_reason(robots, sim_robot, "NOT_ON_GRAPH")
 

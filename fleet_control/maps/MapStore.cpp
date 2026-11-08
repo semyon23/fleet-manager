@@ -41,7 +41,11 @@ routing::Router* MapStore::router(const std::string& map_id) {
 }
 
 void MapStore::put(Graph graph) {
-    routing::Router router(graph, default_speed_);   // строится по графу, ссылку на него не держит
+    routing::Router router(graph, default_speed_);
+    put(std::move(graph), std::move(router));
+}
+
+void MapStore::put(Graph graph, routing::Router router) {
     std::string map_id = graph.map_id;
     maps_.insert_or_assign(std::move(map_id), Map{std::move(graph), std::move(router)});
     if (on_change) on_change();

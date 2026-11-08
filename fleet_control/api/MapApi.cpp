@@ -3,10 +3,10 @@
 #include <nlohmann/json.hpp>
 #include <random>
 #include <spdlog/spdlog.h>
-
 #include "api/ApiCommon.hpp"
 #include "api_json.hpp"
-
+#include <format>
+#include "routing/Router.hpp"
 namespace dbv1 = fms::database::v1;
 using Control = dbv1::ControlStorage::Stub;
 using Registry = dbv1::RobotRegistry::Stub;
@@ -14,8 +14,6 @@ using nlohmann::json;
 
 namespace {
 
-// Поля записи карты: в документ (body_json) не попадают — их хранит или ставит база.
-// zoneSet собирает сервер (контракт 6.1), присланный — игнорируется.
 constexpr const char* kRecordFields[] = {"id", "name", "version", "pgmDataUrl", "createdAt", "updatedAt", "zoneSet"};
 constexpr const char* kLists[] = {"waypoints", "edges", "stations", "zones", "assignedRobots"};
 
@@ -51,6 +49,67 @@ HttpResponse version_conflict(const HttpRequest& req, uint32_t current_version) 
 
 HttpResponse maps_loading(const HttpRequest& req) {
     return error_response(req, http::status::service_unavailable, "UNAVAILABLE", "maps are loading, try again later");
+}
+
+// Первые несколько id через запятую: длинный список в ответе оператору не нужен
+std::string first_ids(const std::vector<std::string>& ids) {
+    std::string text;
+    for (size_t i = 0; i < ids.size() && i < 5; ++i) {
+        text += (i ? ", " : "") + ids[i];
+    }
+    return ids.size() > 5 ? text + ", …" : text;
+}
+
+// Проверки на целом графе. Основная часть склада — самая большая сильно связная компонента:
+// в ней из любого узла можно доехать до любого
+std::vector<std::string> graph_warnings(const Graph& graph, const routing::Router& router) {
+    std::vector<std::string> warnings;
+    if (router.component_count() <= 1) {
+        return warnings;
+    }
+    std::vector<uint32_t> sizes(router.component_count(), 0);
+    for (uint32_t n = 0; n < graph.nodes.size(); ++n) {
+        if (graph.nodes[n].has_edges) {
+            ++sizes[router.component(n)];
+        }
+    }
+    const auto main = static_cast<uint32_t>(std::ranges::max_element(sizes) - sizes.begin());
+    if (sizes[main] == 0) {
+        return warnings;   // рёбер нет вообще — нет и основной части; про изолированные узлы уже есть предупреждения
+    }
+    // Узлы без рёбер не считаем: про них уже есть предупреждение «isolated»
+    std::vector<std::string> cut_off;
+    for (uint32_t n = 0; n < graph.nodes.size(); ++n) {
+        if (graph.nodes[n].has_edges && router.component(n) != main) {
+            cut_off.push_back(graph.nodes[n].id);
+        }
+    }
+    if (!cut_off.empty()) {
+        warnings.push_back(std::format(
+            "{} nodes are not connected both ways with the rest of the map, robots can get stuck there "
+            "or cannot reach them: {}", cut_off.size(), first_ids(cut_off)));
+    }
+
+    // Станции без рёбер: подъезд — через узлы взаимодействия. Станции с рёбрами уже в списке выше
+    for (uint32_t n = 0; n < graph.nodes.size(); ++n) {
+        const GraphNode& node = graph.nodes[n];
+        if (!node.station || node.has_edges || node.interaction_nodes.empty()) {
+            continue;
+        }
+        bool reachable = std::ranges::any_of(node.interaction_nodes,
+                                             [&](uint32_t i) { return router.component(i) == main; });
+        if (!reachable) {
+            warnings.push_back(std::format("station {} cannot be reached from the main part of the map", node.id));
+        }
+    }
+    return warnings;
+}
+
+HttpResponse confirmation_required(const HttpRequest& req, const std::vector<std::string>& warnings) {
+    json body{{"code", "CONFIRMATION_REQUIRED"},
+              {"message", "saving this map has consequences; repeat with ?force=true to save anyway"},
+              {"details", {{"warnings", warnings}}}};
+    return json_response(req, http::status::conflict, body.dump());
 }
 
 }  // namespace
@@ -104,8 +163,16 @@ asio::awaitable<HttpResponse> MapApi::create_map(const HttpRequest& req) {
     if (!check.errors.empty()) {
         co_return invalid_map(req, check);
     }
+    // Граф и Router — до записи в базу: что не построилось, то и не сохранилось
+    Graph graph = build_graph(map_id, 0, document);
+    routing::Router router(graph, maps_.default_speed());
+    std::vector<std::string> warnings = graph_warnings(graph, router);
+    if (!warnings.empty() && query_param(req, "force") != "true") {
+        co_return confirmation_required(req, warnings);
+    }
 
     dbv1::CreateMapRequest create;
+
     create.mutable_map()->set_map_id(map_id);
     create.mutable_map()->set_name(name);
     create.mutable_map()->set_body_json(document.dump());
@@ -116,9 +183,9 @@ asio::awaitable<HttpResponse> MapApi::create_map(const HttpRequest& req) {
         co_return grpc_error(req, status);   // ALREADY_EXISTS → 409
     }
 
-    Graph graph = build_graph(map_id, created.map().version(), document);
+    graph.version = created.map().version();
     spdlog::info("[map_api] map {} created: {} nodes, {} edges", map_id, graph.nodes.size(), graph.edges.size());
-    maps_.put(std::move(graph));
+    maps_.put(std::move(graph), std::move(router));
 
     dbv1::MapRecord record = created.map();
     record.set_image(image);   // база возвращает запись без картинки
@@ -175,8 +242,20 @@ asio::awaitable<HttpResponse> MapApi::update_map(const HttpRequest& req, std::st
     if (!check.errors.empty()) {
         co_return invalid_map(req, check);
     }
+    Graph graph = build_graph(map_id, 0, document);
+    routing::Router router(graph, maps_.default_speed());
+    std::vector<std::string> warnings = graph_warnings(graph, router);
+    auto [robots_status, robot_warnings] = co_await robots_losing_node(map_id, graph);
+    if (!robots_status.ok()) {
+        co_return grpc_error(req, robots_status);
+    }
+    warnings.insert(warnings.end(), robot_warnings.begin(), robot_warnings.end());
+    if (!warnings.empty() && query_param(req, "force") != "true") {
+        co_return confirmation_required(req, warnings);
+    }
 
     dbv1::UpdateMapRequest update;
+
     update.mutable_map()->set_map_id(map_id);
     update.mutable_map()->set_name(body->contains("name") ? (*body)["name"].get<std::string>() : current.map().name());
     update.mutable_map()->set_body_json(document.dump());
@@ -193,7 +272,8 @@ asio::awaitable<HttpResponse> MapApi::update_map(const HttpRequest& req, std::st
         co_return grpc_error(req, status);
     }
 
-    maps_.put(build_graph(map_id, updated.map().version(), document));
+    graph.version = updated.map().version();
+    maps_.put(std::move(graph), std::move(router));
     spdlog::info("[map_api] map {} saved, version {}", map_id, updated.map().version());
 
     dbv1::MapRecord record = updated.map();
@@ -252,4 +332,24 @@ asio::awaitable<HttpResponse> MapApi::delete_map(const HttpRequest& req, std::st
     maps_.remove(map_id);
     spdlog::info("[map_api] map {} deleted", map_id);
     co_return json_response(req, http::status::no_content, "");
+}
+
+// ==================================================================== последствия сохранения
+
+asio::awaitable<std::pair<grpc::Status, std::vector<std::string>>> MapApi::robots_losing_node(const std::string& map_id, const Graph& graph) {
+    dbv1::ListRobotsRequest list;
+    dbv1::ListRobotsResponse robots;
+    grpc::Status status = co_await services_.call<&Registry::PrepareAsyncListRobots>(*services_.registry, list, robots);
+    std::vector<std::string> warnings;
+    for (const auto& robot : robots.robots()) {
+        if (!robot.has_status() || !robot.status().has_pose() || robot.status().pose().map_id() != map_id) {
+            continue;
+        }
+        const std::string& node = robot.status().last_node_id();
+        if (!node.empty() && !graph.find_node(node)) {
+            warnings.push_back(std::format("robot {} stands on node {}, which is removed: it will have to be "
+                                           "placed on a node again", robot.spec().robot_id(), node));
+        }
+    }
+    co_return std::pair{status, warnings};
 }

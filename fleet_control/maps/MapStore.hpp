@@ -25,9 +25,11 @@ public:
     std::function<void()> on_change;
     const Graph* find(const std::string& map_id) const;
     routing::Router* router(const std::string& map_id);   // поиск пути по карте; nullptr — карты нет
-    void put(Graph graph);
     void remove(const std::string& map_id);
 
+    void put(Graph graph);                            // строит Router сам — при загрузке карт
+    void put(Graph graph, routing::Router router);   // Router уже построен — при сохранении карты
+    double default_speed() const { return default_speed_; }
 private:
     asio::awaitable<void> load();
     void add_record(const fms::database::v1::MapRecord& map);
