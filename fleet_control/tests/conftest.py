@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
 import uuid
+import warnings
 from pathlib import Path
 from urllib.parse import quote
 
@@ -215,6 +217,48 @@ class Maps:
             assert code in (204, 404), f"cannot delete test map {map_id}: {code} {body}"
 
 
+class Missions:
+    """Миссии одного теста (M-3b): создаются через REST control, читаются из базы.
+    В cleanup() — отменить те, что ещё в очереди, чтобы они не остались в памяти control.
+    Удалить миссию через API нельзя (история), поэтому все id копятся в CREATED, и в конце прогона
+    фикстура missions_cleanup удаляет их строки из базы через psql."""
+
+    CREATED: list[str] = []   # за весь прогон
+
+    def __init__(self):
+        self.ids: list[str] = []
+
+    @staticmethod
+    def body(map_id: str, **fields) -> dict:
+        """Запрос POST /missions: свой id test-ctl-m-<случайное>, один шаг на n2; fields заменяют поля."""
+        values = {"id": f"test-ctl-m-{uuid.uuid4().hex[:8]}", "name": "Test mission", "mapId": map_id,
+                  "steps": [{"nodeId": "n2"}]}
+        values.update(fields)
+        return values
+
+    def create(self, body):
+        """POST /missions → (код, тело). body — dict или строка как есть."""
+        code, created = http("POST", f"{CONTROL}/api/fms/missions", body)
+        mission_id = created.get("id") if isinstance(created, dict) and code in (200, 201) else None
+        if mission_id is None and isinstance(body, dict) and isinstance(body.get("id"), str):
+            mission_id = body["id"]
+        if mission_id and mission_id not in self.ids:
+            self.ids.append(mission_id)
+            Missions.CREATED.append(mission_id)
+        return code, created
+
+    def cancel(self, mission_id: str):
+        return http("POST", f"{CONTROL}/api/fms/missions/{quote(mission_id, safe='')}/cancel")
+
+    def from_database(self, mission_id: str):
+        """GET базы — то, что увидит UI."""
+        return http("GET", f"{DATABASE_HTTP}/api/fms/missions/{quote(mission_id, safe='')}")
+
+    def cleanup(self) -> None:
+        for mission_id in self.ids:
+            self.cancel(mission_id)   # 202 — была в очереди; 404 / 409 — не создана или уже завершена
+
+
 def node_xy(map_doc: dict, node_id: str) -> tuple[float, float]:
     """Координаты узла в метрах — как их считает control (maps/Graph.cpp)."""
     node = next(n for n in map_doc["waypoints"] + map_doc.get("stations", []) if n["id"] == node_id)
@@ -256,6 +300,34 @@ def control_is_running():
 @pytest.fixture
 def maps():
     m = Maps()
+    yield m
+    m.cleanup()
+
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://fms:fms@127.0.0.1:5432/fms")
+
+
+@pytest.fixture(scope="session")
+def missions_cleanup():
+    """В конце прогона — удалить строки тестовых миссий из базы через psql (API для удаления нет)."""
+    yield
+    ids = [i for i in Missions.CREATED if all(c.isalnum() or c in "-_" for c in i)]
+    if not ids:
+        return
+    sql = "DELETE FROM missions WHERE mission_id IN (" + ",".join(f"'{i}'" for i in ids) + ")"
+    try:
+        result = subprocess.run(["psql", DATABASE_URL, "-c", sql], capture_output=True, text=True, timeout=10)
+        failed = result.returncode != 0 and result.stderr
+    except (OSError, subprocess.TimeoutExpired) as e:
+        failed = str(e)
+    if failed:
+        warnings.warn(f"test missions are left in the database ({failed.strip()}): "
+                      "DELETE FROM missions WHERE mission_id LIKE 'test-ctl-m-%'")
+
+
+@pytest.fixture
+def missions(missions_cleanup):
+    m = Missions()
     yield m
     m.cleanup()
 

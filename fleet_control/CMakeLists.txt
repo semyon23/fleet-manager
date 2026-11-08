@@ -14,11 +14,12 @@ add_executable(fleet_control fc_main.cpp
         api/ApiCommon.cpp
         maps/Graph.cpp
         maps/MapStore.cpp
-        maps/MapStore.hpp
         api/MapApi.cpp
-        api/MapApi.hpp
         routing/Router.cpp
         missions/Mission.cpp
+        missions/MissionStore.cpp
+        api/MissionApi.cpp
+        api/MissionApi.hpp
 
 )
 target_include_directories(fleet_control PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

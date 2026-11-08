@@ -7,11 +7,13 @@
 #include "api/HealthApi.hpp"
 #include "api/RobotApi.hpp"
 #include "api/MapApi.hpp"
+#include "api/MissionApi.hpp"
 #include "services//Services.hpp"
 #include "fleet//FleetSync.hpp"
 #include "env_config.hpp"
 #include "http_server.hpp"
 #include "maps/MapStore.hpp"
+#include "missions/MissionStore.hpp"
 #include "spdlog/spdlog.h"
 
 int main() {
@@ -32,6 +34,7 @@ int main() {
 
         Services services{grpc_context, database_address, dispatch_address};
         MapStore maps{io_context, services, default_speed};
+        MissionStore missions{io_context, services};
         AvailabilityTracker availability{io_context, services, maps, low_battery_percent};
         maps.on_change = [&] { availability.recompute_all(); };
         FleetSync fleet_sync{io_context, services, availability};
@@ -39,13 +42,14 @@ int main() {
         HealthApi health_api{services, router};
         RobotApi robot_api{services, fleet_sync, availability, maps, router};
         MapApi map_api{services, maps, router};
+        MissionApi mission_api{services, maps, missions, router};
         HttpServer http_server{endpoint_from(http_address), io_context, router};
 
         http_server.start();
         availability.start();
         fleet_sync.start();
         maps.start();
-
+        missions.start();
 
         asio::signal_set signals{io_context, SIGINT, SIGTERM};
         signals.async_wait([&](const boost::system::error_code&, int signal) {
@@ -53,6 +57,7 @@ int main() {
             http_server.stop();
             fleet_sync.stop();
             maps.stop();
+            missions.stop();
             availability.stop();
             grpc_work.reset();
         });
