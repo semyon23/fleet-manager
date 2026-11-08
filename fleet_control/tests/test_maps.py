@@ -275,9 +275,9 @@ def test_recreate_after_delete(maps):
 def test_cannot_delete_map_with_robot(maps, sim_robot, robots):
     """На карте стоит робот (его pose.mapId) — 409. Нужен симулятор: карта — та, на которой он стоит."""
     robots.wait_status(sim_robot, lambda s: s["pose"] is not None, 10, "robot pose")
-    code, body = maps.create(id=SIM_MAP)
-    if code == 409:
+    if maps.from_database(SIM_MAP)[0] == 200:
         pytest.skip(f"map {SIM_MAP} already exists in fms — not deleting someone else's map")
+    code, body = maps.create(id=SIM_MAP)
     assert code == 201, body
 
     code, body = maps.delete(SIM_MAP)
