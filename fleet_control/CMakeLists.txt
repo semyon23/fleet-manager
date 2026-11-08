@@ -18,6 +18,7 @@ add_executable(fleet_control fc_main.cpp
         api/MapApi.cpp
         api/MapApi.hpp
         routing/Router.cpp
+        missions/Mission.cpp
 
 )
 target_include_directories(fleet_control PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -40,8 +41,10 @@ if(FMS_BUILD_TESTS)
     # Тесты на C++ (Catch2)
     add_executable(fleet_control_unit
             unit_tests/test_router.cpp
+            unit_tests/test_mission.cpp
             routing/Router.cpp
             maps/Graph.cpp
+            missions/Mission.cpp
     )
     target_include_directories(fleet_control_unit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(fleet_control_unit PRIVATE

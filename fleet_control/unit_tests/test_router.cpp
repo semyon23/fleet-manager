@@ -52,15 +52,18 @@ struct MapDoc {
         edge(b, a, extra);
     }
 
+    json body() const {
+        return {{"width", 100},
+                {"height", 100},
+                {"meta", {{"resolution", 1.0}, {"origin", {0, 0, 0}}}},
+                {"waypoints", waypoints},
+                {"stations", stations},
+                {"edges", edges}};
+    }
+
     Graph build() const {
-        json body = {{"width", 100},
-                     {"height", 100},
-                     {"meta", {{"resolution", 1.0}, {"origin", {0, 0, 0}}}},
-                     {"waypoints", waypoints},
-                     {"stations", stations},
-                     {"edges", edges}};
-        REQUIRE(validate_map(body).errors.empty());
-        return build_graph("test", 1, body);
+        REQUIRE(validate_map(body()).errors.empty());
+        return build_graph("test", 1, body());
     }
 };
 
@@ -191,14 +194,16 @@ TEST_CASE("одностороннее ребро: туда можно, обра�
     CHECK_FALSE(find_route(router, graph, "B", "A"));
 }
 
-TEST_CASE("maxSpeed 0 — по ребру не проехать") {
+TEST_CASE("maxSpeed 0: карта не проходит проверку, а Router такое ребро не использует") {
     MapDoc doc;
     doc.node("A", 0, 50);
     doc.node("B", 10, 50);
     doc.edge("A", "B", {{"maxSpeed", 0}});
-    Graph graph = doc.build();
-    routing::Router router(graph, 1.0);
 
+    CHECK_FALSE(validate_map(doc.body()).errors.empty());
+
+    Graph graph = build_graph("test", 1, doc.body());   // в обход проверки
+    routing::Router router(graph, 1.0);
     CHECK_FALSE(find_route(router, graph, "A", "B"));
 }
 
@@ -451,11 +456,8 @@ Graph random_map(unsigned seed) {
             continue;
         }
         json extra = json::object();
-        double kind = chance(rng);
-        if (kind < 0.2) {
+        if (chance(rng) < 0.2) {
             extra["maxSpeed"] = 0.3 + chance(rng);   // медленная
-        } else if (kind < 0.25) {
-            extra["maxSpeed"] = 0;                   // закрытая
         }
         if (chance(rng) < 0.2) {
             extra["cost"] = std::round(chance(rng) * 20);
