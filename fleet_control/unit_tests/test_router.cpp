@@ -22,13 +22,10 @@
 using Catch::Matchers::WithinAbs;
 using nlohmann::json;
 
-// ================================================================== помощники
-
 namespace {
 
 constexpr double kInf = std::numeric_limits<double>::infinity();
 
-// Документ карты, как его присылает редактор UI
 struct MapDoc {
     json waypoints = json::array();
     json stations = json::array();

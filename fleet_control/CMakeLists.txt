@@ -18,7 +18,7 @@ add_executable(fleet_control fc_main.cpp
         api/MapApi.cpp
         api/MapApi.hpp
         routing/Router.cpp
-        routing/Router.hpp
+
 )
 target_include_directories(fleet_control PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(fleet_control PRIVATE
@@ -33,12 +33,11 @@ target_link_libraries(fleet_control PRIVATE
         spdlog::spdlog
 )
 
-# Тесты на C++ (Catch2): отдельная программа, в сервис не попадают.
-# Собираются, только если FMS_BUILD_TESTS=ON (корневой CMakeLists.txt)
 if(FMS_BUILD_TESTS)
     find_package(Catch2 3 CONFIG REQUIRED)
     include(Catch)
 
+    # Тесты на C++ (Catch2)
     add_executable(fleet_control_unit
             unit_tests/test_router.cpp
             routing/Router.cpp
@@ -51,4 +50,17 @@ if(FMS_BUILD_TESTS)
             nlohmann_json::nlohmann_json
     )
     catch_discover_tests(fleet_control_unit)
+
+    # Бенчмарк: не тест, в ctest не регистрируется, свой main. Запускать в Release
+    add_executable(fleet_control_bench
+            unit_tests/bench_router.cpp
+            unit_tests/warehouse.cpp
+            routing/Router.cpp
+            maps/Graph.cpp
+    )
+    target_include_directories(fleet_control_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(fleet_control_bench PRIVATE
+            Boost::headers
+            nlohmann_json::nlohmann_json
+    )
 endif()
