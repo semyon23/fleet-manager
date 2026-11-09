@@ -107,8 +107,8 @@ HttpResponse not_ready(const HttpRequest& req) {
 
 }  // namespace
 
-MissionApi::MissionApi(Services& services, MapStore& maps, MissionStore& missions, ApiRouter& router)
-    : services_(services), maps_(maps), missions_(missions) {
+MissionApi::MissionApi(Services& services, MapStore& maps, MissionStore& missions, MissionRunner& runner, ApiRouter& router)
+        : services_(services), maps_(maps), missions_(missions), runner_(runner) {
     router.add_route(http::verb::post, "/api/fms/missions",
         [this](const HttpRequest& req, const PathParams&) { return create_mission(req); });
     router.add_route(http::verb::post, "/api/fms/missions/{id}/cancel",
@@ -259,11 +259,23 @@ asio::awaitable<HttpResponse> MissionApi::cancel_mission(const HttpRequest& req,
         co_return error_response(req, http::status::conflict, "INVALID_STATE",
                                  "mission " + mission_id + " is already " + existing->state);
     }
-    if (mission->state != "QUEUED") {
-        // M-3c: отмена начатой миссии — через dispatch (CANCELING → CANCELED)
-        co_return error_response(req, http::status::conflict, "INVALID_STATE",
-                                 "mission " + mission_id + " is " + mission->state + ": cancelling started missions is not supported yet");
+
+    if (mission->state == "CANCELING") {
+        co_return json_response(req, http::status::accepted, mission_json(*mission).dump());   // уже отменяется
     }
+    if (mission->state != "QUEUED") {
+        // ASSIGNED, RUNNING, PAUSED — через dispatch. После co_await указатель mission уже нельзя трогать
+        grpc::Status status = co_await runner_.cancel(mission_id);
+        if (!status.ok()) {
+            co_return grpc_error(req, status);   // dispatch недоступен → 503
+        }
+        auto [get_status, current] = co_await missions_.get(mission_id);
+        if (!get_status.ok()) {
+            co_return grpc_error(req, get_status);
+        }
+        co_return json_response(req, http::status::accepted, mission_json(*current).dump());
+    }
+
 
     mission->state = "CANCELED";
     mission->finished_at_ms = now_ms();

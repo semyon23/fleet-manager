@@ -206,3 +206,22 @@ asio::awaitable<void> MissionStore::write_loop() {
         }
     }
 }
+
+
+std::set<std::string> MissionStore::busy_robots() const {
+    std::set<std::string> robots;
+    for (const auto& [id, mission] : active_) {
+        if (!mission.robot_id.empty()) {
+            robots.insert(mission.robot_id);
+        }
+    }
+    return robots;
+}
+
+std::vector<Mission*> MissionStore::active() {
+    std::vector<Mission*> missions;
+    for (auto& [id, mission] : active_) {
+        missions.push_back(&mission);
+    }
+    return missions;
+}

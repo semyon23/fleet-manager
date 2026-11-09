@@ -46,6 +46,8 @@ public:
     // Завершённая уходит из памяти — ссылка mission после вызова недействительна
     nlohmann::json changed(Mission& mission);
 
+    std::vector<Mission*> active();   // все незавершённые: для сверки с dispatch
+    std::set<std::string> busy_robots() const;   // роботы активных миссий: им новую не давать
     // Очередь могла измениться: новая миссия, миссия закончилась. M-3c: будит распределение
     std::function<void()> on_queue_change;
 

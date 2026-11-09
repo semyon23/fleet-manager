@@ -20,6 +20,10 @@ add_executable(fleet_control fc_main.cpp
         missions/MissionStore.cpp
         api/MissionApi.cpp
         api/MissionApi.hpp
+        assignment/MissionAssigner.cpp
+        assignment/MissionAssigner.hpp
+        missions/MissionRunner.cpp
+        missions/MissionRunner.hpp
 
 )
 target_include_directories(fleet_control PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

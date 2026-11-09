@@ -2,18 +2,21 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <cstdlib>
+#include <stdexcept>
 #include <string>
 
 #include "api/HealthApi.hpp"
-#include "api/RobotApi.hpp"
 #include "api/MapApi.hpp"
 #include "api/MissionApi.hpp"
-#include "services//Services.hpp"
-#include "fleet//FleetSync.hpp"
+#include "api/RobotApi.hpp"
+#include "assignment/MissionAssigner.hpp"
 #include "env_config.hpp"
+#include "fleet/FleetSync.hpp"
 #include "http_server.hpp"
 #include "maps/MapStore.hpp"
 #include "missions/MissionStore.hpp"
+#include "missions/MissionRunner.hpp"
+#include "services/Services.hpp"
 #include "spdlog/spdlog.h"
 
 int main() {
@@ -36,13 +39,25 @@ int main() {
         MapStore maps{io_context, services, default_speed};
         MissionStore missions{io_context, services};
         AvailabilityTracker availability{io_context, services, maps, low_battery_percent};
-        maps.on_change = [&] { availability.recompute_all(); };
+        MissionAssigner assigner{io_context, missions, availability, maps};
+        MissionRunner runner{io_context, services, missions, maps};
+        assigner.on_assigned = [&](Mission& mission, const std::string& start_node) {
+            runner.start_mission(mission, start_node);
+        };
+
+        missions.on_queue_change = [&] { assigner.wake(); };
+        availability.on_idle = [&] { assigner.wake(); };
+        maps.on_change = [&] {
+            availability.recompute_all();
+            assigner.wake();
+        };
+
         FleetSync fleet_sync{io_context, services, availability};
         ApiRouter router;
         HealthApi health_api{services, router};
         RobotApi robot_api{services, fleet_sync, availability, maps, router};
         MapApi map_api{services, maps, router};
-        MissionApi mission_api{services, maps, missions, router};
+        MissionApi mission_api{services, maps, missions, runner, router};
         HttpServer http_server{endpoint_from(http_address), io_context, router};
 
         http_server.start();
@@ -50,11 +65,15 @@ int main() {
         fleet_sync.start();
         maps.start();
         missions.start();
+        assigner.start();
+        runner.start();
 
         asio::signal_set signals{io_context, SIGINT, SIGTERM};
         signals.async_wait([&](const boost::system::error_code&, int signal) {
             spdlog::info("signal {} received, stopping", signal);
             http_server.stop();
+            assigner.stop();
+            runner.stop();
             fleet_sync.stop();
             maps.stop();
             missions.stop();
