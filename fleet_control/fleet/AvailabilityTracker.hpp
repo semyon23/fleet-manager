@@ -28,6 +28,16 @@ public:
     void recompute_all();
     void keep_only(const std::set<std::string>& robot_ids);          // остальных в базе уже нет
 
+
+    // Свободный робот для распределения миссий: IDLE и известно, где он стоит
+    struct IdleRobot {
+        std::string robot_id;
+        std::string map_id;        // pose.mapId
+        std::string last_node_id;
+    };
+    std::vector<IdleRobot> idle_robots() const;
+
+    std::function<void()> on_idle;   // робот стал IDLE: Allocator проверяет очередь
 private:
     struct Robot {
         bool deleting = false;

@@ -95,6 +95,22 @@ void AvailabilityTracker::keep_only(const std::set<std::string>& robot_ids) {
     std::erase_if(pending_, [&](const auto& item) { return !robot_ids.contains(item.first); });
 }
 
+std::vector<AvailabilityTracker::IdleRobot> AvailabilityTracker::idle_robots() const {
+    std::vector<IdleRobot> idle;
+    for (const auto& [robot_id, availability] : current_) {
+        if (availability.state() != dbv1::AVAILABILITY_STATE_IDLE) {
+            continue;
+        }
+        auto robot = robots_.find(robot_id);
+        if (robot == robots_.end() || !robot->second.status || !robot->second.status->has_pose()) {
+            continue;   // IDLE без позы не бывает, но не полагаемся
+        }
+        const auto& status = *robot->second.status;
+        idle.push_back({robot_id, status.pose().map_id(), status.last_node_id()});
+    }
+    return idle;
+}
+
 // ==================================================================== расчёт и запись
 
 void AvailabilityTracker::update(const std::string& robot_id) {
@@ -119,6 +135,9 @@ void AvailabilityTracker::update(const std::string& robot_id) {
     current_[robot_id] = availability;
     pending_[robot_id] = availability;
     wakeup_.try_send(boost::system::error_code{});   // false — сигнал уже лежит
+    if (availability.state() == dbv1::AVAILABILITY_STATE_IDLE && on_idle) {
+        on_idle();
+    }
 }
 
 asio::awaitable<void> AvailabilityTracker::write_loop() {
