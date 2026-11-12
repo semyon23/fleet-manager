@@ -27,7 +27,7 @@ public:
     void set_dispatch_connected(bool connected);                     // нет dispatch — все роботы OFFLINE
     void recompute_all();
     void keep_only(const std::set<std::string>& robot_ids);          // остальных в базе уже нет
-
+    void remove(const std::string& robot_id);                        // dispatch больше не ведёт робота
 
     // Свободный робот для распределения миссий: IDLE и известно, где он стоит
     struct IdleRobot {

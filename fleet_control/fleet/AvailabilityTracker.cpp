@@ -95,6 +95,12 @@ void AvailabilityTracker::keep_only(const std::set<std::string>& robot_ids) {
     std::erase_if(pending_, [&](const auto& item) { return !robot_ids.contains(item.first); });
 }
 
+void AvailabilityTracker::remove(const std::string& robot_id) {
+    robots_.erase(robot_id);
+    current_.erase(robot_id);
+    pending_.erase(robot_id);   // в базе робота уже нет или вот-вот не будет — писать нечего
+}
+
 std::vector<AvailabilityTracker::IdleRobot> AvailabilityTracker::idle_robots() const {
     std::vector<IdleRobot> idle;
     for (const auto& [robot_id, availability] : current_) {

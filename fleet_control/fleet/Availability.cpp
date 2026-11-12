@@ -4,6 +4,10 @@
 namespace dbv1 = fms::database::v1;
 namespace fms1 = fms::v1;
 
+// Дальше этого от узла — робот не на узле, а между узлами (остановился посреди ребра после отмены).
+// С запасом на погрешность локализации; у VDA-роботов точность остановки — сантиметры
+constexpr double kOnNodeTolerance = 0.5;   // м
+
 namespace {
 
 void add_reason(dbv1::RobotAvailability& availability, const char* code, std::string message) {
@@ -78,8 +82,8 @@ dbv1::RobotAvailability availability_of(const fms::v1::RobotStatus* status, doub
     if (!status->localized()) {
         add_reason(availability, "NOT_LOCALIZED", "robot is not localized");
     }
-    // M-2. На графе: карта робота (pose.mapId) есть в fms и lastNodeId — её узел.
-    // Пока карты не загружены — только «стоит на каком-то узле».
+    // M-2. На графе: карта робота (pose.mapId) есть в fms, lastNodeId — её узел,
+    // и робот стоит у этого узла, а не посреди ребра. Пока карты не загружены — только «стоит на каком-то узле».
     const std::string& last_node = status->last_node_id();
     if (maps.loaded() && status->has_pose()) {
         const std::string& map_id = status->pose().map_id();
@@ -91,6 +95,14 @@ dbv1::RobotAvailability availability_of(const fms::v1::RobotStatus* status, doub
         } else if (last_node.empty() || !graph->find_node(last_node)) {
             add_reason(availability, "NOT_ON_GRAPH",
                        "robot is not on a node of map " + map_id + ", set its position first");
+        } else {
+            const GraphNode& node = graph->nodes[*graph->find_node(last_node)];
+            const double away = std::hypot(status->pose().x() - node.x, status->pose().y() - node.y);
+            if (away > kOnNodeTolerance) {
+                add_reason(availability, "NOT_ON_GRAPH",
+                           std::format("robot is {:.1f} m away from node {}: it stopped between nodes, "
+                                       "drive it to a node or set its position", away, last_node));
+            }
         }
     } else if (last_node.empty()) {
         add_reason(availability, "NOT_ON_GRAPH", "robot is not on a graph node, set its position first");

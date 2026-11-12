@@ -113,8 +113,8 @@ asio::awaitable<void> MissionRunner::send(std::string mission_id, std::string st
 
     mission = missions_.find(mission_id);   // пока ждали — могли отменить: ссылки больше нет
     if (status.ok()) {
-        if (!mission || mission->state != "ASSIGNED") {
-            // Отменили, пока миссия летела в dispatch, — а там она уже началась: остановить
+        if (!mission) {
+            // Отменили, пока миссия летела в dispatch (отмена её уже завершила), — а там она началась: остановить
             dpv1::CancelMissionRequest cancel;
             cancel.set_mission_id(mission_id);
             dpv1::CancelMissionResponse cancelled;
@@ -122,13 +122,17 @@ asio::awaitable<void> MissionRunner::send(std::string mission_id, std::string st
             co_return;
         }
         spdlog::info("[runner] mission {} sent to robot {}", mission_id, mission->robot_id);
-        apply(*mission, response.status());
+        // Стрим статусов мог обогнать ответ на AddMission: тогда в миссии уже статус свежее этого
+        if (mission->state == "ASSIGNED") {
+            apply(*mission, response.status());
+        }
         co_return;
     }
     if (!mission) {
         co_return;
     }
     switch (status.error_code()) {
+        case grpc::StatusCode::NOT_FOUND:             // робота уже нет в dispatch (удалили)
         case grpc::StatusCode::FAILED_PRECONDITION:   // робот уже занят или не на узле — dispatch знает свежее
         case grpc::StatusCode::UNAVAILABLE:
         case grpc::StatusCode::DEADLINE_EXCEEDED:
