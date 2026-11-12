@@ -1,5 +1,4 @@
 #include "MissionRunner.hpp"
-#include "missions/MissionRunner.hpp"
 
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -18,6 +17,7 @@ using nlohmann::json;
 namespace {
 
 constexpr auto kReconnectDelay = std::chrono::seconds(2);
+constexpr auto kOverduePeriod = std::chrono::seconds(5);
 
 void log_failure(std::exception_ptr error) {
     if (!error) return;
@@ -70,10 +70,16 @@ fms1::Action to_action(const json& item) {
 }  // namespace
 
 MissionRunner::MissionRunner(asio::io_context& io_context, Services& services, MissionStore& missions, MapStore& maps)
-    : io_context_(io_context), services_(services), missions_(missions), maps_(maps), reconnect_timer_(io_context) {}
+    : io_context_(io_context),
+      services_(services),
+      missions_(missions),
+      maps_(maps),
+      reconnect_timer_(io_context),
+      overdue_timer_(io_context) {}
 
 void MissionRunner::start() {
     asio::co_spawn(io_context_, watch_dispatch(), log_failure);
+    asio::co_spawn(io_context_, overdue_loop(), log_failure);
 }
 
 void MissionRunner::stop() {
@@ -82,6 +88,7 @@ void MissionRunner::stop() {
         stream_->context().TryCancel();   // read() вернёт false, корутина выйдет
     }
     reconnect_timer_.cancel();
+    overdue_timer_.cancel();
 }
 
 // ==================================================================== отправка в dispatch
@@ -160,7 +167,7 @@ std::optional<fms1::Mission> MissionRunner::build(const Mission& mission, const 
     fms1::Mission result;
     result.set_mission_id(mission.id);
     result.set_robot_id(mission.robot_id);
-    std::vector<std::vector<std::string>> routes;
+    Plan plan;
 
     for (size_t i = 0; i < mission.steps.size(); ++i) {
         const MissionStep& step = mission.steps[i];
@@ -206,10 +213,12 @@ std::optional<fms1::Mission> MissionRunner::build(const Mission& mission, const 
                 route_edge->set_maximum_speed(*edge.max_speed);
             }
         }
-        routes.push_back(std::move(ids));
+        plan.routes.push_back(std::move(ids));
+        plan.seconds.push_back(route->seconds);
         from = route->nodes.back();   // следующий шаг — оттуда, где закончился этот
     }
-    routes_[mission.id] = std::move(routes);
+    plan.last_node = start_node;
+    plans_[mission.id] = std::move(plan);
     return result;
 }
 
@@ -231,6 +240,7 @@ void MissionRunner::apply(Mission& mission, const fms1::MissionStatus& status) {
     if (status.current_node_id().starts_with('s')) {
         mission.current_step = std::stoi(status.current_node_id().substr(1));
     }
+    auto plan = plans_.find(mission.id);
     for (const auto& step : status.steps()) {
         if (!step.node_id().starts_with('s')) {
             continue;
@@ -250,6 +260,10 @@ void MissionRunner::apply(Mission& mission, const fms1::MissionStatus& status) {
                                      {"actionType", action.action_type()},
                                      {"status", without_prefix(fms1::ActionStatus_Name(action.status()), "ACTION_STATUS_")}});
         }
+        // Где робот сейчас — по ходу текущего шага (для c1b: сколько ему ещё ехать)
+        if (plan != plans_.end() && state.state == "RUNNING" && step.has_move() && !step.move().last_node_id().empty()) {
+            plan->second.last_node = step.move().last_node_id();
+        }
     }
     if (status.has_error()) {
         mission.error = MissionError{without_prefix(fms1::MissionErrorCode_Name(status.error().code()), "MISSION_ERROR_CODE_"),
@@ -262,10 +276,20 @@ void MissionRunner::apply(Mission& mission, const fms1::MissionStatus& status) {
     if (mission.state != old_state) {
         spdlog::info("[runner] mission {}: {} → {}", mission.id, old_state, mission.state);
     }
-    if (mission.finished()) {
-        routes_.erase(mission.id);
+    if (!mission.finished()) {
+        missions_.changed(mission);
+        return;
+    }
+    // Закончилась: следующая миссия робота — в dispatch или обратно в очередь
+    const std::string robot_id = mission.robot_id;
+    const bool completed = mission.state == "COMPLETED";
+    std::string end_node;
+    if (plan != plans_.end() && !plan->second.routes.empty()) {
+        end_node = plan->second.routes.back().back();
+        plans_.erase(plan);
     }
     missions_.changed(mission);   // завершённая уходит из памяти: mission дальше не трогаем
+    release_next(robot_id, completed, end_node);
 }
 
 void MissionRunner::back_to_queue(Mission& mission, const std::string& why) {
@@ -273,7 +297,7 @@ void MissionRunner::back_to_queue(Mission& mission, const std::string& why) {
     mission.state = "QUEUED";
     mission.robot_id.clear();
     mission.assigned_at_ms.reset();
-    routes_.erase(mission.id);
+    plans_.erase(mission.id);
     // Не будим назначение сразу: робот, которого dispatch счёл занятым, тут же получил бы её снова.
     // Следующая попытка — по страховочному таймеру назначения (5 с) или по любому событию
     missions_.changed(mission);
@@ -289,9 +313,115 @@ void MissionRunner::finish(Mission& mission, const std::string& state, std::opti
         }
     }
     spdlog::info("[runner] mission {} {}{}", mission.id, state, mission.error ? ": " + mission.error->message : "");
-    routes_.erase(mission.id);
+    const std::string robot_id = mission.robot_id;
+    plans_.erase(mission.id);
     missions_.changed(mission);   // завершённая уходит из памяти: mission дальше не трогаем
+    release_next(robot_id, false, "");
 }
+
+// ==================================================================== c1b: следующая миссия
+
+std::vector<MissionRunner::SoonFree> MissionRunner::soon_free() {
+    std::vector<SoonFree> result;
+    for (Mission* mission : missions_.active()) {
+        if (mission->state != "RUNNING" || !mission->current_step || next_.contains(mission->robot_id)) {
+            continue;
+        }
+        auto plan = plans_.find(mission->id);
+        if (plan == plans_.end()) {
+            continue;   // маршрута нет (control перезапускался) — не знаем, сколько ему ехать
+        }
+        const size_t current = static_cast<size_t>(*mission->current_step);
+        if (current >= mission->steps.size()) {
+            continue;
+        }
+        // Дальше только езда: ни у текущего шага, ни у следующих нет действий
+        bool driving_only = true;
+        for (size_t i = current; i < mission->steps.size(); ++i) {
+            if (!mission->steps[i].actions.empty()) {
+                driving_only = false;
+            }
+        }
+        if (!driving_only) {
+            continue;
+        }
+
+        // Осталось: от того, где робот сейчас, до конца текущего шага + все следующие шаги целиком
+        const Graph* graph = maps_.find(mission->map_id);
+        if (!graph) {
+            continue;
+        }
+        const auto& route = plan->second.routes[current];
+        auto from = graph->find_node(plan->second.last_node);
+        auto to = graph->find_node(route.back());
+        if (!from || !to) {
+            continue;
+        }
+        std::vector<uint32_t> targets = {*to};
+        auto rest = maps_.router(mission->map_id)->route(*from, targets);
+        if (!rest) {
+            continue;
+        }
+        double remaining = rest->seconds;
+        for (size_t i = current + 1; i < plan->second.seconds.size(); ++i) {
+            remaining += plan->second.seconds[i];
+        }
+        result.push_back({mission->robot_id, mission->map_id, plan->second.routes.back().back(), remaining});
+    }
+    return result;
+}
+
+void MissionRunner::set_next(Mission& mission, double remaining_seconds) {
+    // Срок — две оценки плюс минута: короткие поездки не вылетают из-за пары секунд задержки
+    const auto deadline = now_ms() + static_cast<int64_t>((2 * remaining_seconds + 60) * 1000);
+    next_[mission.robot_id] = Next{mission.id, deadline};
+    spdlog::info("[runner] mission {} is next for robot {} (it is busy for ~{:.0f} s more)", mission.id,
+                 mission.robot_id, remaining_seconds);
+}
+
+void MissionRunner::release_next(const std::string& robot_id, bool completed, const std::string& end_node) {
+    auto it = next_.find(robot_id);
+    if (it == next_.end()) {
+        return;
+    }
+    const std::string next_id = it->second.mission_id;
+    next_.erase(it);
+    Mission* next = missions_.find(next_id);
+    if (!next || next->state != "ASSIGNED") {
+        return;   // её уже отменили
+    }
+    if (completed && !end_node.empty()) {
+        start_mission(*next, end_node);   // маршрут — от того места, где робот закончил
+    } else {
+        back_to_queue(*next, "the current mission of the robot did not complete");
+    }
+}
+
+bool MissionRunner::is_next(const std::string& mission_id) const {
+    return std::ranges::any_of(next_, [&](const auto& item) { return item.second.mission_id == mission_id; });
+}
+
+// Раз в 5 с: текущая миссия затянулась (робот застрял) — следующую отдать в очередь, пусть едет другой
+asio::awaitable<void> MissionRunner::overdue_loop() {
+    while (!stopped_) {
+        overdue_timer_.expires_after(kOverduePeriod);
+        co_await overdue_timer_.async_wait(asio::as_tuple(asio::use_awaitable));
+        const int64_t now = now_ms();
+        for (auto it = next_.begin(); it != next_.end();) {
+            if (it->second.deadline_ms > now) {
+                ++it;
+                continue;
+            }
+            const std::string next_id = it->second.mission_id;
+            it = next_.erase(it);
+            if (Mission* next = missions_.find(next_id); next && next->state == "ASSIGNED") {
+                back_to_queue(*next, "the current mission of the robot takes too long");
+            }
+        }
+    }
+}
+
+// ==================================================================== стрим и сверка
 
 asio::awaitable<void> MissionRunner::watch_dispatch() {
     while (!stopped_) {
@@ -338,8 +468,9 @@ void MissionRunner::reconcile(const dpv1::MissionSnapshot& snapshot) {
     }
     int lost = 0;
     for (Mission* mission : missions_.active()) {
-        if (mission->state == "QUEUED" || in_dispatch.contains(mission->id) || sending_.contains(mission->id)) {
-            continue;
+        if (mission->state == "QUEUED" || in_dispatch.contains(mission->id) || sending_.contains(mission->id) ||
+            is_next(mission->id)) {
+            continue;   // следующей миссии и не должно быть в dispatch — она ждёт своего робота
         }
         if (mission->state == "ASSIGNED") {
             back_to_queue(*mission, "not in dispatch: AddMission did not get there");
@@ -354,6 +485,17 @@ void MissionRunner::reconcile(const dpv1::MissionSnapshot& snapshot) {
 // ==================================================================== отмена
 
 asio::awaitable<grpc::Status> MissionRunner::cancel(const std::string& mission_id) {
+    // Следующая миссия робота: в dispatch её нет — отменить сразу, как из очереди
+    for (auto it = next_.begin(); it != next_.end(); ++it) {
+        if (it->second.mission_id == mission_id) {
+            next_.erase(it);
+            if (Mission* mission = missions_.find(mission_id)) {
+                finish(*mission, "CANCELED", std::nullopt);
+            }
+            co_return grpc::Status::OK;
+        }
+    }
+
     dpv1::CancelMissionRequest request;
     request.set_mission_id(mission_id);
     dpv1::CancelMissionResponse response;

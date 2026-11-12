@@ -208,3 +208,95 @@ def test_cancelled_between_nodes_is_not_on_graph(missions, robots, two_robots):
     # Поставили на узел — снова свободен
     robots.place(amr1, {"mapId": SIM_MAP, "nodeId": "b"}, lambda s: s["lastNodeId"] == "b")
     wait_robot(robots, amr1, lambda r: r["availability"]["state"] == "IDLE", "IDLE")
+
+
+# ------------------------------------------------------------------ c1b: скоро свободный робот
+#
+# Робот, которому до конца миссии осталось только ехать, — кандидат наравне со свободными:
+# его время = остаток миссии + путь от её конца. Новая миссия становится у него следующей (ASSIGNED)
+# и уходит в dispatch, когда текущая COMPLETED.
+
+def wait_next(missions, mission_id: str, robot_id: str, timeout: float = 10) -> dict:
+    """Миссия назначена роботу, но ещё ждёт его (ASSIGNED, в dispatch не ушла)."""
+    deadline = time.monotonic() + timeout
+    mission = None
+    while time.monotonic() < deadline:
+        _, mission = missions.from_database(mission_id)
+        if mission["state"] == "ASSIGNED" and mission["robotId"] == robot_id:
+            return mission
+        time.sleep(0.1)
+    raise TimeoutError(f"mission {mission_id} is not next for {robot_id}: {mission}")
+
+
+def drive_amr1_to_b(missions, robots, amr1: str) -> dict:
+    """amr1 едет a → b без действий (4 м, ~5 с). Возвращает, когда он уже в пути."""
+    _, current = missions.create(Missions.body(SIM_MAP, requestedRobotId=amr1, steps=[{"nodeId": "b"}]))
+    wait_mission(missions, current["id"], {"RUNNING"})
+    wait_robot(robots, amr1, lambda r: r["status"]["driving"], "driving")
+    return current
+
+
+def test_soon_free_robot_beats_far_idle_robot(missions, robots, two_robots):
+    """amr1 едет a → b, ему осталось ~5 с. amr2 свободен, но на d: до b 12 м. Миссия на b — следующая у amr1."""
+    amr1, _ = two_robots
+    current = drive_amr1_to_b(missions, robots, amr1)
+    _, created = missions.create(Missions.body(SIM_MAP, steps=[{"nodeId": "b", "actions": [action(1)]}]))
+
+    wait_next(missions, created["id"], amr1)
+    assert missions.from_database(current["id"])[1]["state"] == "RUNNING"   # назначена, пока он ещё едет
+
+    done = wait_mission(missions, current["id"], {"COMPLETED"})
+    mission = wait_mission(missions, created["id"], {"COMPLETED", "FAILED", "CANCELED"})
+    assert mission["state"] == "COMPLETED", mission
+    assert mission["robotId"] == amr1
+    assert mission["assignedAt"] < done["finishedAt"]    # назначили до конца текущей
+    assert mission["startedAt"] >= done["finishedAt"]    # а начали — после
+
+
+def test_robot_with_actions_ahead_is_not_soon_free(missions, robots, two_robots):
+    """amr1 едет на b, и там у него действие на 5 с — когда он освободится, неизвестно точно.
+    Миссия на b уходит свободному amr2, хотя тот дальше."""
+    amr1, amr2 = two_robots
+    _, current = missions.create(Missions.body(SIM_MAP, requestedRobotId=amr1,
+                                               steps=[{"nodeId": "b", "actions": [action(5)]}]))
+    wait_mission(missions, current["id"], {"RUNNING"})
+    _, created = missions.create(Missions.body(SIM_MAP, steps=[{"nodeId": "b"}]))
+
+    mission = wait_mission(missions, created["id"], {"COMPLETED", "FAILED", "CANCELED"})
+    assert mission["robotId"] == amr2
+
+
+def test_next_returns_to_queue_when_current_is_cancelled(missions, robots, two_robots):
+    """Текущую миссию amr1 отменили в пути — он встал между узлами. Его следующая возвращается в очередь
+    и достаётся amr2."""
+    amr1, amr2 = two_robots
+    current = drive_amr1_to_b(missions, robots, amr1)
+    _, created = missions.create(Missions.body(SIM_MAP, steps=[{"nodeId": "b"}]))
+    wait_next(missions, created["id"], amr1)
+    time.sleep(2)   # отъехал от a дальше 0,5 м: после отмены он не «на a», а между узлами
+
+    missions.cancel(current["id"])
+    wait_mission(missions, current["id"], {"CANCELED"}, timeout=15)
+
+    mission = wait_mission(missions, created["id"], {"COMPLETED", "FAILED", "CANCELED"})
+    assert mission["state"] == "COMPLETED", mission
+    assert mission["robotId"] == amr2
+
+
+def test_cancel_next_mission(missions, robots, two_robots):
+    """Следующую миссию отменили, пока amr1 заканчивал текущую: сразу CANCELED, в dispatch она не уходит;
+    текущая доезжает как ни в чём не бывало."""
+    amr1, _ = two_robots
+    current = drive_amr1_to_b(missions, robots, amr1)
+    _, created = missions.create(Missions.body(SIM_MAP, steps=[{"nodeId": "b"}]))
+    wait_next(missions, created["id"], amr1)
+
+    code, cancelled = missions.cancel(created["id"])
+    assert code == 202, cancelled
+    assert cancelled["state"] == "CANCELED"
+    assert cancelled["startedAt"] is None
+
+    assert wait_mission(missions, current["id"], {"COMPLETED", "FAILED", "CANCELED"})["state"] == "COMPLETED"
+    robot = wait_robot(robots, amr1, lambda r: r["availability"]["state"] == "IDLE", "IDLE")
+    assert robot["status"]["lastNodeId"] == "b"
+    assert missions.from_database(created["id"])[1]["startedAt"] is None   # так и не начиналась

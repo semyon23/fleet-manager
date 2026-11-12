@@ -39,11 +39,10 @@ int main() {
         MapStore maps{io_context, services, default_speed};
         MissionStore missions{io_context, services};
         AvailabilityTracker availability{io_context, services, maps, low_battery_percent};
-        MissionAssigner assigner{io_context, missions, availability, maps};
+
         MissionRunner runner{io_context, services, missions, maps};
-        assigner.on_assigned = [&](Mission& mission, const std::string& start_node) {
-            runner.start_mission(mission, start_node);
-        };
+        MissionAssigner assigner{io_context, missions, availability, maps, runner};
+
 
         missions.on_queue_change = [&] { assigner.wake(); };
         availability.on_idle = [&] { assigner.wake(); };
