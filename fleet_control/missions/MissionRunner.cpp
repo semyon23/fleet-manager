@@ -205,6 +205,7 @@ std::optional<fms1::Mission> MissionRunner::build(const Mission& mission, const 
             }
             ids.push_back(graph_node.id);
         }
+        std::vector<std::string> edge_ids;
         for (uint32_t edge_index : route->edges) {
             const GraphEdge& edge = graph->edges[edge_index];
             auto* route_edge = move->add_edges();
@@ -212,8 +213,10 @@ std::optional<fms1::Mission> MissionRunner::build(const Mission& mission, const 
             if (edge.max_speed) {
                 route_edge->set_maximum_speed(*edge.max_speed);
             }
+            edge_ids.push_back(edge.id);
         }
         plan.routes.push_back(std::move(ids));
+        plan.edges.push_back(std::move(edge_ids));
         plan.seconds.push_back(route->seconds);
         from = route->nodes.back();   // следующий шаг — оттуда, где закончился этот
     }
@@ -518,4 +521,46 @@ asio::awaitable<grpc::Status> MissionRunner::cancel(const std::string& mission_i
         co_return grpc::Status::OK;
     }
     co_return status;   // dispatch недоступен
+}
+
+// ==================================================================== c2: маршруты для UI
+
+std::vector<MissionRunner::RobotRoute> MissionRunner::routes(const std::string& map_id) {
+    std::vector<RobotRoute> result;
+    for (Mission* mission : missions_.active()) {
+        if (!map_id.empty() && mission->map_id != map_id) {
+            continue;
+        }
+        auto plan = plans_.find(mission->id);
+        if (plan == plans_.end()) {
+            continue;   // в очереди, следующая (c1b) или после перезапуска control — маршрута нет
+        }
+        const size_t current = static_cast<size_t>(mission->current_step.value_or(0));
+        if (current >= plan->second.routes.size()) {
+            continue;
+        }
+
+        // Пройденное отрезаем: маршрут — с последнего узла, где был робот. Ребро k идёт от узла k к k+1,
+        // поэтому рёбра режем по тому же индексу. Узла в маршруте нет (ещё не тронулся) — маршрут весь
+        const auto& nodes = plan->second.routes[current];
+        const auto& edges = plan->second.edges[current];
+        auto at = std::ranges::find(nodes, plan->second.last_node);
+        const size_t from = at == nodes.end() ? 0 : static_cast<size_t>(at - nodes.begin());
+
+        RobotRoute route;
+        route.robot_id = mission->robot_id;
+        route.map_id = mission->map_id;
+        route.mission_id = mission->id;
+        route.step_index = static_cast<int>(current);
+        route.nodes.assign(nodes.begin() + from, nodes.end());
+        route.edges.assign(edges.begin() + from, edges.end());
+        for (size_t i = current; i < mission->steps.size(); ++i) {
+            route.goals.push_back(mission->steps[i].node_id);
+        }
+        if (auto next = next_.find(mission->robot_id); next != next_.end()) {
+            route.next_mission_id = next->second.mission_id;
+        }
+        result.push_back(std::move(route));
+    }
+    return result;
 }

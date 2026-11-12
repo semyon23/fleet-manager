@@ -254,6 +254,12 @@ class Missions:
         """GET базы — то, что увидит UI."""
         return http("GET", f"{DATABASE_HTTP}/api/fms/missions/{quote(mission_id, safe='')}")
 
+    @staticmethod
+    def routes(map_id: str | None = None):
+        """GET /routes control (c2): маршруты роботов → (код, тело). map_id None — все карты."""
+        query = "" if map_id is None else f"?mapId={quote(map_id, safe='')}"
+        return http("GET", f"{CONTROL}/api/fms/routes{query}")
+
     def cleanup(self) -> None:
         for mission_id in self.ids:
             self.cancel(mission_id)   # 202 — была в очереди; 404 / 409 — не создана или уже завершена

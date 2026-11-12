@@ -49,12 +49,26 @@ public:
     // c1b. Миссия назначена роботу, который заканчивает другую: уйдёт в dispatch, когда та будет COMPLETED
     void set_next(Mission& mission, double remaining_seconds);
 
+    // c2. Маршруты роботов для UI (GET /routes): что осталось проехать по текущему шагу и цели шагов
+    struct RobotRoute {
+        std::string robot_id;
+        std::string map_id;
+        std::string mission_id;
+        int step_index = 0;
+        std::vector<std::string> nodes;   // released: от последнего пройденного узла до конца шага
+        std::vector<std::string> edges;   // рёбра между ними
+        std::vector<std::string> goals;   // узлы текущего и следующих шагов
+        std::string next_mission_id;      // "" — следующей миссии нет (c1b)
+    };
+    std::vector<RobotRoute> routes(const std::string& map_id);   // map_id "" — все карты
+
 private:
     using StreamRPC = agrpc::ClientRPC<&fms::dispatch::v1::FleetDispatch::Stub::PrepareAsyncStreamMissionStatus>;
 
     // Маршрут отправленной миссии
     struct Plan {
-        std::vector<std::vector<std::string>> routes;   // узлы маршрута каждого шага (nodeId) — и для UI, c2
+        std::vector<std::vector<std::string>> routes;   // узлы маршрута каждого шага (nodeId)
+        std::vector<std::vector<std::string>> edges;    // рёбра маршрута каждого шага (edgeId), для UI
         std::vector<double> seconds;                     // время каждого шага по графу
         std::string last_node;                           // где робот сейчас (из стрима)
     };

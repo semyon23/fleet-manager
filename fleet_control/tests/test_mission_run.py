@@ -300,3 +300,109 @@ def test_cancel_next_mission(missions, robots, two_robots):
     robot = wait_robot(robots, amr1, lambda r: r["availability"]["state"] == "IDLE", "IDLE")
     assert robot["status"]["lastNodeId"] == "b"
     assert missions.from_database(created["id"])[1]["startedAt"] is None   # так и не начиналась
+
+
+# ------------------------------------------------------------------ c2: маршруты для Live Map
+#
+# GET /routes control: у каждого робота с миссией — что ему осталось проехать по текущему шагу (released),
+# цели шагов (goals) и следующая миссия (c1b). Пройденные узлы отрезаются.
+
+A_TO_D = ["a", "b", "c", "d"]
+
+
+def robot_route(missions, robot_id: str) -> dict | None:
+    code, body = missions.routes(SIM_MAP)
+    assert code == 200, body
+    return next((route for route in body["items"] if route["robotId"] == robot_id), None)
+
+
+def wait_route(missions, robot_id: str, check, what: str, timeout: float = 20) -> dict | None:
+    deadline = time.monotonic() + timeout
+    route = None
+    while time.monotonic() < deadline:
+        route = robot_route(missions, robot_id)
+        if check(route):
+            return route
+        time.sleep(0.1)
+    raise TimeoutError(f"robot {robot_id}: no {what} in /routes after {timeout:.0f} s: {route}")
+
+
+def assert_path(released: dict, path: list[str]) -> None:
+    """released — конец пути path (начало уже проехали), рёбра — между соседними узлами (id "ab", "bc"...)."""
+    nodes = released["nodes"]
+    assert nodes and nodes == path[-len(nodes):], released
+    assert released["edges"] == [p + q for p, q in zip(nodes, nodes[1:])], released
+
+
+def test_route_while_driving(missions, two_robots):
+    """amr1 едет a → d (16 м): в /routes — его путь; проехал b — путь начинается с c; доехал — маршрута нет.
+    Фильтр по карте: чужая карта — пусто, без mapId — все."""
+    amr1, amr2 = two_robots
+    _, created = missions.create(Missions.body(SIM_MAP, requestedRobotId=amr1, steps=[{"nodeId": "d"}]))
+
+    route = wait_route(missions, amr1, lambda r: r is not None, "route")
+    assert route["mapId"] == SIM_MAP
+    assert route["missionId"] == created["id"]
+    assert route["stepIndex"] == 0
+    assert route["goals"] == ["d"]
+    assert route["planned"] == {"nodes": [], "edges": []}   # трафика ещё нет — разрешено всё сразу
+    assert route["nextMissionId"] is None
+    assert_path(route["released"], A_TO_D)
+    assert robot_route(missions, amr2) is None               # у amr2 миссии нет
+
+    assert missions.routes("test-ctl-no-such-map") == (200, {"items": []})
+    code, everything = missions.routes()
+    assert code == 200
+    assert any(r["robotId"] == amr1 for r in everything["items"])
+
+    passed_b = wait_route(missions, amr1, lambda r: r is not None and r["released"]["nodes"][0] == "c", "c first")
+    assert passed_b["released"] == {"nodes": ["c", "d"], "edges": ["cd"]}
+
+    wait_mission(missions, created["id"], {"COMPLETED"})
+    assert robot_route(missions, amr1) is None
+
+
+def test_route_of_second_step(missions, two_robots):
+    """Шаги: b с действием 2 с, потом a. Пока amr1 стоит на b — линии нет, цели b и a;
+    потом — шаг 1, путь b → a и одна цель a."""
+    amr1, _ = two_robots
+    _, created = missions.create(Missions.body(SIM_MAP, requestedRobotId=amr1,
+                                               steps=[{"nodeId": "b", "actions": [action(2)]}, {"nodeId": "a"}]))
+
+    first = wait_route(missions, amr1, lambda r: r is not None, "route")
+    assert first["stepIndex"] == 0
+    assert first["goals"] == ["b", "a"]
+    assert_path(first["released"], ["a", "b"])
+
+    on_b = wait_route(missions, amr1, lambda r: r is not None and r["released"]["nodes"] == ["b"], "standing on b")
+    assert on_b["stepIndex"] == 0
+    assert on_b["released"]["edges"] == []
+
+    back = wait_route(missions, amr1, lambda r: r is not None and r["stepIndex"] == 1, "step 1")
+    assert back["goals"] == ["a"]
+    assert_path(back["released"], ["b", "a"])
+
+    wait_mission(missions, created["id"], {"COMPLETED"})
+    assert robot_route(missions, amr1) is None
+
+
+def test_route_shows_next_mission(missions, robots, two_robots):
+    """amr1 заканчивает поездку a → b и уже получил следующую миссию: в его маршруте — nextMissionId,
+    своего маршрута у следующей нет. Текущая закончилась — маршрут amr1 уже по следующей."""
+    amr1, _ = two_robots
+    current = drive_amr1_to_b(missions, robots, amr1)
+    _, created = missions.create(Missions.body(SIM_MAP, steps=[{"nodeId": "b", "actions": [action(2)]}]))
+    wait_next(missions, created["id"], amr1)
+
+    route = robot_route(missions, amr1)
+    assert route["missionId"] == current["id"]
+    assert route["nextMissionId"] == created["id"]
+    _, body = missions.routes(SIM_MAP)
+    assert all(r["missionId"] != created["id"] for r in body["items"])
+
+    following = wait_route(missions, amr1, lambda r: r is not None and r["missionId"] == created["id"], "next mission")
+    assert following["nextMissionId"] is None
+    assert following["goals"] == ["b"]
+
+    wait_mission(missions, created["id"], {"COMPLETED"})
+    assert robot_route(missions, amr1) is None

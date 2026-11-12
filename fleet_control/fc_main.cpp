@@ -9,6 +9,7 @@
 #include "api/MapApi.hpp"
 #include "api/MissionApi.hpp"
 #include "api/RobotApi.hpp"
+#include "api/RouteApi.hpp"
 #include "assignment/MissionAssigner.hpp"
 #include "env_config.hpp"
 #include "fleet/FleetSync.hpp"
@@ -57,6 +58,7 @@ int main() {
         RobotApi robot_api{services, fleet_sync, availability, maps, router};
         MapApi map_api{services, maps, router};
         MissionApi mission_api{services, maps, missions, runner, router};
+        RouteApi route_api{runner, router};
         HttpServer http_server{endpoint_from(http_address), io_context, router};
 
         http_server.start();
