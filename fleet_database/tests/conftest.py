@@ -178,10 +178,20 @@ class Missions:
         self.ids.append(mission_id)
         return record
 
-    def save(self, created_ms: int | None = None, **fields) -> db.MissionRecord:
+    def save(self, created_ms: int | None = None, events=(), **fields) -> db.MissionRecord:
+        """SaveMission; events — события миссии (c3), пишутся с ней одной транзакцией."""
         record = self.record(created_ms, **fields)
-        self.control.SaveMission(db.SaveMissionRequest(mission=record))
+        self.control.SaveMission(db.SaveMissionRequest(mission=record, events=list(events)))
         return record
+
+    @staticmethod
+    def event(type: str, details: dict | str | None = None, at_ms: int | None = None,
+              robot_id: str = "") -> db.MissionEvent:
+        """MissionEvent; details — dict (в JSON) или строка как есть; at — по умолчанию сейчас."""
+        details_json = details if isinstance(details, str) else json.dumps(details or {})
+        event = db.MissionEvent(type=type, robot_id=robot_id, details_json=details_json)
+        event.at.FromMilliseconds(int(time.time() * 1000) if at_ms is None else at_ms)
+        return event
 
     def get(self, mission_id: str) -> db.MissionRecord:
         return self.control.GetMission(db.GetMissionRequest(mission_id=mission_id)).mission
@@ -249,7 +259,8 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://fms:fms@127.0.0.1:54
 @pytest.fixture(scope="session")
 def missions_cleanup():
     """В конце прогона — удалить тестовые миссии через psql. Иначе control при старте загрузит
-    незавершённые тестовые миссии как настоящие (ListActiveMissions)."""
+    незавершённые тестовые миссии как настоящие (ListActiveMissions). Их события (c3) удаляются вместе
+    с ними — ON DELETE CASCADE."""
     yield
     sql = "DELETE FROM missions WHERE mission_id LIKE 'test-mission-%'"
     try:

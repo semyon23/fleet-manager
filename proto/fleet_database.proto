@@ -288,8 +288,26 @@ message MissionRecord {
   google.protobuf.Timestamp updated_at = 8;
   optional google.protobuf.Timestamp finished_at = 9;   // только у завершённых
 }
+// Событие миссии (c3): что с ней было и когда — для истории в UI. Пишет control вместе с самой миссией,
+// одной транзакцией: «миссия FAILED, а события FAILED нет» не бывает. Только дописываются, не меняются.
+//
+// Как и у документа миссии, подробности — JSON, база их не разбирает, UI читает как есть:
+//   STATE  — {"state": "QUEUED", "reason": "...", "error": {...}, "next": true}  (reason/error/next — если есть)
+//   STEP   — {"stepIndex": 0, "state": "COMPLETED"}
+//   ACTION — {"stepIndex": 0, "actionId": "a-17", "actionType": "pick", "status": "FAILED"}
+message MissionEvent {
+  google.protobuf.Timestamp at = 1;   // когда control это увидел
+  string robot_id = 2;                // робот миссии в этот момент; пусто — не назначена
+  string type = 3;                    // STATE | STEP | ACTION
+  string details_json = 4;
+}
 
-message SaveMissionRequest { MissionRecord mission = 1; }
+// mission — новая версия документа; events — что с ней случилось с прошлой записи, по порядку.
+// Повтор после ошибки — с теми же событиями: они вставятся один раз, транзакция ведь откатилась.
+message SaveMissionRequest {
+  MissionRecord mission = 1;
+  repeated MissionEvent events = 2;
+}
 message SaveMissionResponse {}
 
 message GetMissionRequest { string mission_id = 1; }

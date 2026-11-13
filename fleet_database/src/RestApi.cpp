@@ -30,6 +30,23 @@ HttpResponse database_error(const HttpRequest& req, const std::exception& e) {
     constexpr int kDefaultLimit = 50;
     constexpr int kMaxLimit = 200;
 
+    constexpr int kMaxEvents = 1000;   // у миссии их десятки; больше — что-то пошло не так, страницы не нужны
+
+    // ?from= / ?to= — время ISO (RFC 3339): 2026-11-12T14:00:00Z, с долями и смещением тоже.
+    // Нет параметра — nullopt; не время — ошибка в details
+    std::optional<long long> time_param(const HttpRequest& req, const char* name, nlohmann::json& details) {
+        auto value = query_param(req, name);
+        if (!value || value->empty()) {
+            return std::nullopt;
+        }
+        google::protobuf::Timestamp time;
+        if (!TimeUtil::FromString(*value, &time)) {
+            details[name] = "must be ISO time, e.g. 2026-11-12T14:00:00Z";
+            return std::nullopt;
+        }
+        return TimeUtil::TimestampToMilliseconds(time);
+    }
+
     // Курсор — «<createdAt, мс>:<missionId>» последней миссии страницы. Для UI это просто строка
     std::string mission_cursor(const dbv1::MissionRecord& mission) {
         return std::to_string(TimeUtil::TimestampToMilliseconds(mission.created_at())) + ":" + mission.mission_id();
@@ -53,6 +70,9 @@ RestApi::RestApi(Database& database, ApiRouter& router) : database_(database) {
             [this](const HttpRequest& req, const PathParams&) { return list_missions(req); });
     router.add_route(http::verb::get, "/api/fms/missions/{id}",
         [this](const HttpRequest& req, const PathParams& params) { return get_mission(req, params.at("id")); });
+
+    router.add_route(http::verb::get, "/api/fms/missions/{id}/events",
+            [this](const HttpRequest& req, const PathParams& params) { return list_mission_events(req, params.at("id")); });
 }
 
 asio::awaitable<HttpResponse> RestApi::list_robots(const HttpRequest& req) {
@@ -166,6 +186,13 @@ asio::awaitable<HttpResponse> RestApi::list_missions(const HttpRequest& req) {
             details["before"] = "invalid cursor: pass nextCursor from the previous page";
         }
     }
+
+    filter.from_created_ms = time_param(req, "from", details);
+    filter.to_created_ms = time_param(req, "to", details);
+    if (filter.from_created_ms && filter.to_created_ms && *filter.from_created_ms >= *filter.to_created_ms) {
+        details["to"] = "must be later than from";
+    }
+
     if (!details.empty()) {
         nlohmann::json body{{"code", "INVALID_INPUT"}, {"message", "some query parameters are invalid"},
                             {"details", details}};
@@ -207,4 +234,33 @@ asio::awaitable<HttpResponse> RestApi::get_mission(const HttpRequest& req, std::
         co_return error_response(req, http::status::not_found, "NOT_FOUND", "mission " + mission_id + " not found");
     }
     co_return json_response(req, http::status::ok, mission->body_json());
+}
+
+// События миссии (c3) для карточки в UI → {items} по порядку. Нет миссии — 404; есть, но событий нет — пусто
+asio::awaitable<HttpResponse> RestApi::list_mission_events(const HttpRequest& req, std::string mission_id) {
+    bool exists = false;
+    std::vector<std::string> events;
+    try {
+        co_await database_.run([&](pqxx::work& tx) {
+            exists = select_mission(tx, mission_id).has_value();
+            if (exists) {
+                events = select_mission_events(tx, mission_id, kMaxEvents);
+            }
+        });
+    } catch (const std::exception& e) {
+        co_return database_error(req, e);
+    }
+    if (!exists) {
+        co_return error_response(req, http::status::not_found, "NOT_FOUND", "mission " + mission_id + " not found");
+    }
+
+    std::string body = "{\"items\":[";
+    for (size_t i = 0; i < events.size(); ++i) {
+        if (i > 0) {
+            body += ',';
+        }
+        body += events[i];   // объект события собрала база
+    }
+    body += "]}";
+    co_return json_response(req, http::status::ok, body);
 }

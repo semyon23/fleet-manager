@@ -1,4 +1,5 @@
 """Миссии (M-3): ControlStorage — то, что пишет control, и REST для UI (docs/API_CONTRACT.md, раздел 7.2).
+События миссий (c3): пишутся вместе с миссией в SaveMission, читаются через GET /missions/{id}/events.
 
 Миссии тесты пишут через gRPC вместо control, читают — через gRPC и REST.
 Чтобы чужие миссии в таблице не мешали спискам REST, у каждого теста своя карта (mapId) — список
@@ -8,13 +9,15 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
+from datetime import datetime, timezone
 
 import grpc
 import pytest
 
 import fleet_database_pb2 as db
-from conftest import error_code, unique
+from conftest import DATABASE_URL, Missions, error_code, unique
 from test_rest import get
 
 ACTIVE = ["QUEUED", "ASSIGNED", "RUNNING", "PAUSED", "CANCELING"]
@@ -264,6 +267,10 @@ def test_rest_default_and_max_limit(missions):
     ("limit=10x", "limit"),
     ("before=abc", "before"),
     ("before=x:m-1", "before"),
+    ("from=yesterday", "from"),
+    ("to=2026-13-01T00:00:00Z", "to"),
+    ("from=2026-11-02T00:00:00Z&to=2026-11-01T00:00:00Z", "to"),   # to раньше from
+    ("from=2026-11-01T00:00:00Z&to=2026-11-01T00:00:00Z", "to"),   # пустой полуинтервал
 ])
 def test_rest_invalid_query(query, field):
     status, error = get(f"/api/fms/missions?{query}")
@@ -273,6 +280,189 @@ def test_rest_invalid_query(query, field):
 
 
 def test_rest_all_query_errors_at_once():
-    status, error = get("/api/fms/missions?state=DONE&limit=0&before=abc")
+    status, error = get("/api/fms/missions?state=DONE&limit=0&before=abc&from=x&to=y")
     assert status == 400
-    assert set(error["details"]) == {"state", "limit", "before"}
+    assert set(error["details"]) == {"state", "limit", "before", "from", "to"}
+
+
+# ------------------------------------------------------------------ REST: период ?from=&to= (c3)
+
+T = 1_790_000_000_000   # 2026-09-21T14:13:20.000Z
+
+
+def iso(ms: int) -> str:
+    """Время контракта: ISO UTC с миллисекундами."""
+    return datetime.fromtimestamp(ms // 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + f".{ms % 1000:03d}Z"
+
+
+def test_rest_filter_by_period(missions):
+    """[from, to): from входит, to — нет; новые сверху, как без фильтра."""
+    map_id = unique("test-map")
+    at = {offset: missions.save(created_ms=T + offset, map_id=map_id) for offset in (-1000, 0, 1000, 2000)}
+
+    ids, _ = listing(f"mapId={map_id}&from={iso(T)}&to={iso(T + 2000)}")
+    assert ids == [at[1000].mission_id, at[0].mission_id]
+    ids, _ = listing(f"mapId={map_id}&from={iso(T + 1000)}")
+    assert ids == [at[2000].mission_id, at[1000].mission_id]
+    ids, _ = listing(f"mapId={map_id}&to={iso(T)}")
+    assert ids == [at[-1000].mission_id]
+
+
+def test_rest_period_with_offset_and_fraction(missions):
+    """Время с долями секунды и смещением: 17:13:20.500+03:00 — это T + 500 мс. «+» в запросе — %2B."""
+    map_id = unique("test-map")
+    missions.save(created_ms=T + 499, map_id=map_id)
+    later = missions.save(created_ms=T + 500, map_id=map_id)
+
+    ids, _ = listing(f"mapId={map_id}&from=2026-09-21T17:13:20.500%2B03:00")
+    assert ids == [later.mission_id]
+
+
+def test_rest_pages_inside_period(missions):
+    """Курсор и период вместе: страницы проходят только миссии периода."""
+    map_id = unique("test-map")
+    inside = [missions.save(created_ms=T + i * 100, map_id=map_id) for i in range(5)]
+    missions.save(created_ms=T - 100, map_id=map_id)
+    missions.save(created_ms=T + 500, map_id=map_id)
+
+    pages = all_pages(f"mapId={map_id}&from={iso(T)}&to={iso(T + 500)}&limit=2")
+    assert [len(page) for page in pages] == [2, 2, 1]
+    assert sum(pages, []) == [m.mission_id for m in reversed(inside)]
+
+
+# ------------------------------------------------------------------ события миссии (c3)
+
+def events_of(mission_id: str) -> list[dict]:
+    status, page = get(f"/api/fms/missions/{mission_id}/events")
+    assert status == 200, page
+    assert set(page) == {"items"}
+    return page["items"]
+
+
+def test_events_saved_with_mission(missions):
+    """Событие в REST — поля строки (id, missionId, at, robotId, type) + details как есть."""
+    saved = missions.save(events=[
+        Missions.event("STATE", {"state": "QUEUED"}, at_ms=T + 123),
+        Missions.event("STATE", {"state": "ASSIGNED", "next": True}, at_ms=T + 456, robot_id="amr-01"),
+    ])
+
+    first, second = events_of(saved.mission_id)
+    assert isinstance(first["id"], int) and first["id"] < second["id"]
+    assert first == {"id": first["id"], "missionId": saved.mission_id, "at": "2026-09-21T14:13:20.123Z",
+                     "robotId": None, "type": "STATE", "state": "QUEUED"}
+    assert second == {"id": second["id"], "missionId": saved.mission_id, "at": "2026-09-21T14:13:20.456Z",
+                      "robotId": "amr-01", "type": "STATE", "state": "ASSIGNED", "next": True}
+
+
+def test_events_accumulate_in_order(missions):
+    """Каждая запись миссии дописывает свои события; порядок — порядок записи (id), а не время at."""
+    saved = missions.save(events=[Missions.event("STATE", {"state": "QUEUED"}, at_ms=T + 5000)])
+    missions.save(mission_id=saved.mission_id, state="RUNNING", robot_id="amr-01", events=[
+        Missions.event("STATE", {"state": "RUNNING"}, at_ms=T, robot_id="amr-01"),
+        Missions.event("STEP", {"stepIndex": 0, "state": "RUNNING"}, at_ms=T, robot_id="amr-01"),
+    ])
+    missions.save(mission_id=saved.mission_id, state="RUNNING", robot_id="amr-01")   # без событий
+
+    events = events_of(saved.mission_id)
+    assert [(e["type"], e["state"]) for e in events] == [("STATE", "QUEUED"), ("STATE", "RUNNING"),
+                                                         ("STEP", "RUNNING")]
+    assert [e["id"] for e in events] == sorted(e["id"] for e in events)
+
+
+def test_event_kinds_keep_details(missions):
+    """STEP и ACTION, вложенные объекты (error) — как прислал control."""
+    error = {"code": "ACTION_FAILED", "message": "gripper jammed"}
+    saved = missions.save(events=[
+        Missions.event("STEP", {"stepIndex": 1, "state": "COMPLETED"}),
+        Missions.event("ACTION", {"stepIndex": 1, "actionId": "a-17", "actionType": "pick", "status": "FAILED"}),
+        Missions.event("STATE", {"state": "FAILED", "error": error}),
+    ])
+
+    step, action, failed = events_of(saved.mission_id)
+    assert (step["type"], step["stepIndex"], step["state"]) == ("STEP", 1, "COMPLETED")
+    assert (action["type"], action["actionId"], action["actionType"], action["status"]) == \
+        ("ACTION", "a-17", "pick", "FAILED")
+    assert failed["error"] == error
+
+
+def test_row_fields_win_over_details(missions):
+    """В details не подменить id, missionId, at, robotId и type события."""
+    saved = missions.save(events=[Missions.event(
+        "STATE", {"state": "QUEUED", "id": "fake", "missionId": "other", "at": "never", "robotId": "x", "type": "Y"},
+        at_ms=T)])
+    event, = events_of(saved.mission_id)
+    assert isinstance(event["id"], int)
+    assert (event["missionId"], event["at"], event["robotId"], event["type"]) == \
+        (saved.mission_id, iso(T), None, "STATE")
+
+
+def test_event_without_details(missions):
+    saved = missions.save(events=[Missions.event("STATE", "", at_ms=T)])
+    event, = events_of(saved.mission_id)
+    assert set(event) == {"id", "missionId", "at", "robotId", "type"}
+
+
+def test_mission_without_events(missions):
+    assert events_of(missions.save().mission_id) == []
+
+
+def test_events_of_unknown_mission():
+    status, error = get(f"/api/fms/missions/{unique('test-mission')}/events")
+    assert status == 404
+    assert error["code"] == "NOT_FOUND"
+
+
+def no_at() -> db.MissionEvent:
+    event = Missions.event("STATE", {"state": "QUEUED"})
+    event.ClearField("at")
+    return event
+
+
+@pytest.mark.parametrize("event", [
+    Missions.event("DONE", {"state": "QUEUED"}),   # неизвестный тип
+    Missions.event("", {}),
+    no_at(),
+    Missions.event("STATE", "[1, 2]"),             # не объект — склеился бы с полями строки в массив
+    Missions.event("STATE", "\"text\""),
+    Missions.event("STATE", "{not json"),
+], ids=["unknown type", "empty type", "no at", "array", "string", "not json"])
+def test_invalid_event_saves_nothing(missions, event):
+    """Ошибка в событии — INVALID_ARGUMENT, и не записаны ни события, ни сама миссия."""
+    good = Missions.event("STATE", {"state": "QUEUED"})
+    record = missions.record()
+    request = db.SaveMissionRequest(mission=record, events=[good, event])
+    assert error_code(missions.control.SaveMission, request) == grpc.StatusCode.INVALID_ARGUMENT
+    assert error_code(missions.control.GetMission, db.GetMissionRequest(mission_id=record.mission_id)) == \
+        grpc.StatusCode.NOT_FOUND
+
+
+def test_failed_save_writes_no_events(missions):
+    """Миссия не записалась (CHECK на state) — её события тоже: одна транзакция."""
+    saved = missions.save(events=[Missions.event("STATE", {"state": "QUEUED"})])
+    bad = missions.record(mission_id=saved.mission_id, state="DONE")
+    request = db.SaveMissionRequest(mission=bad, events=[Missions.event("STATE", {"state": "DONE"})])
+    assert error_code(missions.control.SaveMission, request) == grpc.StatusCode.INVALID_ARGUMENT
+
+    assert [e["state"] for e in events_of(saved.mission_id)] == ["QUEUED"]
+    assert missions.get(saved.mission_id).state == "QUEUED"
+
+
+def psql(sql: str) -> str:
+    try:
+        result = subprocess.run(["psql", DATABASE_URL, "-tAc", sql], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        pytest.skip(f"psql is not available: {e}")
+    if result.returncode != 0:
+        pytest.skip(f"psql failed: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def test_events_deleted_with_mission(missions):
+    """Удаление миссии (очистка тестов, позже — по сроку хранения) уносит её события: ON DELETE CASCADE."""
+    saved = missions.save(events=[Missions.event("STATE", {"state": "QUEUED"}),
+                                  Missions.event("STATE", {"state": "CANCELED"})])
+    count = f"SELECT count(*) FROM mission_events WHERE mission_id = '{saved.mission_id}'"
+    assert psql(count) == "2"
+
+    psql(f"DELETE FROM missions WHERE mission_id = '{saved.mission_id}'")
+    assert psql(count) == "0"

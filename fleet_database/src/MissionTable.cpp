@@ -57,6 +57,21 @@ void save_mission(pqxx::work& tx, const dbv1::MissionRecord& mission) {
                          TimeUtil::TimestampToMilliseconds(mission.updated_at()), finished_at});
 }
 
+void insert_mission_events(pqxx::work& tx, const std::string& mission_id,
+                           const google::protobuf::RepeatedPtrField<dbv1::MissionEvent>& events) {
+    // Событий за одну запись — единицы, вставляем по одному
+    for (const auto& event : events) {
+        std::optional<std::string> robot_id;
+        if (!event.robot_id().empty()) {
+            robot_id = event.robot_id();
+        }
+        tx.exec("INSERT INTO mission_events (mission_id, at, robot_id, type, details) "
+                "VALUES ($1, to_timestamp($2::bigint / 1000.0), $3, $4, $5::jsonb)",
+                pqxx::params{mission_id, TimeUtil::TimestampToMilliseconds(event.at()), robot_id, event.type(),
+                             event.details_json().empty() ? std::string("{}") : event.details_json()});
+    }
+}
+
 std::optional<dbv1::MissionRecord> select_mission(pqxx::work& tx, const std::string& mission_id) {
     auto rows = tx.exec(std::string("SELECT ") + kColumns + " FROM missions WHERE mission_id = $1",
                         pqxx::params{mission_id});
@@ -79,7 +94,8 @@ std::vector<dbv1::MissionRecord> select_active_missions(pqxx::work& tx) {
 
 std::vector<dbv1::MissionRecord> select_missions(pqxx::work& tx, const MissionFilter& filter) {
     // Один запрос на все сочетания фильтров: пустой фильтр отключает своё условие.
-    // Курсор — сравнение пары, как в индексе missions_by_created (created_at DESC, mission_id DESC)
+    // Курсор — сравнение пары, как в индексе missions_by_created (created_at DESC, mission_id DESC).
+    // from/to — полуинтервал [from, to): соседние периоды не пересекаются
     std::vector<dbv1::MissionRecord> missions;
     for (const auto& row : tx.exec(
              std::string("SELECT ") + kColumns + " FROM missions "
@@ -87,10 +103,29 @@ std::vector<dbv1::MissionRecord> select_missions(pqxx::work& tx, const MissionFi
              "AND ($2 = '' OR robot_id = $2) "
              "AND ($3 = '' OR map_id = $3) "
              "AND ($4::bigint IS NULL OR (created_at, mission_id) < (to_timestamp($4::bigint / 1000.0), $5)) "
+             "AND ($7::bigint IS NULL OR created_at >= to_timestamp($7::bigint / 1000.0)) "
+             "AND ($8::bigint IS NULL OR created_at < to_timestamp($8::bigint / 1000.0)) "
              "ORDER BY created_at DESC, mission_id DESC LIMIT $6",
              pqxx::params{filter.states, filter.robot_id, filter.map_id, filter.before_created_ms,
-                          filter.before_mission_id, filter.limit})) {
+                          filter.before_mission_id, filter.limit, filter.from_created_ms, filter.to_created_ms})) {
         missions.push_back(row_to_mission(row));
                           }
     return missions;
+}
+std::vector<std::string> select_mission_events(pqxx::work& tx, const std::string& mission_id, int limit) {
+    // details || поля строки: при совпадении ключей побеждают поля строки — id, время и тип не подменить.
+    // Время — ISO UTC с миллисекундами, как все времена контракта
+    std::vector<std::string> events;
+    for (const auto& row : tx.exec(
+             R"(SELECT (details || jsonb_build_object(
+                    'id', id,
+                    'missionId', mission_id,
+                    'at', to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                    'robotId', robot_id,
+                    'type', type))::text
+                FROM mission_events WHERE mission_id = $1 ORDER BY id LIMIT $2)",
+             pqxx::params{mission_id, limit})) {
+        events.push_back(row[0].as<std::string>());
+             }
+    return events;
 }

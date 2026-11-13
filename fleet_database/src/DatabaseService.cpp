@@ -4,6 +4,7 @@
 #include "../include/MissionTable.hpp"
 #include "spdlog/spdlog.h"
 #include <google/protobuf/util/time_util.h>
+#include <nlohmann/json.hpp>
 using Registry = dbv1::RobotRegistry::AsyncService;
 using Storage = dbv1::DispatchStorage::AsyncService;
 
@@ -62,6 +63,20 @@ grpc::Status database_error(const std::exception& e) {
     return {grpc::StatusCode::INTERNAL, "database error"};
 }
 
+// Событие миссии (c3): пусто — всё верно, иначе что не так. Ошибка здесь — ошибка в control
+std::string event_error(const dbv1::MissionEvent& event) {
+    if (event.type() != "STATE" && event.type() != "STEP" && event.type() != "ACTION") {
+        return "unknown type '" + event.type() + "'";
+    }
+    if (!event.has_at()) {
+        return "at is required";
+    }
+    // details склеиваются с полями строки (||) — должен быть объект, иначе получится массив
+    if (!event.details_json().empty() && !nlohmann::json::parse(event.details_json(), nullptr, false).is_object()) {
+        return "details_json must be a JSON object";
+    }
+    return "";
+}
 
 grpc::Status unimplemented(const char* name) {
     return {grpc::StatusCode::UNIMPLEMENTED, std::string(name) + ": not implemented yet"};
@@ -558,9 +573,19 @@ asio::awaitable<grpc::Status> DatabaseService::save_mission(const dbv1::SaveMiss
         !mission.has_created_at() || !mission.has_updated_at()) {
         co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT,
                                "mission_id, map_id, body_json, created_at and updated_at are required"};
+        }
+    for (int i = 0; i < request.events_size(); ++i) {
+        if (std::string error = event_error(request.events(i)); !error.empty()) {
+            co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT,
+                                   "mission " + mission.mission_id() + ": event " + std::to_string(i) + ": " + error};
+        }
     }
     try {
-        co_await database_.run([&](pqxx::work& tx) { ::save_mission(tx, mission); });
+        // Одна транзакция: миссия, потом её события (внешний ключ). Ошибка — ни того, ни другого
+        co_await database_.run([&](pqxx::work& tx) {
+            ::save_mission(tx, mission);
+            insert_mission_events(tx, mission.mission_id(), request.events());
+        });
     } catch (const pqxx::check_violation&) {
         // CHECK в таблице: ошибка в control, а не в данных оператора
         co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT,
