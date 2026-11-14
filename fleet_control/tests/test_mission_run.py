@@ -406,3 +406,76 @@ def test_route_shows_next_mission(missions, robots, two_robots):
 
     wait_mission(missions, created["id"], {"COMPLETED"})
     assert robot_route(missions, amr1) is None
+
+
+
+# ------------------------------------------------------------------ c3: история миссии
+#
+# События пишутся вместе с документом миссии, одной транзакцией: когда в базе миссия COMPLETED,
+# все её события до COMPLETED уже там. Сколько промежуточных статусов действия увидит dispatch, зависит
+# от того, как часто робот шлёт state, — поэтому статусы действий проверяем по последнему, а не все.
+
+def test_events_of_completed_mission(missions, two_robots):
+    """Миссия на b с действием: QUEUED → ASSIGNED (робот и почему он) → RUNNING → шаг → действие → шаг → COMPLETED."""
+    amr1, _ = two_robots
+    _, created = missions.create(Missions.body(SIM_MAP, steps=[{"nodeId": "b", "actions": [action(1)]}]))
+    wait_mission(missions, created["id"], {"COMPLETED"})
+
+    events = Missions.events(created["id"])
+    lines = Missions.brief(events)
+    assert [line for line in lines if line.startswith("STATE")] == \
+        ["STATE QUEUED", "STATE ASSIGNED", "STATE RUNNING", "STATE COMPLETED"]
+    assert [line for line in lines if line.startswith("STEP")] == ["STEP 0 RUNNING", "STEP 0 COMPLETED"]
+    actions = [line for line in lines if line.startswith("ACTION")]
+    assert actions and actions[-1] == "ACTION FINISHED", lines
+
+    # Порядок — как было: шаг начался после миссии, действие закончилось до шага, шаг — до миссии
+    assert lines.index("STATE RUNNING") < lines.index("STEP 0 RUNNING") < lines.index("ACTION FINISHED") \
+        < lines.index("STEP 0 COMPLETED") < lines.index("STATE COMPLETED") == len(lines) - 1
+
+    assigned = events[lines.index("STATE ASSIGNED")]
+    assert assigned["robotId"] == amr1
+    assert assigned["reason"].endswith("s to the first step"), assigned
+    assert events[0]["robotId"] is None                                  # QUEUED — ещё ничей
+    assert all(event["robotId"] == amr1 for event in events[1:])
+    assert [event["id"] for event in events] == sorted(event["id"] for event in events)
+    assert [event["at"] for event in events] == sorted(event["at"] for event in events)
+    action_event = next(event for event in events if event["type"] == "ACTION")
+    assert (action_event["stepIndex"], action_event["actionType"]) == (0, "simulatedAction")
+    assert action_event["actionId"]
+
+
+def test_events_of_cancelled_running_mission(missions, two_robots):
+    """Отмена во время действия: CANCELING с причиной, потом CANCELED — когда робот подтвердил."""
+    amr1, _ = two_robots
+    _, created = missions.create(Missions.body(SIM_MAP, requestedRobotId=amr1,
+                                               steps=[{"nodeId": "a", "actions": [action(30)]}]))
+    wait_mission(missions, created["id"], {"RUNNING"})
+    missions.cancel(created["id"])
+    wait_mission(missions, created["id"], {"CANCELED"}, timeout=15)
+
+    events = Missions.events(created["id"])
+    states = [event for event in events if event["type"] == "STATE"]
+    assert [event["state"] for event in states][-2:] == ["CANCELING", "CANCELED"]
+    assert states[-2]["reason"] == "canceled by operator"
+    assert Missions.brief(events)[-1] == "STATE CANCELED"
+
+
+def test_events_of_next_mission_returned_to_queue(missions, robots, two_robots):
+    """c1b: следующая у amr1 — ASSIGNED «after its current mission»; его текущую отменили — QUEUED с причиной
+    (робот события — amr1, от которого она ушла); потом её берёт amr2 и выполняет."""
+    amr1, amr2 = two_robots
+    current = drive_amr1_to_b(missions, robots, amr1)
+    _, created = missions.create(Missions.body(SIM_MAP, steps=[{"nodeId": "b"}]))
+    wait_next(missions, created["id"], amr1)
+    time.sleep(2)   # отъехал от a дальше 0,5 м: после отмены он не «на a», а между узлами
+
+    missions.cancel(current["id"])
+    wait_mission(missions, created["id"], {"COMPLETED"})
+
+    states = [event for event in Missions.events(created["id"]) if event["type"] == "STATE"]
+    assert [event["state"] for event in states] == \
+        ["QUEUED", "ASSIGNED", "QUEUED", "ASSIGNED", "RUNNING", "COMPLETED"]
+    assert (states[1]["robotId"], states[1]["reason"].startswith("after its current mission")) == (amr1, True)
+    assert (states[2]["robotId"], states[2]["reason"]) == (amr1, "the current mission of the robot did not complete")
+    assert states[3]["robotId"] == amr2

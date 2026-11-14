@@ -175,7 +175,7 @@ void MissionAssigner::assign() {
             spdlog::info("[assigner] mission {} → robot {} after its current mission ({:.1f} s to the first step)",
                          mission->id, mission->robot_id, best_soon_time);
             soon.erase(soon.begin() + static_cast<std::ptrdiff_t>(chosen));
-            missions_.changed(*mission);
+            missions_.changed(*mission, std::format("after its current mission, {:.1f} s to the first step", best_soon_time));   // строка 178
             runner_.set_next(*mission, remaining);
         } else {
             const size_t chosen = free_candidates[best_free];
@@ -184,7 +184,7 @@ void MissionAssigner::assign() {
                          mission->robot_id, best_free_time);
             const std::string start_node = free[chosen].last_node_id;   // до erase: потом free[chosen] — другой робот
             free.erase(free.begin() + static_cast<std::ptrdiff_t>(chosen));
-            missions_.changed(*mission);
+            missions_.changed(*mission, std::format("{:.1f} s to the first step", best_free_time));   // строка 187
             runner_.start_mission(*mission, start_node);
         }
     }

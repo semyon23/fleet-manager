@@ -30,6 +30,17 @@ dbv1::MissionRecord record_of(const Mission& mission) {
     return record;
 }
 
+void add_events(std::vector<dbv1::MissionEvent> &out, const std::vector<MissionEvent> &events, int64_t at_ms) {
+    for (const auto &event: events) {
+        dbv1::MissionEvent &record = out.emplace_back();
+        *record.mutable_at() = TimeUtil::MillisecondsToTimestamp(at_ms);
+        record.set_robot_id(event.robot_id);
+        record.set_type(event.type);
+        record.set_details_json(event.details.dump());
+    }
+}
+
+
 void log_failure(std::exception_ptr error) {
     if (!error) return;
     try {
@@ -61,17 +72,24 @@ asio::awaitable<grpc::Status> MissionStore::create(Mission mission) {
     const std::string id = mission.id;
     dbv1::SaveMissionRequest request;
     *request.mutable_mission() = record_of(mission);
+    std::vector<dbv1::MissionEvent> events;
+    add_events(events, mission_events(nullptr, mission, ""), mission.created_at_ms);
+    for (auto& event : events) {
+        *request.add_events() = std::move(event);
+    }
 
     // Сначала в память: повторный POST с тем же id, пока мы ждём базу, её увидит
     auto [it, inserted] = active_.emplace(id, std::move(mission));
     if (!inserted) {
         co_return grpc::Status{grpc::StatusCode::ALREADY_EXISTS, "mission " + id + " already exists"};
     }
+    last_.emplace(id, it->second);
 
     dbv1::SaveMissionResponse response;
     grpc::Status status = co_await services_.call<&Control::PrepareAsyncSaveMission>(*services_.control, request, response);
     if (!status.ok()) {
         active_.erase(id);
+        last_.erase(id);
         spdlog::warn("[mission_store] mission {} not saved: {}", id, status.error_message());
         co_return status;
     }
@@ -86,7 +104,7 @@ asio::awaitable<std::pair<grpc::Status, std::optional<Mission>>> MissionStore::g
     }
     // Только что завершилась и ещё не записана — в базе пока старая версия, новая лежит в очереди
     if (auto it = pending_.find(id); it != pending_.end()) {
-        co_return std::pair{grpc::Status::OK, std::optional<Mission>(mission_from_json(nlohmann::json::parse(it->second.body_json())))};
+        co_return std::pair{grpc::Status::OK, std::optional<Mission>(mission_from_json(nlohmann::json::parse(it->second.record.body_json())))};
     }
 
     dbv1::GetMissionRequest request;
@@ -126,15 +144,24 @@ std::vector<Mission*> MissionStore::queue() {
     return queued;
 }
 
-nlohmann::json MissionStore::changed(Mission& mission) {
+nlohmann::json MissionStore::changed(Mission& mission, const std::string& why) {
     mission.updated_at_ms = now_ms();
     nlohmann::json document = mission_json(mission);
-    pending_[mission.id] = record_of(mission);   // за время записи поменялась ещё раз — уйдёт последняя версия
+
+    auto last = last_.find(mission.id);
+    Pending& pending = pending_[mission.id];
+    pending.record = record_of(mission);   // за время записи поменялась ещё раз — уйдёт последняя версия,
+    add_events(pending.events,             // а события копятся все, по порядку
+               mission_events(last == last_.end() ? nullptr : &last->second, mission, why), mission.updated_at_ms);
     wakeup_.try_send(boost::system::error_code{});
+
     if (mission.finished()) {
         const std::string id = mission.id;   // mission — ссылка в active_: после erase её нет
+        last_.erase(id);
         active_.erase(id);
         if (on_queue_change) on_queue_change();
+    } else {
+        last_.insert_or_assign(mission.id, mission);
     }
     return document;
 }
@@ -152,6 +179,7 @@ asio::awaitable<void> MissionStore::load() {
             for (const auto& record : response.missions()) {
                 try {
                     Mission mission = mission_from_json(nlohmann::json::parse(record.body_json()));
+                    last_.emplace(mission.id, mission);
                     active_.emplace(mission.id, std::move(mission));
                 } catch (const std::exception& e) {
                     // Документ пишет только control — кривой значит ошибку в коде или ручную правку базы
@@ -185,19 +213,26 @@ asio::awaitable<void> MissionStore::write_loop() {
         auto batch = std::move(pending_);
         pending_.clear();
         bool retry = false;
-        for (auto& [id, record] : batch) {
+        for (auto& [id, item] : batch) {
             dbv1::SaveMissionRequest request;
-            *request.mutable_mission() = record;
+            *request.mutable_mission() = item.record;
+            for (const auto& event : item.events) {
+                *request.add_events() = event;
+            }
             dbv1::SaveMissionResponse response;
             grpc::Status status =
                 co_await services_.call<&Control::PrepareAsyncSaveMission>(*services_.control, request, response);
             if (status.error_code() == grpc::StatusCode::UNAVAILABLE ||
                 status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
-                pending_.try_emplace(id, std::move(record));   // за это время могла прийти новее — она важнее
+                // За это время могла прийти новее: документ — её, а наши события случились раньше её событий
+                auto [it, inserted] = pending_.try_emplace(id, std::move(item));
+                if (!inserted) {
+                    it->second.events.insert(it->second.events.begin(), item.events.begin(), item.events.end());
+                }
                 retry = true;
-            } else if (!status.ok()) {
-                spdlog::error("[mission_store] mission {} not saved: {}", id, status.error_message());
-            }
+                } else if (!status.ok()) {
+                    spdlog::error("[mission_store] mission {} not saved: {}", id, status.error_message());
+                }
         }
 
         if (retry && !stopped_) {

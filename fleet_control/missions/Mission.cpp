@@ -146,3 +146,70 @@ Mission mission_from_json(const json& doc) {
     mission.updated_at_ms = parse_iso(doc.at("updatedAt").get<std::string>());
     return mission;
 }
+
+std::vector<MissionEvent> mission_events(const Mission* before, const Mission& after, const std::string& why) {
+    // Робот события — назначенный; сняли (вернулась в очередь) — тот, от которого она ушла
+    const std::string robot = after.robot_id.empty() && before ? before->robot_id : after.robot_id;
+
+    std::vector<MissionEvent> state;
+    if (!before || before->state != after.state) {
+        json details = {{"state", after.state}};
+        if (!why.empty()) {
+            details["reason"] = why;
+        }
+        if (after.state == "FAILED" && after.error) {
+            details["error"] = {{"code", after.error->code}, {"message", after.error->message}};
+        }
+        state.push_back({"STATE", robot, details});
+    }
+
+    std::vector<MissionEvent> steps;
+    for (size_t i = 0; i < after.step_states.size(); ++i) {
+        const StepState& now = after.step_states[i];
+        const StepState* was = before && i < before->step_states.size() ? &before->step_states[i] : nullptr;
+        const int index = static_cast<int>(i);
+
+        // Действия: новый статус — событие. WAITING — ещё не начиналось, не событие
+        std::vector<MissionEvent> actions;
+        for (const json& action : now.actions) {
+            const std::string status = action.value("status", "");
+            const std::string id = action.value("actionId", "");
+            if (status.empty() || status == "WAITING") {
+                continue;
+            }
+            bool same = false;
+            if (was) {
+                for (const json& old : was->actions) {
+                    if (old.value("actionId", "") == id && old.value("status", "") == status) {
+                        same = true;
+                    }
+                }
+            }
+            if (!same) {
+                actions.push_back({"ACTION", robot, {{"stepIndex", index}, {"actionId", id},
+                                                     {"actionType", action.value("actionType", "")},
+                                                     {"status", status}}});
+            }
+        }
+
+        // Шаг: новое состояние — событие. Не начинался и отменён вместе с миссией — не событие: это видно по миссии
+        const std::string old_state = was ? was->state : "PENDING";
+        const bool step_changed = old_state != now.state && !(old_state == "PENDING" && now.state == "CANCELED");
+        const MissionEvent step{"STEP", robot, {{"stepIndex", index}, {"state", now.state}}};
+        if (step_changed && now.state == "RUNNING") {
+            steps.push_back(step);   // шаг начался — до его действий
+        }
+        steps.insert(steps.end(), actions.begin(), actions.end());
+        if (step_changed && now.state != "RUNNING") {
+            steps.push_back(step);   // шаг закончился — после его действий
+        }
+    }
+
+    // Миссия закончилась — её событие последним, иначе (началась, идёт) — первым
+    if (after.finished()) {
+        steps.insert(steps.end(), state.begin(), state.end());
+        return steps;
+    }
+    state.insert(state.end(), steps.begin(), steps.end());
+    return state;
+}

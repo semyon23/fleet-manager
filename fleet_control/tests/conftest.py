@@ -255,6 +255,27 @@ class Missions:
         return http("GET", f"{DATABASE_HTTP}/api/fms/missions/{quote(mission_id, safe='')}")
 
     @staticmethod
+    def events(mission_id: str) -> list[dict]:
+        """GET /missions/{id}/events базы (c3): история миссии по порядку. Пишутся вместе с документом миссии,
+        поэтому что видно в документе базы — то уже есть и в событиях."""
+        code, body = http("GET", f"{DATABASE_HTTP}/api/fms/missions/{quote(mission_id, safe='')}/events")
+        assert code == 200, body
+        return body["items"]
+
+    @staticmethod
+    def brief(events: list[dict]) -> list[str]:
+        """События коротко: "STATE QUEUED", "STEP 0 RUNNING", "ACTION FINISHED" — сравнивать порядок."""
+        lines = []
+        for event in events:
+            if event["type"] == "STATE":
+                lines.append(f"STATE {event['state']}")
+            elif event["type"] == "STEP":
+                lines.append(f"STEP {event['stepIndex']} {event['state']}")
+            else:
+                lines.append(f"ACTION {event['status']}")
+        return lines
+
+    @staticmethod
     def routes(map_id: str | None = None):
         """GET /routes control (c2): маршруты роботов → (код, тело). map_id None — все карты."""
         query = "" if map_id is None else f"?mapId={quote(map_id, safe='')}"

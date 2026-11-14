@@ -282,7 +282,7 @@ asio::awaitable<HttpResponse> MissionApi::cancel_mission(const HttpRequest& req,
     for (auto& step : mission->step_states) {
         step.state = "CANCELED";
     }
-    json document = missions_.changed(*mission);
+    json document = missions_.changed(*mission, "canceled by operator");
     spdlog::info("[mission_api] mission {} cancelled while queued", mission_id);
     co_return json_response(req, http::status::accepted, document.dump());
 }

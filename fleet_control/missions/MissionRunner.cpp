@@ -146,7 +146,7 @@ asio::awaitable<void> MissionRunner::send(std::string mission_id, std::string st
             back_to_queue(*mission, status.error_message());
             break;
         default:   // INVALID_ARGUMENT и прочее — ошибка в control
-            finish(*mission, "FAILED", MissionError{"INTERNAL", "dispatch rejected the mission: " + status.error_message()});
+            finish(*mission, "FAILED", MissionError{"INTERNAL", "dispatch rejected the mission: " + status.error_message()}, why);
     }
 }
 
@@ -280,7 +280,10 @@ void MissionRunner::apply(Mission& mission, const fms1::MissionStatus& status) {
         spdlog::info("[runner] mission {}: {} → {}", mission.id, old_state, mission.state);
     }
     if (!mission.finished()) {
-        missions_.changed(mission);
+        // В CANCELING dispatch переводит только по CancelMission, а его шлёт control по команде оператора.
+        // Стрим может обогнать ответ на CancelMission — тогда причину для истории ставим здесь (c3)
+        const bool canceling = mission.state == "CANCELING" && old_state != "CANCELING";
+        missions_.changed(mission, canceling ? "canceled by operator" : "");
         return;
     }
     // Закончилась: следующая миссия робота — в dispatch или обратно в очередь
@@ -303,10 +306,10 @@ void MissionRunner::back_to_queue(Mission& mission, const std::string& why) {
     plans_.erase(mission.id);
     // Не будим назначение сразу: робот, которого dispatch счёл занятым, тут же получил бы её снова.
     // Следующая попытка — по страховочному таймеру назначения (5 с) или по любому событию
-    missions_.changed(mission);
+    missions_.changed(mission, why);
 }
 
-void MissionRunner::finish(Mission& mission, const std::string& state, std::optional<MissionError> error) {
+void MissionRunner::finish(Mission& mission, const std::string& state, std::optional<MissionError> error, const std::string& why) {
     mission.state = state;
     mission.finished_at_ms = now_ms();
     mission.error = std::move(error);
@@ -493,7 +496,7 @@ asio::awaitable<grpc::Status> MissionRunner::cancel(const std::string& mission_i
         if (it->second.mission_id == mission_id) {
             next_.erase(it);
             if (Mission* mission = missions_.find(mission_id)) {
-                finish(*mission, "CANCELED", std::nullopt);
+                finish(*mission, "CANCELED", std::nullopt, "canceled by operator");
             }
             co_return grpc::Status::OK;
         }
@@ -517,7 +520,7 @@ asio::awaitable<grpc::Status> MissionRunner::cancel(const std::string& mission_i
     }
     if (status.error_code() == grpc::StatusCode::NOT_FOUND) {
         // dispatch её не знает: AddMission ещё в пути (дойдёт — send() сам её остановит) или потерян
-        finish(*mission, "CANCELED", std::nullopt);
+        finish(*mission, "CANCELED", std::nullopt, "canceled by operator");
         co_return grpc::Status::OK;
     }
     co_return status;   // dispatch недоступен

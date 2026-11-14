@@ -297,3 +297,31 @@ def test_history_by_map(missions, map_id):
     assert [m["id"] for m in page["items"]] == [second["id"]]
     _, page = http("GET", f"{DATABASE_HTTP}/api/fms/missions?mapId={map_id}&state=CANCELED")
     assert [m["id"] for m in page["items"]] == [first["id"]]
+
+
+# ------------------------------------------------------------------ история (c3): события в базе
+
+def test_created_mission_has_queued_event(missions, map_id):
+    """Создание — одно событие QUEUED, записано вместе с миссией (до ответа 201)."""
+    _, mission = missions.create(Missions.body(map_id))
+
+    event, = Missions.events(mission["id"])
+    assert event["type"] == "STATE"
+    assert event["state"] == "QUEUED"
+    assert event["missionId"] == mission["id"]
+    assert event["robotId"] is None
+    assert "reason" not in event
+    assert ISO_MS.match(event["at"])
+    assert event["at"] == mission["createdAt"]
+
+
+def test_cancel_queued_has_reason(missions, map_id):
+    """Отмена из очереди — CANCELED с причиной. Шаги не начинались — их событий нет: это видно по миссии."""
+    _, mission = missions.create(Missions.body(map_id, steps=[{"nodeId": "n1"}, {"nodeId": "n2"}]))
+    _, cancelled = missions.cancel(mission["id"])
+    wait_in_database(missions, mission["id"], "CANCELED")
+
+    events = Missions.events(mission["id"])
+    assert Missions.brief(events) == ["STATE QUEUED", "STATE CANCELED"]
+    assert events[1]["reason"] == "canceled by operator"
+    assert events[1]["at"] == cancelled["updatedAt"]   # время события — момент изменения

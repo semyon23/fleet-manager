@@ -54,6 +54,18 @@ struct Mission {
     bool finished() const { return state == "COMPLETED" || state == "FAILED" || state == "CANCELED"; }
 };
 
+// Событие истории миссии (c3): что с ней случилось между двумя версиями документа
+struct MissionEvent {
+    std::string type;        // STATE | STEP | ACTION
+    std::string robot_id;    // робот миссии; пусто — не назначена
+    nlohmann::json details;  // STATE {state, reason?, error?}, STEP {stepIndex, state},
+    // ACTION {stepIndex, actionId, actionType, status}
+};
+
+// before — прошлая версия; nullptr — миссия только что создана. why — почему сменилось состояние (может быть "").
+// Порядок — как было на самом деле: началось — миссия, шаг, действия; закончилось — действия, шаг, миссия
+std::vector<MissionEvent> mission_events(const Mission* before, const Mission& after, const std::string& why);
+
 // Приоритет: число ↔ строка контракта. Неизвестная строка — nullopt
 const char* priority_name(uint32_t priority);
 std::optional<uint32_t> priority_from_name(const std::string& name);

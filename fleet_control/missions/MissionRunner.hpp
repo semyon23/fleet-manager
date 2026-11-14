@@ -88,7 +88,9 @@ private:
     std::optional<fms::v1::Mission> build(const Mission& mission, const std::string& start_node, std::string& why);
     void apply(Mission& mission, const fms::v1::MissionStatus& status);   // статус из dispatch → документ
     void back_to_queue(Mission& mission, const std::string& why);
-    void finish(Mission& mission, const std::string& state, std::optional<MissionError> error);
+    // why — причина для истории (c3): нужна, когда нет error (отмена оператором)
+    void finish(Mission& mission, const std::string& state, std::optional<MissionError> error,
+                const std::string& why = "");
     // Текущая миссия робота закончилась: следующую — в dispatch (completed) или обратно в очередь
     void release_next(const std::string& robot_id, bool completed, const std::string& end_node);
     bool is_next(const std::string& mission_id) const;
