@@ -131,7 +131,8 @@ void DispatchService::start() {
 
            auto send_updates = [&]() -> asio::awaitable<void> {
                while (true) {
-                   auto [ec, update] = co_await subscriber->channel.async_receive(asio::as_tuple(asio::use_awaitable));
+                   auto received = co_await subscriber->channel.async_receive(asio::as_tuple(asio::use_awaitable));
+                    auto& [ec, update] = received;
                    if (ec) {
                        // hub закрыл очередь: подписчик не успевал читать или dispatch останавливается
                        status = grpc::Status{grpc::StatusCode::UNAVAILABLE, "status stream closed, subscribe again"};
@@ -160,7 +161,8 @@ void DispatchService::start() {
 
             auto send_updates = [&]() -> asio::awaitable<void> {
                 while (true) {
-                    auto [ec, update] = co_await subscriber->channel.async_receive(asio::as_tuple(asio::use_awaitable));
+                    auto received = co_await subscriber->channel.async_receive(asio::as_tuple(asio::use_awaitable));
+                    auto& [ec, update] = received;
                     if (ec) {
                         status = grpc::Status{grpc::StatusCode::UNAVAILABLE, "mission stream closed, subscribe again"};
                         co_return;

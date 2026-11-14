@@ -31,7 +31,8 @@ void RobotMessageRouter::start() {
 asio::awaitable<void> RobotMessageRouter::send_loop() {
     spdlog::info("[message_router] send loop started");
     while (true) {
-        auto [ec, request] = co_await outbox_.async_receive(asio::as_tuple(asio::use_awaitable));
+        auto received = co_await outbox_.async_receive(asio::as_tuple(asio::use_awaitable));
+        auto& [ec, request] = received;
         if (ec) {
             break;   // очередь закрыта: остановка dispatch
         }

@@ -78,7 +78,8 @@ asio::awaitable<void> MqttClientHandler::co_subscribe(){
 }
 
 asio::awaitable<std::optional<MqttMessage>> MqttClientHandler::get_message_received(){
-    auto [ec, msg] = co_await message_channel.async_receive(use_nothrow_awaitable);
+    auto received = co_await message_channel.async_receive(use_nothrow_awaitable);
+    auto& [ec, msg] = received;
     if (ec) co_return std::nullopt;
 
     co_return std::move(msg);
@@ -87,7 +88,8 @@ asio::awaitable<std::optional<MqttMessage>> MqttClientHandler::get_message_recei
 
 asio::awaitable<void> MqttClientHandler::listen_loop(){
     while (true){
-        auto [ec, topic, payload, props] = co_await mqtt_client.async_receive(use_nothrow_awaitable);
+        auto received = co_await mqtt_client.async_receive(use_nothrow_awaitable);
+        auto& [ec, topic, payload, props] = received;
 
         if (!ec){
             if (!topic.empty()){
@@ -189,15 +191,17 @@ asio::awaitable<void> MqttClientHandler::do_publish(std::string topic, std::stri
         break;
     }
     case 1: {
-        auto [e, r, props] = co_await mqtt_client.async_publish<qos_e::at_least_once>(
-            topic, payload, retain, boost::mqtt5::publish_props{}, use_nothrow_awaitable);
+        auto published = co_await mqtt_client.async_publish<qos_e::at_least_once>(
+    topic, payload, retain, boost::mqtt5::publish_props{}, use_nothrow_awaitable);
+        auto& [e, r, props] = published;
         ec = e;
         rc = r;
         break;
     }
     case 2: {
-        auto [e, r, props] = co_await mqtt_client.async_publish<qos_e::exactly_once>(
-            topic, payload, retain, boost::mqtt5::publish_props{}, use_nothrow_awaitable);
+        auto published = co_await mqtt_client.async_publish<qos_e::exactly_once>(
+    topic, payload, retain, boost::mqtt5::publish_props{}, use_nothrow_awaitable);
+        auto& [e, r, props] = published;
         ec = e;
         rc = r;
         break;

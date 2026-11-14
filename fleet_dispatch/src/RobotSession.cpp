@@ -107,7 +107,8 @@ bool RobotSession::post(VdaMessage message) {
 asio::awaitable<void> RobotSession::run() {
     spdlog::info("[{}] session started ({} / {})", robot_id_, manufacturer_, serial_number_);
     while (true) {
-        auto [ec, message] = co_await inbox_.async_receive(asio::as_tuple(asio::use_awaitable));
+        auto received = co_await inbox_.async_receive(asio::as_tuple(asio::use_awaitable));
+        auto& [ec, message] = received;
         if (ec || stopped_) {
             break;
         }

@@ -207,7 +207,8 @@ asio::awaitable<HttpResponse> MissionApi::create_mission(const HttpRequest& req)
     const bool generated = client_id.empty();
     for (int attempt = 0;; ++attempt) {
         mission.id = generated ? new_mission_id() : client_id;
-        auto [status, existing] = co_await missions_.get(mission.id);
+        auto got = co_await missions_.get(mission.id);
+        auto& [status, existing] = got;
         if (!status.ok()) {
             co_return grpc_error(req, status);
         }
@@ -249,7 +250,8 @@ asio::awaitable<HttpResponse> MissionApi::cancel_mission(const HttpRequest& req,
     Mission* mission = missions_.find(mission_id);
     if (!mission) {
         // Нет среди активных: уже завершена (409) или не было никогда (404)
-        auto [status, existing] = co_await missions_.get(mission_id);
+        auto got = co_await missions_.get(mission_id);
+        auto& [status, existing] = got;
         if (!status.ok()) {
             co_return grpc_error(req, status);
         }
@@ -269,7 +271,8 @@ asio::awaitable<HttpResponse> MissionApi::cancel_mission(const HttpRequest& req,
         if (!status.ok()) {
             co_return grpc_error(req, status);   // dispatch недоступен → 503
         }
-        auto [get_status, current] = co_await missions_.get(mission_id);
+        auto got = co_await missions_.get(mission_id);
+        auto& [get_status, current] = got;
         if (!get_status.ok()) {
             co_return grpc_error(req, get_status);
         }

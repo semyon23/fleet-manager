@@ -245,7 +245,8 @@ asio::awaitable<HttpResponse> MapApi::update_map(const HttpRequest& req, std::st
     Graph graph = build_graph(map_id, 0, document);
     routing::Router router(graph, maps_.default_speed());
     std::vector<std::string> warnings = graph_warnings(graph, router);
-    auto [robots_status, robot_warnings] = co_await robots_losing_node(map_id, graph);
+    auto losing = co_await robots_losing_node(map_id, graph);
+    auto& [robots_status, robot_warnings] = losing;
     if (!robots_status.ok()) {
         co_return grpc_error(req, robots_status);
     }
