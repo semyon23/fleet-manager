@@ -1,5 +1,5 @@
 #include "../include/http_server.hpp"
-
+#include <boost/asio/redirect_error.hpp>
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -136,9 +136,12 @@ void HttpServer::stop(){
 
 asio::awaitable<void> HttpServer::do_listen(){
     while (acceptor_.is_open()){
-        auto [ec, socket] = co_await acceptor_.async_accept(asio::as_tuple(asio::use_awaitable));
+
+        ip::tcp::socket socket(ioc_);
+        boost::system::error_code ec;
+        co_await acceptor_.async_accept(socket, asio::redirect_error(asio::use_awaitable, ec));
         if (ec == asio::error::operation_aborted){
-            break; // stop()
+            break;
         }
         if (ec){
             spdlog::error("[http_server] accept failed: {}", ec.message());
