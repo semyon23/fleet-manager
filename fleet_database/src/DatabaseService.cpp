@@ -2,6 +2,8 @@
 #include "../include/RobotTable.hpp"
 #include "../include/MapTable.hpp"
 #include "../include/MissionTable.hpp"
+#include "../include/EventTable.hpp"
+#include "../include/AlarmTable.hpp"
 #include "spdlog/spdlog.h"
 #include <google/protobuf/util/time_util.h>
 #include <nlohmann/json.hpp>
@@ -33,6 +35,10 @@ using ListMapsRPC  = agrpc::ServerRPC<&Control::RequestListMaps>;
 using SaveMissionRPC        = agrpc::ServerRPC<&Control::RequestSaveMission>;
 using GetMissionRPC         = agrpc::ServerRPC<&Control::RequestGetMission>;
 using ListActiveMissionsRPC = agrpc::ServerRPC<&Control::RequestListActiveMissions>;
+
+using AppendEventsRPC   = agrpc::ServerRPC<&Control::RequestAppendEvents>;
+using SaveAlarmRPC      = agrpc::ServerRPC<&Control::RequestSaveAlarm>;
+using ListOpenAlarmsRPC = agrpc::ServerRPC<&Control::RequestListOpenAlarms>;
 
 const auto on_handler_done = [](std::exception_ptr error) {
     if (!error) return;
@@ -76,6 +82,39 @@ std::string event_error(const dbv1::MissionEvent& event) {
         return "details_json must be a JSON object";
     }
     return "";
+}
+
+bool details_ok(const std::string& details_json) {
+    // details склеиваются с полями строки (||) — должен быть объект, иначе получится массив
+    return details_json.empty() || nlohmann::json::parse(details_json, nullptr, false).is_object();
+}
+
+// Событие журнала (M-5): пусто — верно. MISSION — только с миссией (SaveMission): там и её документ
+std::string journal_event_error(const dbv1::Event& event) {
+    if (event.source() != "ROBOT" && event.source() != "ALARM" && event.source() != "SYSTEM") {
+        return "source must be ROBOT, ALARM or SYSTEM, not '" + event.source() + "'";
+    }
+    if (event.type().empty()) {
+        return "type is required";
+    }
+    if (!event.has_at()) {
+        return "at is required";
+    }
+    if (!details_ok(event.details_json())) {
+        return "details_json must be a JSON object";
+    }
+    return "";
+}
+
+std::string alarm_error(const dbv1::AlarmRecord& alarm) {
+    if (alarm.alarm_id().empty() || alarm.code().empty() || alarm.key().empty() || alarm.title().empty() ||
+        !alarm.has_created_at()) {
+        return "alarm_id, code, key, title and created_at are required";
+        }
+    if (alarm.active() && alarm.has_cleared_at()) {
+        return "an active alarm has no cleared_at";
+    }
+    return "";   // severity и source проверяет CHECK таблицы
 }
 
 grpc::Status unimplemented(const char* name) {
@@ -282,6 +321,34 @@ void DatabaseService::start() {
         },
         on_handler_done);
 
+    // ---------------------------------------------------------------- ControlStorage (M-5)
+
+    agrpc::register_awaitable_rpc_handler<AppendEventsRPC>(
+        grpc_context_, control_,
+        [this](AppendEventsRPC& rpc, AppendEventsRPC::Request& request) -> asio::awaitable<void> {
+            AppendEventsRPC::Response response;
+            grpc::Status status = co_await append_events(request, response);
+            co_await rpc.finish(response, status);
+        },
+        on_handler_done);
+
+    agrpc::register_awaitable_rpc_handler<SaveAlarmRPC>(
+        grpc_context_, control_,
+        [this](SaveAlarmRPC& rpc, SaveAlarmRPC::Request& request) -> asio::awaitable<void> {
+            SaveAlarmRPC::Response response;
+            grpc::Status status = co_await save_alarm(request, response);
+            co_await rpc.finish(response, status);
+        },
+        on_handler_done);
+
+    agrpc::register_awaitable_rpc_handler<ListOpenAlarmsRPC>(
+        grpc_context_, control_,
+        [this](ListOpenAlarmsRPC& rpc, ListOpenAlarmsRPC::Request& request) -> asio::awaitable<void> {
+            ListOpenAlarmsRPC::Response response;
+            grpc::Status status = co_await list_open_alarms(request, response);
+            co_await rpc.finish(response, status);
+        },
+        on_handler_done);
 }
 
 // ==================================================================== RobotRegistry (DB-2)
@@ -622,6 +689,74 @@ asio::awaitable<grpc::Status> DatabaseService::list_active_missions(const dbv1::
     }
     for (auto& mission : missions) {
         *response.add_missions() = std::move(mission);
+    }
+    co_return grpc::Status::OK;
+}
+
+// ==================================================================== ControlStorage (M-5): журнал и тревоги
+
+asio::awaitable<grpc::Status> DatabaseService::append_events(const dbv1::AppendEventsRequest& request,
+                                                             dbv1::AppendEventsResponse&) {
+    for (int i = 0; i < request.events_size(); ++i) {
+        if (std::string error = journal_event_error(request.events(i)); !error.empty()) {
+            co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "event " + std::to_string(i) + ": " + error};
+        }
+    }
+    try {
+        co_await database_.run([&](pqxx::work& tx) { insert_events(tx, request.events()); });   // все или ни одного
+    } catch (const pqxx::foreign_key_violation&) {
+        co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "an event refers to a mission that is not in the database"};
+    } catch (const pqxx::check_violation& e) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, e.what()};
+    } catch (const std::exception& e) {
+        co_return database_error(e);
+    }
+    co_return grpc::Status::OK;   // без лога: control пишет при каждом событии
+}
+
+asio::awaitable<grpc::Status> DatabaseService::save_alarm(const dbv1::SaveAlarmRequest& request,
+                                                          dbv1::SaveAlarmResponse&) {
+    const auto& alarm = request.alarm();
+    if (std::string error = alarm_error(alarm); !error.empty()) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "alarm " + alarm.alarm_id() + ": " + error};
+    }
+    for (int i = 0; i < request.events_size(); ++i) {
+        if (std::string error = journal_event_error(request.events(i)); !error.empty()) {
+            co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT,
+                                   "alarm " + alarm.alarm_id() + ": event " + std::to_string(i) + ": " + error};
+        }
+    }
+    try {
+        // Одна транзакция: тревога и её события (RAISED / CLEARED / ACKED). Ошибка — ни того, ни другого
+        co_await database_.run([&](pqxx::work& tx) {
+            ::save_alarm(tx, alarm);
+            insert_events(tx, request.events());
+        });
+    } catch (const pqxx::unique_violation&) {
+        co_return grpc::Status{grpc::StatusCode::ALREADY_EXISTS,
+                               "another active alarm with key '" + alarm.key() + "' exists"};
+    } catch (const pqxx::check_violation&) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT,
+                               "alarm " + alarm.alarm_id() + ": invalid severity '" + alarm.severity() +
+                               "' or source '" + alarm.source() + "'"};
+    } catch (const pqxx::foreign_key_violation&) {
+        co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "an event refers to a mission that is not in the database"};
+    } catch (const std::exception& e) {
+        co_return database_error(e);
+    }
+    co_return grpc::Status::OK;
+}
+
+asio::awaitable<grpc::Status> DatabaseService::list_open_alarms(const dbv1::ListOpenAlarmsRequest&,
+                                                                dbv1::ListOpenAlarmsResponse& response) {
+    std::vector<dbv1::AlarmRecord> alarms;
+    try {
+        co_await database_.run([&](pqxx::work& tx) { alarms = select_open_alarms(tx); });
+    } catch (const std::exception& e) {
+        co_return database_error(e);
+    }
+    for (auto& alarm : alarms) {
+        *response.add_alarms() = std::move(alarm);
     }
     co_return grpc::Status::OK;
 }

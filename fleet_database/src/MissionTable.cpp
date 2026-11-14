@@ -65,9 +65,9 @@ void insert_mission_events(pqxx::work& tx, const std::string& mission_id,
         if (!event.robot_id().empty()) {
             robot_id = event.robot_id();
         }
-        tx.exec("INSERT INTO mission_events (mission_id, at, robot_id, type, details) "
-                "VALUES ($1, to_timestamp($2::bigint / 1000.0), $3, $4, $5::jsonb)",
-                pqxx::params{mission_id, TimeUtil::TimestampToMilliseconds(event.at()), robot_id, event.type(),
+        tx.exec("INSERT INTO events (at, source, type, mission_id, robot_id, details) "
+                "VALUES (to_timestamp($1::bigint / 1000.0), 'MISSION', $2, $3, $4, $5::jsonb)",
+                pqxx::params{TimeUtil::TimestampToMilliseconds(event.at()), event.type(), mission_id, robot_id,
                              event.details_json().empty() ? std::string("{}") : event.details_json()});
     }
 }
@@ -123,7 +123,7 @@ std::vector<std::string> select_mission_events(pqxx::work& tx, const std::string
                     'at', to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                     'robotId', robot_id,
                     'type', type))::text
-                FROM mission_events WHERE mission_id = $1 ORDER BY id LIMIT $2)",
+                FROM events WHERE mission_id = $1 AND source = 'MISSION' ORDER BY id LIMIT $2)",
              pqxx::params{mission_id, limit})) {
         events.push_back(row[0].as<std::string>());
              }

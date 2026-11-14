@@ -1,11 +1,12 @@
 #include "../include/RestApi.hpp"
+#include "../include/EventTable.hpp"
+#include "../include/AlarmTable.hpp"
+#include "../include/RobotTable.hpp"
+#include "../include/MapTable.hpp"
+#include "../include/MissionTable.hpp"
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include "api_json.hpp"
-#include "RobotTable.hpp"
-#include "MapTable.hpp"
-
-#include "MissionTable.hpp"
 #include <charconv>
 #include <google/protobuf/util/time_util.h>
 #include <ranges>
@@ -51,6 +52,62 @@ HttpResponse database_error(const HttpRequest& req, const std::exception& e) {
     std::string mission_cursor(const dbv1::MissionRecord& mission) {
         return std::to_string(TimeUtil::TimestampToMilliseconds(mission.created_at())) + ":" + mission.mission_id();
     }
+
+        const std::set<std::string, std::less<>> kEventSources = {"MISSION", "ROBOT", "ALARM", "SYSTEM"};
+    const std::set<std::string, std::less<>> kSeverities = {"INFO", "WARNING", "ERROR", "CRITICAL"};
+
+    // ?limit= 1..200, нет — 50
+    int limit_param(const HttpRequest& req, nlohmann::json& details) {
+        int limit = kDefaultLimit;
+        if (auto value = query_param(req, "limit")) {
+            const char* end = value->data() + value->size();
+            auto [ptr, error] = std::from_chars(value->data(), end, limit);
+            if (error != std::errc{} || ptr != end || limit < 1 || limit > kMaxLimit) {
+                details["limit"] = "must be 1.." + std::to_string(kMaxLimit);
+            }
+        }
+        return limit;
+    }
+
+    // ?name=A,B — каждое из allowed; нет — ""
+    std::string list_param(const HttpRequest& req, const char* name, const std::set<std::string, std::less<>>& allowed,
+                           nlohmann::json& details) {
+        std::string value = query_param(req, name).value_or("");
+        for (auto part : std::views::split(std::string_view(value), ',')) {
+            std::string_view item(part.begin(), part.end());
+            if (!value.empty() && !allowed.contains(item)) {
+                details[name] = "unknown value '" + std::string(item) + "'";
+            }
+        }
+        return value;
+    }
+
+    // ?name=true|false; нет — nullopt
+    std::optional<bool> bool_param(const HttpRequest& req, const char* name, nlohmann::json& details) {
+        auto value = query_param(req, name);
+        if (!value || value->empty()) return std::nullopt;
+        if (*value == "true") return true;
+        if (*value == "false") return false;
+        details[name] = "must be true or false";
+        return std::nullopt;
+    }
+
+    HttpResponse invalid_query(const HttpRequest& req, const nlohmann::json& details) {
+        nlohmann::json body{{"code", "INVALID_INPUT"}, {"message", "some query parameters are invalid"},
+                            {"details", details}};
+        return json_response(req, http::status::bad_request, body.dump());
+    }
+
+    // {"items":[...], "nextCursor": ...} из готовых объектов JSON
+    std::string page_json(const std::vector<std::string>& items, const std::optional<std::string>& next_cursor) {
+        std::string body = "{\"items\":[";
+        for (size_t i = 0; i < items.size(); ++i) {
+            if (i > 0) body += ',';
+            body += items[i];
+        }
+        body += "],\"nextCursor\":" + (next_cursor ? nlohmann::json(*next_cursor).dump() : std::string("null")) + "}";
+        return body;
+    }
 }  // namespace
 
 RestApi::RestApi(Database& database, ApiRouter& router) : database_(database) {
@@ -73,6 +130,13 @@ RestApi::RestApi(Database& database, ApiRouter& router) : database_(database) {
 
     router.add_route(http::verb::get, "/api/fms/missions/{id}/events",
             [this](const HttpRequest& req, const PathParams& params) { return list_mission_events(req, params.at("id")); });
+
+    router.add_route(http::verb::get, "/api/fms/events",
+        [this](const HttpRequest& req, const PathParams&) { return list_events(req); });
+    router.add_route(http::verb::get, "/api/fms/alarms",
+        [this](const HttpRequest& req, const PathParams&) { return list_alarms(req); });
+    router.add_route(http::verb::get, "/api/fms/alarms/{id}",
+        [this](const HttpRequest& req, const PathParams& params) { return get_alarm(req, params.at("id")); });
 }
 
 asio::awaitable<HttpResponse> RestApi::list_robots(const HttpRequest& req) {
@@ -263,4 +327,107 @@ asio::awaitable<HttpResponse> RestApi::list_mission_events(const HttpRequest& re
     }
     body += "]}";
     co_return json_response(req, http::status::ok, body);
+}
+
+// Журнал (M-5): ?source=A,B&type=A,B&robotId=&missionId=&alarmId=&from=&to=&limit=&before= → {items, nextCursor}.
+// Новые сверху; курсор — id последнего события страницы
+asio::awaitable<HttpResponse> RestApi::list_events(const HttpRequest& req) {
+    EventFilter filter;
+    nlohmann::json details = nlohmann::json::object();
+    filter.sources = list_param(req, "source", kEventSources, details);
+    filter.types = query_param(req, "type").value_or("");   // типов много и будут новые — не проверяем
+    filter.robot_id = query_param(req, "robotId").value_or("");
+    filter.mission_id = query_param(req, "missionId").value_or("");
+    filter.alarm_id = query_param(req, "alarmId").value_or("");
+    filter.from_ms = time_param(req, "from", details);
+    filter.to_ms = time_param(req, "to", details);
+    if (filter.from_ms && filter.to_ms && *filter.from_ms >= *filter.to_ms) {
+        details["to"] = "must be later than from";
+    }
+    filter.limit = limit_param(req, details);
+    if (auto before = query_param(req, "before"); before && !before->empty()) {
+        long long id = 0;
+        const char* end = before->data() + before->size();
+        auto [ptr, error] = std::from_chars(before->data(), end, id);
+        if (error == std::errc{} && ptr == end) filter.before_id = id;
+        else details["before"] = "invalid cursor: pass nextCursor from the previous page";
+    }
+    if (!details.empty()) {
+        co_return invalid_query(req, details);
+    }
+
+    std::vector<EventRow> rows;
+    ++filter.limit;   // одна лишняя — узнать, есть ли следующая страница
+    try {
+        co_await database_.run([&](pqxx::work& tx) { rows = select_events(tx, filter); });
+    } catch (const std::exception& e) {
+        co_return database_error(req, e);
+    }
+    std::optional<std::string> next;
+    if (static_cast<int>(rows.size()) == filter.limit) {
+        rows.pop_back();
+        next = std::to_string(rows.back().id);
+    }
+    std::vector<std::string> items;
+    for (auto& row : rows) items.push_back(std::move(row.json));
+    co_return json_response(req, http::status::ok, page_json(items, next));
+}
+
+// Тревоги (контракт 8.2): ?active=&acknowledged=&robotId=&severity=A,B&limit=&before= → {items, nextCursor}.
+// Новые сверху; курсор «<createdAt, мс>:<id>», как у миссий
+asio::awaitable<HttpResponse> RestApi::list_alarms(const HttpRequest& req) {
+    AlarmFilter filter;
+    nlohmann::json details = nlohmann::json::object();
+    filter.active = bool_param(req, "active", details);
+    filter.acknowledged = bool_param(req, "acknowledged", details);
+    filter.robot_id = query_param(req, "robotId").value_or("");
+    filter.severities = list_param(req, "severity", kSeverities, details);
+    filter.limit = limit_param(req, details);
+    if (auto before = query_param(req, "before"); before && !before->empty()) {
+        auto colon = before->find(':');
+        long long created_ms = 0;
+        bool valid = colon != std::string::npos;
+        if (valid) {
+            auto [ptr, error] = std::from_chars(before->data(), before->data() + colon, created_ms);
+            valid = error == std::errc{} && ptr == before->data() + colon;
+        }
+        if (valid) {
+            filter.before_created_ms = created_ms;
+            filter.before_alarm_id = before->substr(colon + 1);
+        } else {
+            details["before"] = "invalid cursor: pass nextCursor from the previous page";
+        }
+    }
+    if (!details.empty()) {
+        co_return invalid_query(req, details);
+    }
+
+    std::vector<AlarmRow> rows;
+    ++filter.limit;
+    try {
+        co_await database_.run([&](pqxx::work& tx) { rows = select_alarms(tx, filter); });
+    } catch (const std::exception& e) {
+        co_return database_error(req, e);
+    }
+    std::optional<std::string> next;
+    if (static_cast<int>(rows.size()) == filter.limit) {
+        rows.pop_back();
+        next = std::to_string(rows.back().created_ms) + ":" + rows.back().alarm_id;
+    }
+    std::vector<std::string> items;
+    for (auto& row : rows) items.push_back(std::move(row.json));
+    co_return json_response(req, http::status::ok, page_json(items, next));
+}
+
+asio::awaitable<HttpResponse> RestApi::get_alarm(const HttpRequest& req, std::string alarm_id) {
+    std::optional<std::string> alarm;
+    try {
+        co_await database_.run([&](pqxx::work& tx) { alarm = select_alarm_json(tx, alarm_id); });
+    } catch (const std::exception& e) {
+        co_return database_error(req, e);
+    }
+    if (!alarm) {
+        co_return error_response(req, http::status::not_found, "NOT_FOUND", "alarm " + alarm_id + " not found");
+    }
+    co_return json_response(req, http::status::ok, *alarm);
 }

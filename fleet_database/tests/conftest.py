@@ -275,3 +275,92 @@ def missions_cleanup():
 @pytest.fixture
 def missions(control, missions_cleanup):
     return Missions(control)
+
+
+# ------------------------------------------------------------------ журнал и тревоги (M-5)
+
+RUN = unique("run")   # метка прогона в details тестовых событий — по ней их удаляет journal_cleanup
+
+
+class Journal:
+    """События журнала (AppendEvents — то, что пишет control). Каждое помечено details.testRun."""
+
+    def __init__(self, control: dbgrpc.ControlStorageStub):
+        self.control = control
+
+    @staticmethod
+    def event(source: str, type: str, at_ms: int | None = None, robot_id: str = "", mission_id: str = "",
+              alarm_id: str = "", details: dict | str | None = None) -> db.Event:
+        """details — dict (+ testRun) или строка как есть (для проверок ошибок)."""
+        if isinstance(details, str):
+            details_json = details
+        else:
+            details_json = json.dumps({**(details or {}), "testRun": RUN})
+        event = db.Event(source=source, type=type, robot_id=robot_id, mission_id=mission_id, alarm_id=alarm_id,
+                         details_json=details_json)
+        event.at.FromMilliseconds(int(time.time() * 1000) if at_ms is None else at_ms)
+        return event
+
+    def append(self, *events: db.Event) -> None:
+        self.control.AppendEvents(db.AppendEventsRequest(events=list(events)))
+
+
+class Alarms:
+    """Тревоги одного теста (SaveAlarm — то, что пишет control). id — test-al-<случайное>."""
+
+    def __init__(self, control: dbgrpc.ControlStorageStub):
+        self.control = control
+        self.ids: list[str] = []
+
+    def record(self, created_ms: int | None = None, **fields) -> db.AlarmRecord:
+        """Активная ROBOT_OFFLINE своего робота; fields заменяют любые поля."""
+        alarm_id = fields.pop("alarm_id", unique("test-al"))
+        robot_id = fields.get("robot_id", unique("test-robot"))
+        values = {"alarm_id": alarm_id, "code": "ROBOT_OFFLINE", "severity": "ERROR", "source": "ROBOT",
+                  "robot_id": robot_id, "title": "Robot offline", "detail": f"{robot_id}: no connection for 5 s",
+                  "key": f"ROBOT_OFFLINE/{robot_id}", "active": True}
+        values.update(fields)
+        times = {k: values.pop(k) for k in ("cleared_ms", "acknowledged_ms") if k in values}
+        alarm = db.AlarmRecord(**values)
+        alarm.created_at.FromMilliseconds(int(time.time() * 1000) if created_ms is None else created_ms)
+        if "cleared_ms" in times:
+            alarm.cleared_at.FromMilliseconds(times["cleared_ms"])
+        if "acknowledged_ms" in times:
+            alarm.acknowledged_at.FromMilliseconds(times["acknowledged_ms"])
+        if alarm_id not in self.ids:
+            self.ids.append(alarm_id)
+        return alarm
+
+    def save(self, alarm: db.AlarmRecord, *events: db.Event) -> db.AlarmRecord:
+        self.control.SaveAlarm(db.SaveAlarmRequest(alarm=alarm, events=list(events)))
+        return alarm
+
+    def open(self) -> list[db.AlarmRecord]:
+        """ListOpenAlarms — только тревоги этого теста, в порядке ответа."""
+        response = self.control.ListOpenAlarms(db.ListOpenAlarmsRequest())
+        return [a for a in response.alarms if a.alarm_id in self.ids]
+
+
+@pytest.fixture(scope="session")
+def journal_cleanup():
+    """В конце прогона — удалить тестовые события и тревоги через psql: удалить их через API нельзя (история),
+    а открытые тестовые тревоги control при старте загрузил бы как настоящие (ListOpenAlarms)."""
+    yield
+    sql = "DELETE FROM events WHERE details ? 'testRun'; DELETE FROM alarms WHERE alarm_id LIKE 'test-al-%'"
+    try:
+        result = subprocess.run(["psql", DATABASE_URL, "-c", sql], capture_output=True, text=True, timeout=10)
+        failed = result.returncode != 0 and result.stderr
+    except (OSError, subprocess.TimeoutExpired) as e:
+        failed = str(e)
+    if failed:
+        warnings.warn(f"test events and alarms are left in the database ({failed.strip()}), delete them: psql -c \"{sql}\"")
+
+
+@pytest.fixture
+def journal(control, journal_cleanup):
+    return Journal(control)
+
+
+@pytest.fixture
+def alarms(control, journal_cleanup):
+    return Alarms(control)

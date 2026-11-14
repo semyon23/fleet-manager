@@ -246,6 +246,15 @@ service ControlStorage {
   // Незавершённые (QUEUED, ASSIGNED, RUNNING, PAUSED, CANCELING) — control читает при старте.
   // Списки для UI с фильтрами и страницами — только REST базы, через gRPC не нужны.
   rpc ListActiveMissions(ListActiveMissionsRequest) returns (ListActiveMissionsResponse);
+
+  // Журнал (M-5): события роботов, тревог, системы. События миссий — только с миссией (SaveMission)
+  rpc AppendEvents(AppendEventsRequest) returns (AppendEventsResponse);
+
+  // Тревоги (M-5, контракт 8): создать или заменить целиком (по alarm_id) вместе с её событиями журнала.
+  // Вторая активная тревога с тем же key — ALREADY_EXISTS (ошибка в control)
+  rpc SaveAlarm(SaveAlarmRequest) returns (SaveAlarmResponse);
+  // Открытые — активные или ещё не подтверждённые: control читает при старте
+  rpc ListOpenAlarms(ListOpenAlarmsRequest) returns (ListOpenAlarmsResponse);
 }
 
 message CreateMapRequest { MapRecord map = 1; }   // version, created_at, updated_at игнорируются
@@ -315,3 +324,51 @@ message GetMissionResponse { MissionRecord mission = 1; }
 
 message ListActiveMissionsRequest {}
 message ListActiveMissionsResponse { repeated MissionRecord missions = 1; }   // по created_at
+// =================================================================== журнал и тревоги (пишет control, M-5)
+
+// Событие журнала: что произошло с роботом, тревогой или системой. Только дописываются.
+// details_json — подробности по type (объект JSON), база их не разбирает, UI читает как есть.
+//   ROBOT:  CONNECTION {state} | AVAILABILITY {state, reasons} | ERROR {errorType, level, description, cleared}
+//           | POSITION {mapId, nodeId} | PAUSED | RESUMED | REGISTERED | DELETED {force}
+//   ALARM:  RAISED | CLEARED | ACKED  — {code, severity, title}
+//   SYSTEM: MAP_SAVED {mapId, version, forced} | SERVICE_DOWN / SERVICE_UP {service}
+message Event {
+  google.protobuf.Timestamp at = 1;
+  string source = 2;          // ROBOT | ALARM | SYSTEM  (MISSION — только через SaveMission)
+  string type = 3;
+  string robot_id = 4;        // пусто — не о роботе
+  string mission_id = 5;      // пусто — не о миссии; есть — миссия должна быть в базе
+  string alarm_id = 6;        // пусто — не о тревоге
+  string details_json = 7;
+}
+
+message AppendEventsRequest { repeated Event events = 1; }
+message AppendEventsResponse {}
+
+// Тревога (контракт 8.1). Одна активная на key — например "ROBOT_ERROR/amr-01/noRoute"
+message AlarmRecord {
+  string alarm_id = 1;        // выдаёт control: al-xxxxxxxx
+  string code = 2;            // ROBOT_OFFLINE, ROBOT_ERROR, EMERGENCY_STOP, LOW_BATTERY, SERVICE_DOWN, ...
+  string severity = 3;        // INFO | WARNING | ERROR | CRITICAL
+  string source = 4;          // ROBOT | MISSION | TRAFFIC | SYSTEM
+  string robot_id = 5;        // пусто — не о роботе
+  string mission_id = 6;
+  string title = 7;
+  string detail = 8;
+  string key = 9;
+  bool active = 10;           // причина ещё есть
+  google.protobuf.Timestamp created_at = 11;
+  optional google.protobuf.Timestamp cleared_at = 12;
+  optional google.protobuf.Timestamp acknowledged_at = 13;
+  string acknowledged_by = 14;  // пусто — пока нет пользователей
+}
+
+// alarm — новая версия; events — что с ней случилось (RAISED / CLEARED / ACKED), одной транзакцией
+message SaveAlarmRequest {
+  AlarmRecord alarm = 1;
+  repeated Event events = 2;
+}
+message SaveAlarmResponse {}
+
+message ListOpenAlarmsRequest {}
+message ListOpenAlarmsResponse { repeated AlarmRecord alarms = 1; }   // по created_at

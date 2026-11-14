@@ -24,6 +24,10 @@ private:
     asio::awaitable<HttpResponse> list_mission_events(const HttpRequest& req, std::string mission_id);
     asio::awaitable<HttpResponse> get_mission(const HttpRequest& req, std::string mission_id);
 
+    asio::awaitable<HttpResponse> list_events(const HttpRequest& req);
+    asio::awaitable<HttpResponse> list_alarms(const HttpRequest& req);
+    asio::awaitable<HttpResponse> get_alarm(const HttpRequest& req, std::string alarm_id);
+
     Database& database_;
 };
 

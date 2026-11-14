@@ -51,6 +51,11 @@ private:
     asio::awaitable<grpc::Status> get_mission(const dbv1::GetMissionRequest& request, dbv1::GetMissionResponse& response);
     asio::awaitable<grpc::Status> list_active_missions(const dbv1::ListActiveMissionsRequest& request, dbv1::ListActiveMissionsResponse& response);
 
+    // ControlStorage (M-5): журнал и тревоги
+    asio::awaitable<grpc::Status> append_events(const dbv1::AppendEventsRequest& request, dbv1::AppendEventsResponse& response);
+    asio::awaitable<grpc::Status> save_alarm(const dbv1::SaveAlarmRequest& request, dbv1::SaveAlarmResponse& response);
+    asio::awaitable<grpc::Status> list_open_alarms(const dbv1::ListOpenAlarmsRequest& request, dbv1::ListOpenAlarmsResponse& response);
+
     agrpc::GrpcContext& grpc_context_;
     Database& database_;
     dbv1::RobotRegistry::AsyncService registry_;
