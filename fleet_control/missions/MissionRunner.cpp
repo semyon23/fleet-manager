@@ -146,7 +146,7 @@ asio::awaitable<void> MissionRunner::send(std::string mission_id, std::string st
             back_to_queue(*mission, status.error_message());
             break;
         default:   // INVALID_ARGUMENT и прочее — ошибка в control
-            finish(*mission, "FAILED", MissionError{"INTERNAL", "dispatch rejected the mission: " + status.error_message()}, why);
+            finish(*mission, "FAILED", MissionError{"INTERNAL", "dispatch rejected the mission: " + status.error_message()});
     }
 }
 
@@ -321,7 +321,7 @@ void MissionRunner::finish(Mission& mission, const std::string& state, std::opti
     spdlog::info("[runner] mission {} {}{}", mission.id, state, mission.error ? ": " + mission.error->message : "");
     const std::string robot_id = mission.robot_id;
     plans_.erase(mission.id);
-    missions_.changed(mission);   // завершённая уходит из памяти: mission дальше не трогаем
+    missions_.changed(mission, why);   // завершённая уходит из памяти: mission дальше не трогаем
     release_next(robot_id, false, "");
 }
 
@@ -514,7 +514,7 @@ asio::awaitable<grpc::Status> MissionRunner::cancel(const std::string& mission_i
     if (status.ok()) {
         if (mission->state != "CANCELING") {
             mission->state = "CANCELING";   // CANCELED придёт по стриму, когда робот подтвердит
-            missions_.changed(*mission);
+            missions_.changed(*mission, "canceled by operator");
         }
         co_return grpc::Status::OK;
     }
