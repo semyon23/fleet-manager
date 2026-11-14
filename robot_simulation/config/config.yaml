@@ -28,7 +28,7 @@ battery_config:
 publisher:
   min_state_interval_ms: 100
   max_state_interval_ms: 30000
-  visualization_interval_ms: 200
+  visualization_interval_ms: 100
 
 motion:
   max_speed: 1.0
