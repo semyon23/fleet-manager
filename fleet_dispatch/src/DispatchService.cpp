@@ -304,8 +304,67 @@ asio::awaitable<grpc::Status> DispatchService::cancel_mission(const dv1::CancelM
     co_return grpc::Status::OK;
 }
 
-asio::awaitable<grpc::Status> DispatchService::extend_mission(const dv1::ExtendMissionRequest&, dv1::ExtendMissionResponse&) {
-    co_return unimplemented("ExtendMission");
+asio::awaitable<grpc::Status> DispatchService::extend_mission(const dv1::ExtendMissionRequest& request,
+                                                              dv1::ExtendMissionResponse& response) {
+    if (request.has_replace_tail()) {
+        co_return grpc::Status{grpc::StatusCode::UNIMPLEMENTED, "replace_tail is not supported yet"};
+    }
+    if (request.revision() == 0) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "revision starts at 1"};
+    }
+    RobotSession* session = fleet_registry_.find_by_mission(request.mission_id());
+    if (!session) {
+        co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "mission " + request.mission_id() + " is not running"};
+    }
+    const ActiveMission& mission = *session->mission();
+    if (mission.canceling()) {
+        co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION, "mission " + request.mission_id() + " is being canceled"};
+    }
+    const auto& step = mission.current_step();
+    if (step.id() != request.move_node_id() || !step.has_move()) {
+        co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
+                               "step " + request.move_node_id() + " is not the current move step (current: " + step.id() + ")"};
+    }
+
+    const auto& progress = mission.status().steps(mission.current_index()).move();
+    const std::uint32_t last = progress.revision();
+    const std::uint32_t released = mission.released_nodes();
+    const std::uint32_t wanted = request.has_released_nodes() ? request.released_nodes() : released;
+    const std::string revision = "revision " + std::to_string(request.revision());
+
+    // Повтор той же правки (после обрыва) — ничего не делаем
+    if (request.revision() == last) {
+        if (wanted != released) {
+            co_return grpc::Status{grpc::StatusCode::ALREADY_EXISTS, revision + " was already applied with other data"};
+        }
+        *response.mutable_progress() = progress;
+        co_return grpc::Status::OK;
+    }
+    if (request.revision() < last) {
+        co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
+                               revision + " is outdated, last applied is " + std::to_string(last)};
+    }
+    if (request.revision() > last + 1) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT,
+                               revision + " skips revision " + std::to_string(last + 1)};
+    }
+    const auto total = static_cast<std::uint32_t>(step.move().nodes_size());
+    if (wanted < released || wanted > total) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT,
+                               "released_nodes must be from " + std::to_string(released) + " (base can't be revoked) to " +
+                                   std::to_string(total)};
+    }
+    auto connection = session->status().connection();
+    if (connection != fms::v1::CONNECTION_STATE_ONLINE) {
+        co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
+                               "robot " + session->robot_id() + " is " + fms::v1::ConnectionState_Name(connection)};
+    }
+
+    if (!session->extend_mission(request.revision(), wanted)) {
+        co_return grpc::Status{grpc::StatusCode::UNAVAILABLE, "mqtt queue is full, try again"};
+    }
+    *response.mutable_progress() = session->mission()->status().steps(session->mission()->current_index()).move();
+    co_return grpc::Status::OK;
 }
 
 asio::awaitable<grpc::Status> DispatchService::pause_robot(const dv1::PauseRobotRequest& request, dv1::PauseRobotResponse&) {

@@ -33,6 +33,9 @@ public:
     bool start_mission(const fms::v1::Mission& mission);   // false — order не ушёл (очередь MQTT)
     bool cancel_mission();   // 5d: отправить cancelOrder; false — не ушло (очередь MQTT)
     void abort_mission(const std::string& message);
+    // T1: ExtendMission — base текущего шага до released_nodes. false — update не ушёл (очередь MQTT),
+    // правка не применена
+    bool extend_mission(std::uint32_t revision, std::uint32_t released_nodes);
     const ActiveMission* mission() const { return mission_.get(); }   // nullptr — робот свободен
 
     const std::string& robot_id() const { return robot_id_; }
@@ -53,6 +56,7 @@ private:
     bool send(const std::string& kind, std::string payload);
     bool request(MqttAction action, const std::string& topic, std::string payload = {});
     bool send_step_order();   // 7: построить и отправить order текущего шага миссии
+    bool send_order(vda5050::Order& order);   // заполнить заголовок и отправить (order и order update)
     std::string send_instant_action(const std::string& action_type, std::vector<vda5050::ActionParameter> parameters = {});
     void check_instant_actions(const vda5050::State& state);
     void on_mission_changed();

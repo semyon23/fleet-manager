@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 import uuid
@@ -122,7 +123,11 @@ def sim_action(seconds: float, blocking: int = fms.BLOCKING_TYPE_HARD) -> fms.Ac
     return action
 
 
-def node(node_id: str, x: float, y: float = 0.0, map_id: str = "map_1", actions=()) -> fms.RouteNode:
+# Карта узлов — та же, что у InitializePosition в conftest: симулятор принимает order только на своей карте
+MAP_ID = os.environ.get("VDA_MAP_ID", "map_1")
+
+
+def node(node_id: str, x: float, y: float = 0.0, map_id: str = MAP_ID, actions=()) -> fms.RouteNode:
     route_node = fms.RouteNode(node_id=node_id, x=x, y=y, map_id=map_id)
     route_node.actions.extend(actions)
     return route_node

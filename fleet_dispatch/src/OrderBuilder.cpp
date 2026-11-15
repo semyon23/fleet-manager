@@ -168,6 +168,17 @@ vda5050::Order build_move_order(const std::string& order_id, const fms::v1::Move
     return order;
 }
 
+vda5050::Order build_move_update(const std::string& order_id, std::uint32_t order_update_id,
+                                 const fms::v1::MoveStep& step, int old_released) {
+    // Весь маршрут с новой base, потом отрезать то, что робот уже знает: до stitching-узла
+    vda5050::Order update = build_move_order(order_id, step);
+    update.order_update_id = order_update_id;
+    const int stitch = old_released - 1;
+    update.nodes.erase(update.nodes.begin(), update.nodes.begin() + stitch);
+    update.edges.erase(update.edges.begin(), update.edges.begin() + stitch);   // ребро i — от узла i
+    return update;
+}
+
 vda5050::Order build_action_order(const std::string& order_id, const fms::v1::ActionStep& step,
                                   const fms::v1::RobotStatus& robot) {
     // Узел, где робот стоит: его id и текущая поза

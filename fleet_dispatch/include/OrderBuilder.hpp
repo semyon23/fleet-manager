@@ -2,7 +2,6 @@
 #define FLEETMANAGERSYSTEM_ORDERBUILDER_H
 
 #pragma once
-
 #include <string>
 
 #include "fms_types.pb.h"
@@ -16,6 +15,13 @@ std::string validate_action_step(const fms::v1::ActionStep& step);
 // MoveStep → VDA order: маршрут по узлам и рёбрам, base и horizon по released_nodes.
 // Заголовок не заполняется — это делает сессия при отправке.
 vda5050::Order build_move_order(const std::string& order_id, const fms::v1::MoveStep& step);
+
+// ExtendMission: order update того же order'а, base — до step.released_nodes узлов.
+// Первый узел — последний узел прежней base (stitching, old_released - 1) со всем содержимым, как
+// в первом order'е (VDA: содержимое decision point не меняется); узлы и рёбра до него не повторяются.
+// sequenceId и actionId — те же, что в первом order'е.
+vda5050::Order build_move_update(const std::string& order_id, std::uint32_t order_update_id,
+                                 const fms::v1::MoveStep& step, int old_released);
 
 // ActionStep → VDA order из одного узла — того, где робот стоит, — с действиями на нём.
 // У робота должны быть last_node_id и pose (он на графе).

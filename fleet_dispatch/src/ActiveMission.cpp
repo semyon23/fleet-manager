@@ -98,6 +98,27 @@ void ActiveMission::order_sent(const vda5050::Order& order, Clock::time_point no
         move->set_released_nodes(static_cast<std::uint32_t>(
             std::count_if(order.nodes.begin(), order.nodes.end(), [](const auto& n) { return n.released; })));
     }
+    last_update_id_ = 0;   // все правки до этого момента — в самом order'е
+}
+
+
+std::uint32_t ActiveMission::released_nodes() const {
+    const auto& move = current_step().move();
+    return move.has_released_nodes() ? move.released_nodes() : static_cast<std::uint32_t>(move.nodes_size());
+}
+
+void ActiveMission::extend(std::uint32_t revision, std::uint32_t released_nodes) {
+    // В самой миссии — чтобы повтор шага (RETRY) ушёл уже с новой base
+    mission_.mutable_nodes(current_)->mutable_move()->set_released_nodes(released_nodes);
+    auto* move = step_status().mutable_move();
+    move->set_revision(revision);
+    move->set_released_nodes(released_nodes);
+    *status_.mutable_updated_at() = TimeUtil::GetCurrentTime();
+}
+
+void ActiveMission::update_sent(const vda5050::Order& update) {
+    tracker_->update_sent(update.order_update_id);
+    last_update_id_ = update.order_update_id;
 }
 
 // ------------------------------------------------------------------ события
@@ -242,6 +263,15 @@ void ActiveMission::update_progress() {
         move->set_last_node_id(current_step().move().nodes(index).node_id());
         move->set_waiting_for_release(tracker_->waiting_for_release());
     }
+    // Правки маршрута: робот принял update с последней правкой (или order, если правки были до него)
+    if (step.has_move() && tracker_->phase() != OrderTracker::Phase::Sent) {
+        auto* move = step.mutable_move();
+        if (tracker_->confirmed_update_id() >= last_update_id_) {
+            move->set_confirmed_revision(move->revision());
+        }
+        move->set_update_rejected(tracker_->update_rejected());
+    }
+
     for (auto& action : *step.mutable_actions()) {
         auto it = tracker_->actions().find(action.action_id());
         if (it != tracker_->actions().end()) {

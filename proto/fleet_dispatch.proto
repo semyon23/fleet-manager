@@ -49,14 +49,16 @@ service FleetDispatch {
   // когда робот подтвердит cancelOrder.
   rpc CancelMission(CancelMissionRequest) returns (CancelMissionResponse);
 
-  // Изменить маршрут текущего шага MoveStep (трафик):
+   // Изменить маршрут текущего шага MoveStep (трафик):
   //   - выдать роботу следующие узлы (расширить base);
   //   - и/или заменить невыданную часть маршрута (horizon) — объезд, другая цель.
+  //     Пока не реализовано (T2): replace_tail → UNIMPLEMENTED.
   // Превращается в VDA order update: тот же orderId, orderUpdateId + 1, первый узел — последний
   // узел base (stitching). Released-часть не меняется никогда: по VDA её нельзя отозвать.
+  // Order шага ещё не отправлен (повтор шага ждёт) — update не нужен: новая base уйдёт в order.
   // Ответ — после отправки update'а роботу; принял ли робот — MoveProgress.confirmed_revision
   // и update_rejected в StreamMissionStatus.
-  // Работает, пока шаг RUNNING, в том числе на паузе.
+  // Работает, пока шаг RUNNING, в том числе на паузе. Робот не ONLINE — FAILED_PRECONDITION.
   rpc ExtendMission(ExtendMissionRequest) returns (ExtendMissionResponse);
 
   // ---------------------------------------------------------------- робот

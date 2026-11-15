@@ -374,16 +374,44 @@ bool RobotSession::send_step_order() {
 
     vda5050::Order order = node.has_move() ? build_move_order(order_id, node.move())
                                            : build_action_order(order_id, node.action(), status_);
-    order.header.header_id = ++order_header_id_;
-    order.header.timestamp = vda5050::make_timestamp();
-    order.header.manufacturer = manufacturer_;
-    order.header.serial_number = serial_number_;
-
-    if (!send("order", nlohmann::json(order).dump())) {
+    if (!send_order(order)) {
         return false;
     }
     mission_->order_sent(order, std::chrono::steady_clock::now());
     spdlog::info("[{}] mission {}: step {} order {} sent, {} nodes", robot_id_, mission_->mission_id(), node.id(),
                  order_id, order.nodes.size());
+    return true;
+}
+
+bool RobotSession::send_order(vda5050::Order& order) {
+    order.header.header_id = ++order_header_id_;
+    order.header.timestamp = vda5050::make_timestamp();
+    order.header.manufacturer = manufacturer_;
+    order.header.serial_number = serial_number_;
+    return send("order", nlohmann::json(order).dump());
+}
+
+// Order шага уже у робота — order update; ещё нет — новая base уйдёт сразу в order.
+// Сначала отправка, потом правка: не ушло — control повторит ту же правку, и она не потеряется
+bool RobotSession::extend_mission(std::uint32_t revision, std::uint32_t released_nodes) {
+    const OrderTracker* tracker = mission_->tracker();
+    const std::uint32_t old_released = mission_->released_nodes();
+    if (tracker && released_nodes > old_released) {
+        fms::v1::MoveStep move = mission_->current_step().move();
+        move.set_released_nodes(released_nodes);
+        vda5050::Order update = build_move_update(tracker->order_id(), tracker->sent_update_id() + 1, move,
+                                                  static_cast<int>(old_released));
+        if (!send_order(update)) {
+            return false;
+        }
+        mission_->extend(revision, released_nodes);
+        mission_->update_sent(update);
+        spdlog::info("[{}] mission {}: step {} order {} update {} sent, released {}/{} nodes", robot_id_,
+                     mission_->mission_id(), mission_->current_step().id(), update.order_id, update.order_update_id,
+                     released_nodes, move.nodes_size());
+    } else {
+        mission_->extend(revision, released_nodes);
+    }
+    mission_hub_.publish(mission_->status());
     return true;
 }

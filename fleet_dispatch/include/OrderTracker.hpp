@@ -32,6 +32,13 @@ public:
     int passed_nodes() const { return passed_nodes_; }        // сколько узлов маршрута робот уже достиг
     int total_nodes() const { return total_nodes_; }
     bool waiting_for_release() const { return waiting_for_release_; }   // base кончилась, ждёт продления
+    // ExtendMission: отправлен order update с этим номером
+    void update_sent(std::uint32_t order_update_id) { order_update_id_ = order_update_id; }
+    std::uint32_t sent_update_id() const { return order_update_id_; }
+    std::uint32_t confirmed_update_id() const { return confirmed_update_id_; }   // orderUpdateId из state
+    // Робот отклонил последний update: едет по старому маршруту. Пусто — отказа нет
+    const std::string& update_rejected() const { return update_rejected_; }
+
     const std::string& failure() const { return failure_; }   // причина при Rejected / Failed
     const std::unordered_map<std::string, vda5050::ActionStatus>& actions() const { return actions_; }
 private:
@@ -40,6 +47,9 @@ private:
 
     std::string order_id_;
     std::uint32_t order_update_id_;
+    std::uint32_t confirmed_update_id_ = 0;
+    std::string update_rejected_;
+
     Clock::time_point sent_at_;
     int total_nodes_;
     std::unordered_map<std::string, vda5050::ActionStatus> actions_;

@@ -50,7 +50,7 @@ VDA_BROKER_HOST=127.0.0.1 VDA_USER=user VDA_PASSWORD=... .venv/bin/python -m pyt
 | `VDA_INTERFACE` / `VDA_MAJOR` | `amr` / `v3` | Начало топика |
 | `VDA_MANUFACTURER` / `VDA_SERIAL` | `ktc` / `amr1` | Робот, на котором идут тесты |
 | `VDA_SERIAL2` | `amr2` | Второй робот (тест «та же миссия на другом роботе»); нет его — тест пропускается |
-| `VDA_MAP_ID` | `map_1` | Карта робота |
+| `VDA_MAP_ID` | `map_1` | Карта робота: в `InitializePosition` и в узлах миссий. Должна совпадать с `map_id` в конфиге симулятора, иначе он отклонит order |
 | `VDA_SECONDS_PER_METER` | `2` | Запас времени на метр пути |
 | `VDA_TIMEOUT_SCALE` | `1.0` | Множитель всех таймаутов |
 | `DISPATCH_RUN_SLOW` | — | `1` — включить медленный тест STALE (~1,5 мин) |
@@ -62,6 +62,7 @@ VDA_BROKER_HOST=127.0.0.1 VDA_USER=user VDA_PASSWORD=... .venv/bin/python -m pyt
 | `test_robots.py` | `AddRobot` повторно и с конфликтом, обязательные поля, `RemoveRobot`; `StreamRobotStatus`: снимок первым, каждый state доходит, `removed_robot_id`, два подписчика, фильтр, битое сообщение считается в `protocol` |
 | `test_instant_actions.py` | Пауза и снятие паузы на ходу; `InitializePosition` ставит робота на узел, проверка полей, отказ робота во время езды |
 | `test_missions.py` | Миссия с маршрутом и действием до `COMPLETED` с прогрессом по узлам; `ActionStep`; отказ робота → `ORDER_REJECTED`; завершённая миссия в снимке; робот занят; маршрут не от того узла; некорректные миссии; та же миссия на другом роботе; `CancelMission` → `CANCELING` → `CANCELED`; `RemoveRobot` посреди миссии → `ROBOT_REMOVED` |
+| `test_extend.py` | `ExtendMission` (трафик): робот встаёт в конце base и ждёт (`waiting_for_release`), продление — order update с тем же `orderId`, робот доезжает, `confirmed_revision`; продления на ходу — без остановки; выдан только стартовый узел — робот стоит; отмена во время ожидания; повтор правки, `ALREADY_EXISTS`, пропуск и устаревший номер, отзыв base, не тот шаг, `replace_tail` → `UNIMPLEMENTED` |
 | `test_database.py` | dispatch пишет в базу: статус после подключения, важное изменение — сразу, `RemoveRobot` не стирает статус; factsheet уже в базе, когда в стриме появилось новое `factsheet_received_at`, время совпадает до миллисекунды |
 | `test_stale.py` | Замороженный симулятор (`SIGSTOP`) → `STALE`, размороженный → `ONLINE`. Медленный, только с `DISPATCH_RUN_SLOW=1`, и тесты должны работать на той же машине, что и симулятор |
 

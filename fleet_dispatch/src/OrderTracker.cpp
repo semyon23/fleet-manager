@@ -32,7 +32,7 @@ void OrderTracker::on_state(const vda5050::State& state) {
 
     // 1. Ждём, пока робот примет order
     if (phase_ == Phase::Sent) {
-        if (ours && state.order_update_id == order_update_id_) {
+        if (ours) {
             phase_ = Phase::Accepted;
         } else {
             // При отказе робот оставляет старый order и пишет ошибку со ссылкой на наш orderId
@@ -54,6 +54,10 @@ void OrderTracker::on_state(const vda5050::State& state) {
         passed_nodes_ = static_cast<int>(state.last_node_sequence_id / 2) + 1;
     }
 
+    // 3a. Правки маршрута (ExtendMission): какой update робот принял. Он отстаёт от отправленного, а
+    //     в state ошибка про наш order — последний update отклонён, робот едет по прежней base
+    confirmed_update_id_ = state.order_update_id;
+    update_rejected_ = confirmed_update_id_ < order_update_id_ ? order_error(state) : "";
     // 4. Статусы наших действий. Провал действия запоминаем, но order не заканчиваем:
     //    робот может ещё ехать — ждём, пока он закончит, иначе следующий order наткнётся на занятого робота
     for (const auto& action_state : state.action_states) {

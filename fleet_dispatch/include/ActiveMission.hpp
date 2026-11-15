@@ -24,6 +24,15 @@ public:
     std::string current_order_id() const;
     void order_sent(const vda5050::Order& order, Clock::time_point now);
 
+    // ExtendMission (T1). Проверки — в DispatchService, здесь только применить.
+    // Сколько узлов текущего шага MoveStep выдано (или уйдёт в base первым order'ом)
+    std::uint32_t released_nodes() const;
+    // Правка revision: base текущего шага — до released_nodes узлов
+    void extend(std::uint32_t revision, std::uint32_t released_nodes);
+    // Order update с правкой отправлен роботу
+    void update_sent(const vda5050::Order& update);
+    // Order текущего шага у робота; nullptr — ещё не отправлен (или шаг без order'а)
+    const OrderTracker* tracker() const { return tracker_ ? &*tracker_ : nullptr; }
     // true — статус миссии изменился (залогировать, отдать подписчикам, отправить order следующего шага)
     bool on_state(const vda5050::State& state);
     bool on_tick(Clock::time_point now);
@@ -53,6 +62,7 @@ private:
     fms::v1::MissionStatus status_;
     int current_ = 0;                         // индекс текущего шага
     std::optional<OrderTracker> tracker_;     // order текущего шага; пусто — ещё не отправлен или шаг без order'а
+    std::uint32_t last_update_id_ = 0;        // orderUpdateId, в котором ушла последняя правка (0 — в самом order'е)
     Clock::time_point mission_started_at_;
     Clock::time_point step_started_at_;
 
