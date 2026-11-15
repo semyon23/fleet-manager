@@ -19,13 +19,14 @@ add_executable(fleet_control fc_main.cpp
         missions/Mission.cpp
         missions/MissionStore.cpp
         api/MissionApi.cpp
-        api/MissionApi.hpp
         assignment/MissionAssigner.cpp
-        assignment/MissionAssigner.hpp
         missions/MissionRunner.cpp
-        missions/MissionRunner.hpp
         api/RouteApi.cpp
-        api/RouteApi.hpp
+        alarms/AlarmRules.cpp
+        journal/RobotEvents.cpp
+        journal/Journal.cpp
+        alarms/AlarmEngine.cpp
+        api/AlarmApi.cpp
 
 )
 target_include_directories(fleet_control PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -45,19 +46,23 @@ if(FMS_BUILD_TESTS)
     find_package(Catch2 3 CONFIG REQUIRED)
     include(Catch)
 
-    # Тесты на C++ (Catch2)
     add_executable(fleet_control_unit
             unit_tests/test_router.cpp
             unit_tests/test_mission.cpp
+            unit_tests/test_alarm_rules.cpp
+            unit_tests/test_robot_events.cpp
             routing/Router.cpp
             maps/Graph.cpp
             missions/Mission.cpp
+            alarms/AlarmRules.cpp
+            journal/RobotEvents.cpp
     )
     target_include_directories(fleet_control_unit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(fleet_control_unit PRIVATE
             Catch2::Catch2WithMain
             Boost::headers
             nlohmann_json::nlohmann_json
+            proto_lib
     )
     catch_discover_tests(fleet_control_unit)
 
@@ -67,6 +72,8 @@ if(FMS_BUILD_TESTS)
             unit_tests/warehouse.cpp
             routing/Router.cpp
             maps/Graph.cpp
+            unit_tests/test_alarm_rules.cpp
+            unit_tests/test_robot_events.cpp
     )
     target_include_directories(fleet_control_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(fleet_control_bench PRIVATE

@@ -392,3 +392,19 @@ def sim_map(maps) -> dict:
     code, created = maps.create(id=SIM_MAP)
     assert code == 201, created
     return created
+
+
+@pytest.fixture(scope="session", autouse=True)
+def journal_cleanup():
+    """M-5: тестовые роботы попадают в журнал и поднимают тревоги (ROBOT_OFFLINE у тех, кто не выходит на связь).
+    Удалить их через API нельзя (история) — в конце прогона удаляем строки тестовых роботов и карт через psql."""
+    yield
+    sql = ("DELETE FROM events WHERE robot_id LIKE 'test-ctl-%' OR details->>'mapId' LIKE 'test-ctl-map%'; "
+           "DELETE FROM alarms WHERE robot_id LIKE 'test-ctl-%'")
+    try:
+        result = subprocess.run(["psql", DATABASE_URL, "-c", sql], capture_output=True, text=True, timeout=10)
+        failed = result.returncode != 0 and result.stderr
+    except (OSError, subprocess.TimeoutExpired) as e:
+        failed = str(e)
+    if failed:
+        warnings.warn(f"test events and alarms are left in the database ({failed.strip()}): psql -c \"{sql}\"")

@@ -8,11 +8,11 @@
 #include "services/Services.hpp"
 #include "fleet/FleetSync.hpp"
 #include "http_server.hpp"
-
+#include "journal/Journal.hpp"
 
 class RobotApi {
 public:
-    RobotApi(Services& services, FleetSync& sync, AvailabilityTracker& availability, MapStore& maps, ApiRouter& router);
+    RobotApi(Services& services, FleetSync& sync, AvailabilityTracker& availability, MapStore& maps, Journal& journal, ApiRouter& router);
 
 private:
     asio::awaitable<HttpResponse> create_robot(const HttpRequest& req);
@@ -26,6 +26,7 @@ private:
     FleetSync& sync_;
     AvailabilityTracker& availability_;
     MapStore& maps_;
+    Journal& journal_;
 };
 
 

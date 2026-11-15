@@ -38,6 +38,15 @@ public:
     std::vector<IdleRobot> idle_robots() const;
 
     std::function<void()> on_idle;   // робот стал IDLE: Allocator проверяет очередь
+
+    // M-5: журнал и тревоги. before == nullptr — раньше ничего не знали
+    std::function<void(const std::string& robot_id, const fms::v1::RobotStatus* before,
+                       const fms::v1::RobotStatus& after)> on_status_change;   // не для удаляемых
+    std::function<void(const std::string& robot_id, const fms::database::v1::RobotAvailability* before,
+                       const fms::database::v1::RobotAvailability& after)> on_availability;
+    std::function<void(const std::string& robot_id)> on_robot_removed;            // удаляется или удалён
+    std::function<void(const std::set<std::string>& robot_ids)> on_keep_only;      // остальных в базе нет
+    std::function<void(bool connected)> on_dispatch;
 private:
     struct Robot {
         bool deleting = false;

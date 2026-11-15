@@ -53,8 +53,12 @@ void AvailabilityTracker::stop() {
 
 void AvailabilityTracker::on_status(const fms::v1::RobotStatus& status) {
     Robot& robot = robots_[status.robot_id()];
+    const std::optional<fms::v1::RobotStatus> before = robot.status;
     robot.status = status;
     robot.status_from_stream = true;
+    if (on_status_change && !robot.deleting) {
+        on_status_change(status.robot_id(), before ? &*before : nullptr, status);
+    }
     update(status.robot_id());
 }
 
@@ -71,9 +75,11 @@ void AvailabilityTracker::on_robot(const dbv1::RobotRecord& record) {
 void AvailabilityTracker::set_deleting(const std::string& robot_id) {
     robots_[robot_id].deleting = true;
     update(robot_id);
+    if (on_robot_removed) on_robot_removed(robot_id);   // M-5: тревоги удаляемого — снять и подтвердить
 }
 
 void AvailabilityTracker::set_dispatch_connected(bool connected) {
+    if (on_dispatch) on_dispatch(connected);
     dispatch_connected_ = connected;
     for (auto& [robot_id, robot] : robots_) {
         if (!connected) {
@@ -93,12 +99,14 @@ void AvailabilityTracker::keep_only(const std::set<std::string>& robot_ids) {
     std::erase_if(robots_, [&](const auto& item) { return !robot_ids.contains(item.first); });
     std::erase_if(current_, [&](const auto& item) { return !robot_ids.contains(item.first); });
     std::erase_if(pending_, [&](const auto& item) { return !robot_ids.contains(item.first); });
+    if (on_keep_only) on_keep_only(robot_ids);
 }
 
 void AvailabilityTracker::remove(const std::string& robot_id) {
     robots_.erase(robot_id);
     current_.erase(robot_id);
     pending_.erase(robot_id);   // в базе робота уже нет или вот-вот не будет — писать нечего
+    if (on_robot_removed) on_robot_removed(robot_id);
 }
 
 std::vector<AvailabilityTracker::IdleRobot> AvailabilityTracker::idle_robots() const {
@@ -137,6 +145,11 @@ void AvailabilityTracker::update(const std::string& robot_id) {
     if (it != current_.end() && google::protobuf::util::MessageDifferencer::Equals(it->second, availability)) {
         return;   // не изменилась — писать нечего
     }
+
+    if (on_availability) {
+        on_availability(robot_id, it == current_.end() ? nullptr : &it->second, availability);
+    }
+
     spdlog::info("[availability] {}: {}", robot_id, describe(availability));
     current_[robot_id] = availability;
     pending_[robot_id] = availability;

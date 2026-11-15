@@ -35,11 +35,12 @@ void read_labels(const json& body, google::protobuf::Map<std::string, std::strin
 
 }  // namespace
 
-RobotApi::RobotApi(Services& services, FleetSync& sync, AvailabilityTracker& availability, MapStore& maps, ApiRouter& router)
+RobotApi::RobotApi(Services& services, FleetSync& sync, AvailabilityTracker& availability, MapStore& maps, Journal& journal, ApiRouter& router)
     : services_(services),
       sync_(sync),
       availability_(availability),
-      maps_(maps){
+      maps_(maps),
+      journal_(journal){
 
     router.add_route(http::verb::post, "/api/fms/robots",
         [this](const HttpRequest& req, const PathParams&) { return create_robot(req); });
@@ -96,6 +97,8 @@ asio::awaitable<HttpResponse> RobotApi::create_robot(const HttpRequest& req) {
     dbv1::RobotRecord record;
     *record.mutable_spec() = created.spec();
     availability_.on_robot(record);   // C-4b: availability есть сразу — по контракту она не null
+    journal_.add("ROBOT", {"REGISTERED", {{"manufacturer", spec.manufacturer()}, {"serialNumber", spec.serial_number()}}},
+                 spec.robot_id());
 
     *record.mutable_spec() = created.spec();
     co_return json_response(req, http::status::created, robot_json(record).dump());
@@ -181,6 +184,8 @@ asio::awaitable<HttpResponse> RobotApi::delete_robot(const HttpRequest& req, std
                  mission_id.empty() ? "" : ", its mission " + mission_id + " is canceled");
 
     availability_.set_deleting(robot_id);   // C-4b
+    journal_.add("ROBOT", {"DELETED", {{"force", force}, {"canceledMission", mission_id.empty() ? json(nullptr) : json(mission_id)}}},
+             robot_id);
     co_await sync_.finish_delete(robot_id);
 
     dbv1::RobotRecord record = current.robot();
@@ -208,6 +213,7 @@ asio::awaitable<HttpResponse> RobotApi::pause_robot(const HttpRequest& req, std:
     if (!status.ok()) {
         co_return grpc_error(req, status);   // NOT_FOUND — dispatch не знает робота
     }
+    journal_.add("ROBOT", {pause ? "PAUSED" : "RESUMED"}, robot_id);
     co_return json_response(req, http::status::accepted, "{}");
 }
 
@@ -283,5 +289,6 @@ asio::awaitable<HttpResponse> RobotApi::set_position(const HttpRequest& req, std
     }
     spdlog::info("[robot_api] robot {} placed on node {} of map {} ({:.2f}, {:.2f})", robot_id, node_id, map_id,
                  node.x, node.y);
+    journal_.add("ROBOT", {"POSITION", {{"mapId", map_id}, {"nodeId", node_id}}}, robot_id);
     co_return json_response(req, http::status::accepted, "{}");
 }

@@ -114,7 +114,8 @@ HttpResponse confirmation_required(const HttpRequest& req, const std::vector<std
 
 }  // namespace
 
-MapApi::MapApi(Services& services, MapStore& maps, ApiRouter& router) : services_(services), maps_(maps) {
+MapApi::MapApi(Services& services, MapStore& maps, Journal& journal, ApiRouter& router)
+    : services_(services), maps_(maps), journal_(journal) {
     router.add_route(http::verb::post, "/api/fms/maps",
         [this](const HttpRequest& req, const PathParams&) { return create_map(req); });
     router.add_route(http::verb::patch, "/api/fms/maps/{id}",
@@ -187,6 +188,8 @@ asio::awaitable<HttpResponse> MapApi::create_map(const HttpRequest& req) {
     spdlog::info("[map_api] map {} created: {} nodes, {} edges", map_id, graph.nodes.size(), graph.edges.size());
     maps_.put(std::move(graph), std::move(router));
 
+    journal_.add("SYSTEM", {"MAP_SAVED", {{"mapId", map_id}, {"version", created.map().version()},
+                                          {"forced", query_param(req, "force") == "true"}}});
     dbv1::MapRecord record = created.map();
     record.set_image(image);   // база возвращает запись без картинки
     co_return json_response(req, http::status::created, map_json(record, true).dump());
@@ -275,6 +278,9 @@ asio::awaitable<HttpResponse> MapApi::update_map(const HttpRequest& req, std::st
 
     graph.version = updated.map().version();
     maps_.put(std::move(graph), std::move(router));
+
+    journal_.add("SYSTEM", {"MAP_SAVED", {{"mapId", map_id}, {"version", updated.map().version()},
+                                      {"forced", query_param(req, "force") == "true"}}});
     spdlog::info("[map_api] map {} saved, version {}", map_id, updated.map().version());
 
     dbv1::MapRecord record = updated.map();
@@ -331,6 +337,9 @@ asio::awaitable<HttpResponse> MapApi::delete_map(const HttpRequest& req, std::st
         co_return grpc_error(req, status);   // NOT_FOUND → 404
     }
     maps_.remove(map_id);
+
+    journal_.add("SYSTEM", {"MAP_DELETED", {{"mapId", map_id}}});
+
     spdlog::info("[map_api] map {} deleted", map_id);
     co_return json_response(req, http::status::no_content, "");
 }
