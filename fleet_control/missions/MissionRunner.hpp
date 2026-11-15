@@ -81,6 +81,7 @@ private:
     asio::awaitable<void> send(std::string mission_id, std::string start_node);
     asio::awaitable<void> watch_dispatch();
     asio::awaitable<void> overdue_loop();
+    asio::awaitable<void> restore(std::string mission_id);
     void on_update(const fms::dispatch::v1::MissionStatusUpdate& update);
     void reconcile(const fms::dispatch::v1::MissionSnapshot& snapshot);
 

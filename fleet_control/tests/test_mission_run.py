@@ -9,11 +9,13 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 import time
 
 import pytest
 
-from conftest import SIM_MANUFACTURER, SIM_MAP, Missions
+from conftest import CONTROL, SIM_MANUFACTURER, SIM_MAP, Missions, http
 from test_availability import wait_availability
 
 RESOLUTION = 0.05
@@ -408,6 +410,51 @@ def test_route_shows_next_mission(missions, robots, two_robots):
     assert robot_route(missions, amr1) is None
 
 
+
+# ------------------------------------------------------------------ T1.0b: перезапуск control
+
+# Команда, которая перезапускает fleet_control (control должен быть запущен отдельно от run-stand.sh:
+# там остановка одного сервиса останавливает все). Не задана — тест пропускается. См. README.md
+CONTROL_RESTART = os.environ.get("CONTROL_RESTART")
+
+
+def wait_routes_after_restart(robot_id: str, timeout: float = 30) -> dict:
+    """Маршрут робота в /routes, пока control поднимается: соединение отклонено и ответы не 200 — ждём."""
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            last = http("GET", f"{CONTROL}/api/fms/routes?mapId={SIM_MAP}")
+        except OSError as e:
+            last = e
+        else:
+            code, body = last
+            route = next((r for r in body["items"] if r["robotId"] == robot_id), None) if code == 200 else None
+            if route is not None:
+                return route
+        time.sleep(0.2)
+    raise TimeoutError(f"no route of {robot_id} after control restart in {timeout:.0f} s: {last}")
+
+
+@pytest.mark.skipif(not CONTROL_RESTART, reason="set CONTROL_RESTART to a command that restarts fleet_control")
+def test_route_survives_control_restart(missions, two_robots):
+    """amr1 едет a → d, control перезапускается посреди пути: маршрут берётся у dispatch (GetMission) —
+    снова в /routes, с того узла, где робот сейчас, а не с начала; миссия доезжает, а не FAILED «lost»."""
+    amr1, _ = two_robots
+    _, created = missions.create(Missions.body(SIM_MAP, requestedRobotId=amr1, steps=[{"nodeId": "d"}]))
+    wait_route(missions, amr1, lambda r: r is not None and r["released"]["nodes"][0] != "a", "amr1 passed a")
+
+    subprocess.run(CONTROL_RESTART, shell=True, check=True, timeout=30)
+
+    route = wait_routes_after_restart(amr1)
+    assert route["missionId"] == created["id"]
+    assert route["goals"] == ["d"]
+    assert_path(route["released"], A_TO_D)
+    assert route["released"]["nodes"][0] != "a", "route restored from the start, not from where the robot is"
+
+    mission = wait_mission(missions, created["id"], {"COMPLETED", "FAILED", "CANCELED"})
+    assert mission["state"] == "COMPLETED", mission
+    assert robot_route(missions, amr1) is None
 
 # ------------------------------------------------------------------ c3: история миссии
 #

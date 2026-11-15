@@ -185,3 +185,37 @@ def test_revisions_and_invalid_requests(robot):
     status = wait_final(robot, missions, mission_id)
     assert status.state == fms.MISSION_STATE_COMPLETED, status
     assert status.steps[0].move.revision == 2 and status.steps[0].move.confirmed_revision == 2
+
+
+# ------------------------------------------------------------------ GetMission (T1.0b)
+
+def get_mission(robot, mission_id: str):
+    return robot.dispatch.GetMission(dpb.GetMissionRequest(mission_id=mission_id))
+
+
+def test_get_mission_returns_route_with_extensions(robot):
+    """control после перезапуска берёт маршрут у dispatch: те же узлы и рёбра, released — с учётом продлений."""
+    missions = robot.mission_updates()
+    mission_id = start_waiting_at_a(robot, missions)
+
+    response = get_mission(robot, mission_id)
+    assert response.mission.mission_id == mission_id
+    assert response.mission.robot_id == robot.robot_id
+    move = response.mission.nodes[0].move
+    assert [n.node_id for n in move.nodes] == [ORIGIN, "a", "b", "c"]
+    assert [e.edge_id for e in move.edges] == ["e0", "e1", "e2"]
+    assert move.released_nodes == 2
+    assert response.status.state == fms.MISSION_STATE_RUNNING
+    assert response.status.steps[0].move.last_node_id == "a"
+    assert response.status.steps[0].move.waiting_for_release
+
+    extend(robot, mission_id, revision=1, released_nodes=4)
+    response = get_mission(robot, mission_id)
+    assert response.mission.nodes[0].move.released_nodes == 4
+    assert response.status.steps[0].move.revision == 1
+
+    status = wait_final(robot, missions, mission_id)
+    assert status.state == fms.MISSION_STATE_COMPLETED, status
+    # закончилась — dispatch её больше не ведёт; итог — в снимке стрима
+    expect_error(grpc.StatusCode.NOT_FOUND, get_mission, robot, mission_id)
+    expect_error(grpc.StatusCode.NOT_FOUND, get_mission, robot, "no-such-mission")

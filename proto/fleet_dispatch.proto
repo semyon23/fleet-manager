@@ -61,6 +61,12 @@ service FleetDispatch {
   // Работает, пока шаг RUNNING, в том числе на паузе. Робот не ONLINE — FAILED_PRECONDITION.
   rpc ExtendMission(ExtendMissionRequest) returns (ExtendMissionResponse);
 
+
+  // Миссия, как её сейчас выполняет dispatch: шаги с маршрутами (у текущего MoveStep released_nodes —
+  // с учётом всех ExtendMission) и статус. Для control после перезапуска: восстановить маршруты и то,
+  // что уже выдано роботу. Только миссии, которые dispatch ведёт сейчас; закончилась — NOT_FOUND
+  // (итог — в снимке StreamMissionStatus).
+  rpc GetMission(GetMissionRequest) returns (GetMissionResponse);
   // ---------------------------------------------------------------- робот
 
   // VDA startPause / stopPause. Действует на робота, а не на миссию.
@@ -222,3 +228,12 @@ message MissionStatusUpdate {
     MissionNotification notification = 3;
   }
 }
+
+message GetMissionRequest {
+  string mission_id = 1;
+}
+message GetMissionResponse {
+  fms.v1.Mission mission = 1;          // как в AddMission, но released_nodes текущего шага — текущие
+  fms.v1.MissionStatus status = 2;
+}
+

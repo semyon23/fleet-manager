@@ -23,8 +23,8 @@ using ExtendMissionRPC      = agrpc::ServerRPC<&AsyncService::RequestExtendMissi
 using PauseRobotRPC         = agrpc::ServerRPC<&AsyncService::RequestPauseRobot>;
 using ResumeRobotRPC        = agrpc::ServerRPC<&AsyncService::RequestResumeRobot>;
 using InitializePositionRPC = agrpc::ServerRPC<&AsyncService::RequestInitializePosition>;
-//using StreamRobotStatusRPC   = agrpc::ServerRPC<&AsyncService::RequestStreamRobotStatus>;
-//using StreamMissionStatusRPC = agrpc::ServerRPC<&AsyncService::RequestStreamMissionStatus>;
+
+using GetMissionRPC         = agrpc::ServerRPC<&AsyncService::RequestGetMission>;
 
 const auto on_handler_done = [](std::exception_ptr error) {
     if (!error) return;
@@ -177,6 +177,15 @@ void DispatchService::start() {
 
             mission_hub_.unsubscribe(subscriber);
             co_await rpc.finish(status);
+        },
+        on_handler_done);
+
+    agrpc::register_awaitable_rpc_handler<GetMissionRPC>(
+        grpc_context_, service_,
+        [this](GetMissionRPC& rpc, GetMissionRPC::Request& request) -> asio::awaitable<void> {
+            GetMissionRPC::Response response;
+            grpc::Status status = co_await get_mission(request, response);
+            co_await rpc.finish(response, status);
         },
         on_handler_done);
 }
@@ -421,4 +430,15 @@ RobotSession* DispatchService::find_online_robot(const std::string& robot_id, gr
         return nullptr;
     }
     return session;
+}
+
+asio::awaitable<grpc::Status> DispatchService::get_mission(const dv1::GetMissionRequest& request,
+                                                           dv1::GetMissionResponse& response) {
+    RobotSession* session = fleet_registry_.find_by_mission(request.mission_id());
+    if (!session) {
+        co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "mission " + request.mission_id() + " is not running"};
+    }
+    *response.mutable_mission() = session->mission()->mission();
+    *response.mutable_status() = session->mission()->status();
+    co_return grpc::Status::OK;
 }

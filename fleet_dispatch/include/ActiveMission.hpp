@@ -45,7 +45,7 @@ public:
     int current_index() const { return std::min(current_, mission_.nodes_size() - 1); }
     const std::string& mission_id() const { return mission_.mission_id(); }
     const fms::v1::MissionStatus& status() const { return status_; }
-
+    const fms::v1::Mission& mission() const { return mission_; }   // с правками ExtendMission
 private:
     void start_step(Clock::time_point now);
     void check_step(Clock::time_point now);   // шаг закончился? таймауты?
