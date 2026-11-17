@@ -27,6 +27,8 @@ add_executable(fleet_control fc_main.cpp
         journal/Journal.cpp
         alarms/AlarmEngine.cpp
         api/AlarmApi.cpp
+        missions/RouteParts.cpp
+
 
 )
 target_include_directories(fleet_control PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -51,11 +53,14 @@ if(FMS_BUILD_TESTS)
             unit_tests/test_mission.cpp
             unit_tests/test_alarm_rules.cpp
             unit_tests/test_robot_events.cpp
+            unit_tests/test_route_parts.cpp
             routing/Router.cpp
             maps/Graph.cpp
             missions/Mission.cpp
             alarms/AlarmRules.cpp
             journal/RobotEvents.cpp
+
+            missions/RouteParts.cpp
     )
     target_include_directories(fleet_control_unit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(fleet_control_unit PRIVATE
@@ -72,8 +77,6 @@ if(FMS_BUILD_TESTS)
             unit_tests/warehouse.cpp
             routing/Router.cpp
             maps/Graph.cpp
-            unit_tests/test_alarm_rules.cpp
-            unit_tests/test_robot_events.cpp
     )
     target_include_directories(fleet_control_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(fleet_control_bench PRIVATE

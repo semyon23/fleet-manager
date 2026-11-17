@@ -16,9 +16,12 @@ using nlohmann::json;
 
 namespace {
 
-constexpr auto kReconnectDelay = std::chrono::seconds(2);
-constexpr auto kOverduePeriod = std::chrono::seconds(5);
+    constexpr auto kReconnectDelay = std::chrono::seconds(2);
+    constexpr auto kOverduePeriod = std::chrono::seconds(5);
     constexpr auto kLoadPoll = std::chrono::milliseconds(100);
+    constexpr auto kRestorePeriod = std::chrono::seconds(2);
+
+
 void log_failure(std::exception_ptr error) {
     if (!error) return;
     try {
@@ -75,11 +78,13 @@ MissionRunner::MissionRunner(asio::io_context& io_context, Services& services, M
       missions_(missions),
       maps_(maps),
       reconnect_timer_(io_context),
-      overdue_timer_(io_context) {}
+      overdue_timer_(io_context),
+      restore_timer_(io_context) {}
 
 void MissionRunner::start() {
     asio::co_spawn(io_context_, watch_dispatch(), log_failure);
     asio::co_spawn(io_context_, overdue_loop(), log_failure);
+    asio::co_spawn(io_context_, restore_loop(), log_failure);
 }
 
 void MissionRunner::stop() {
@@ -89,6 +94,7 @@ void MissionRunner::stop() {
     }
     reconnect_timer_.cancel();
     overdue_timer_.cancel();
+    restore_timer_.cancel();
 }
 
 // ==================================================================== отправка в dispatch
@@ -218,6 +224,17 @@ std::optional<fms1::Mission> MissionRunner::build(const Mission& mission, const 
         plan.routes.push_back(std::move(ids));
         plan.edges.push_back(std::move(edge_ids));
         plan.seconds.push_back(route->seconds);
+
+        // Пока трафик не подключён, control разрешает весь шаг.
+        // Начальный прогресс нужен и до первого сообщения dispatch.
+        fms1::MoveProgress progress;
+        progress.set_last_node_id(move->nodes(0).node_id());
+        progress.set_last_node_index(0);
+        progress.set_released_nodes(static_cast<std::uint32_t>(move->nodes_size()));
+        progress.set_total_nodes(static_cast<std::uint32_t>(move->nodes_size()));
+
+        plan.progress.push_back(std::move(progress));
+
         from = route->nodes.back();   // следующий шаг — оттуда, где закончился этот
     }
     plan.last_node = start_node;
@@ -225,9 +242,48 @@ std::optional<fms1::Mission> MissionRunner::build(const Mission& mission, const 
     return result;
 }
 
+
+void MissionRunner::update_plan(
+    Plan& plan,
+    const fms1::MissionStatus& status) {
+
+    for (size_t i = 0; i < plan.progress.size(); ++i) {
+        const std::string step_id = std::format("s{}", i);
+
+        for (const auto& step : status.steps()) {
+            if (step.node_id() != step_id || !step.has_move()) {
+                continue;
+            }
+
+            // Копируем весь прогресс, включая сброс ожидания,
+            // новую revision и текст отказа обновления.
+            plan.progress[i] = step.move();
+
+            if (status.current_node_id() == step_id) {
+                const size_t at = step.move().last_node_index();
+
+                if (i < plan.routes.size() &&
+                    at < plan.routes[i].size()) {
+                    plan.last_node = plan.routes[i][at];
+                    }
+            }
+
+            break;
+        }
+    }
+}
+
 // ==================================================================== статусы
 
 void MissionRunner::apply(Mission& mission, const fms1::MissionStatus& status) {
+    auto plan = plans_.find(mission.id);
+
+    if (plan != plans_.end()) {
+        update_plan(plan->second, status);
+    } else {
+        waiting_plans_[mission.id] = status;
+    }
+
     const json before = mission_json(mission);
     const std::string old_state = mission.state;
 
@@ -243,7 +299,7 @@ void MissionRunner::apply(Mission& mission, const fms1::MissionStatus& status) {
     if (status.current_node_id().starts_with('s')) {
         mission.current_step = std::stoi(status.current_node_id().substr(1));
     }
-    auto plan = plans_.find(mission.id);
+
     for (const auto& step : status.steps()) {
         if (!step.node_id().starts_with('s')) {
             continue;
@@ -263,10 +319,7 @@ void MissionRunner::apply(Mission& mission, const fms1::MissionStatus& status) {
                                      {"actionType", action.action_type()},
                                      {"status", without_prefix(fms1::ActionStatus_Name(action.status()), "ACTION_STATUS_")}});
         }
-        // Где робот сейчас — по ходу текущего шага (для c1b: сколько ему ещё ехать)
-        if (plan != plans_.end() && state.state == "RUNNING" && step.has_move() && !step.move().last_node_id().empty()) {
-            plan->second.last_node = step.move().last_node_id();
-        }
+
     }
     if (status.has_error()) {
         mission.error = MissionError{without_prefix(fms1::MissionErrorCode_Name(status.error().code()), "MISSION_ERROR_CODE_"),
@@ -294,6 +347,7 @@ void MissionRunner::apply(Mission& mission, const fms1::MissionStatus& status) {
         end_node = plan->second.routes.back().back();
         plans_.erase(plan);
     }
+    waiting_plans_.erase(mission.id);
     missions_.changed(mission);   // завершённая уходит из памяти: mission дальше не трогаем
     release_next(robot_id, completed, end_node);
 }
@@ -303,7 +357,9 @@ void MissionRunner::back_to_queue(Mission& mission, const std::string& why) {
     mission.state = "QUEUED";
     mission.robot_id.clear();
     mission.assigned_at_ms.reset();
+
     plans_.erase(mission.id);
+    waiting_plans_.erase(mission.id);
     // Не будим назначение сразу: робот, которого dispatch счёл занятым, тут же получил бы её снова.
     // Следующая попытка — по страховочному таймеру назначения (5 с) или по любому событию
     missions_.changed(mission, why);
@@ -321,6 +377,7 @@ void MissionRunner::finish(Mission& mission, const std::string& state, std::opti
     spdlog::info("[runner] mission {} {}{}", mission.id, state, mission.error ? ": " + mission.error->message : "");
     const std::string robot_id = mission.robot_id;
     plans_.erase(mission.id);
+    waiting_plans_.erase(mission.id);
     missions_.changed(mission, why);   // завершённая уходит из памяти: mission дальше не трогаем
     release_next(robot_id, false, "");
 }
@@ -341,6 +398,22 @@ std::vector<MissionRunner::SoonFree> MissionRunner::soon_free() {
         if (current >= mission->steps.size()) {
             continue;
         }
+
+        if (current >= plan->second.progress.size()) {
+            continue;
+        }
+
+        const auto& progress = plan->second.progress[current];
+
+        // Пока нет оценки ожидания трафика, такого робота
+        // не считаем предсказуемо "скоро свободным".
+        if (progress.waiting_for_release() ||
+            !progress.update_rejected().empty() ||
+            progress.confirmed_revision() != progress.revision() ||
+            progress.released_nodes() != progress.total_nodes()) {
+            continue;
+            }
+
         // Дальше только езда: ни у текущего шага, ни у следующих нет действий
         bool driving_only = true;
         for (size_t i = current; i < mission->steps.size(); ++i) {
@@ -480,11 +553,7 @@ void MissionRunner::reconcile(const dpv1::MissionSnapshot& snapshot) {
             continue;
         }
         apply(*mission, status);
-        // Едет, а маршрута нет — control перезапускался: взять маршрут у dispatch
-        mission = missions_.find(status.mission_id());
-        if (mission && !mission->finished() && !plans_.contains(mission->id)) {
-            asio::co_spawn(io_context_, restore(mission->id), log_failure);
-        }
+        request_restore(status.mission_id());
     }
 
     int lost = 0;
@@ -506,40 +575,118 @@ void MissionRunner::reconcile(const dpv1::MissionSnapshot& snapshot) {
 // Маршруты — ровно те, что ушли роботу: из миссии в dispatch, а не построенные заново (карта могла измениться).
 // Время шагов — по графу от начала до конца маршрута: нужно только для оценки «скоро свободен» (c1b)
 asio::awaitable<void> MissionRunner::restore(std::string mission_id) {
-    dpv1::GetMissionRequest request;
-    request.set_mission_id(mission_id);
-    dpv1::GetMissionResponse response;
-    grpc::Status status = co_await services_.call<&Dispatch::PrepareAsyncGetMission>(*services_.dispatch, request, response);
-
-    Mission* mission = missions_.find(mission_id);   // пока ждали, могла закончиться
-    if (!mission || mission->finished() || plans_.contains(mission_id)) {
+    if (stopped_) {
         co_return;
     }
+
+    dpv1::GetMissionRequest request;
+    request.set_mission_id(mission_id);
+
+    dpv1::GetMissionResponse response;
+    grpc::Status status =
+        co_await services_.call<&Dispatch::PrepareAsyncGetMission>(
+            *services_.dispatch, request, response);
+
+    if (stopped_) {
+        co_return;
+    }
+
+    // За время RPC миссия могла завершиться, вернуться в очередь
+    // или уже получить маршрут другим путём.
+    Mission* mission = missions_.find(mission_id);
+    if (!mission ||
+        mission->finished() ||
+        mission->state == "QUEUED" ||
+        plans_.contains(mission_id)) {
+        co_return;
+    }
+
+    auto latest = waiting_plans_.find(mission_id);
+    if (latest == waiting_plans_.end()) {
+        co_return;
+    }
+
     if (!status.ok()) {
-        // Закончилась в dispatch (итог придёт стримом) или dispatch недоступен (сверка при переподключении повторит)
-        spdlog::warn("[runner] mission {}: no route from dispatch: {}", mission_id, status.error_message());
+        // NOT_FOUND может означать, что миссия только что закончилась.
+        // Её итог обрабатываем через стрим, здесь FAILED не ставим.
+        if (status.error_code() != grpc::StatusCode::NOT_FOUND) {
+            spdlog::warn(
+                "[runner] mission {}: route restore failed, will retry: {}",
+                mission_id, status.error_message());
+        }
+        co_return;
+    }
+
+    const auto& source = response.mission();
+
+    if (source.mission_id() != mission_id ||
+        source.robot_id() != mission->robot_id ||
+        source.nodes_size() != static_cast<int>(mission->steps.size()) ||
+        source.nodes_size() == 0) {
+        spdlog::warn(
+            "[runner] mission {}: unexpected mission from dispatch",
+            mission_id);
         co_return;
     }
 
     const Graph* graph = maps_.find(mission->map_id);
     routing::Router* router = maps_.router(mission->map_id);
+
     Plan plan;
-    for (const auto& node : response.mission().nodes()) {
-        if (!node.has_move()) {
-            continue;   // control шлёт только MoveStep, но не ломаемся на чужих
+
+    for (int i = 0; i < source.nodes_size(); ++i) {
+        const auto& node = source.nodes(i);
+
+        // Control формирует линейные MoveStep s0, s1, ...
+        // Пропускать неизвестный шаг нельзя: собьются индексы.
+        if (node.id() != std::format("s{}", i) ||
+            !node.has_move()) {
+            spdlog::warn(
+                "[runner] mission {}: unexpected step {}",
+                mission_id, node.id());
+            co_return;
         }
+
+        const auto& move = node.move();
+
+        if (move.nodes_size() == 0 ||
+            move.edges_size() != move.nodes_size() - 1) {
+            spdlog::warn(
+                "[runner] mission {}: invalid route of step {}",
+                mission_id, node.id());
+            co_return;
+        }
+
+        const auto total =
+            static_cast<std::uint32_t>(move.nodes_size());
+
+        const auto released =
+            move.has_released_nodes() ? move.released_nodes() : total;
+
+        if (released == 0 || released > total) {
+            spdlog::warn(
+                "[runner] mission {}: invalid base of step {}",
+                mission_id, node.id());
+            co_return;
+        }
+
         std::vector<std::string> ids;
-        for (const auto& route_node : node.move().nodes()) {
+        for (const auto& route_node : move.nodes()) {
             ids.push_back(route_node.node_id());
         }
+
         std::vector<std::string> edge_ids;
-        for (const auto& edge : node.move().edges()) {
+        for (const auto& edge : move.edges()) {
             edge_ids.push_back(edge.edge_id());
         }
+
+        // Сохраняем существующий способ оценки времени для c1b.
+        // Геометрия ниже остаётся именно из dispatch.
         double seconds = 0;
-        if (graph && !ids.empty()) {
+        if (graph && router) {
             auto from = graph->find_node(ids.front());
             auto to = graph->find_node(ids.back());
+
             if (from && to) {
                 std::vector<uint32_t> targets = {*to};
                 if (auto route = router->route(*from, targets)) {
@@ -547,24 +694,38 @@ asio::awaitable<void> MissionRunner::restore(std::string mission_id) {
                 }
             }
         }
+
+        fms1::MoveProgress progress;
+        progress.set_last_node_id(ids.front());
+        progress.set_last_node_index(0);
+        progress.set_released_nodes(released);
+        progress.set_total_nodes(total);
+
         plan.routes.push_back(std::move(ids));
         plan.edges.push_back(std::move(edge_ids));
         plan.seconds.push_back(seconds);
+        plan.progress.push_back(std::move(progress));
     }
-    if (plan.routes.empty()) {
+
+    const int current = mission->current_step.value_or(0);
+    if (current < 0 ||
+        static_cast<size_t>(current) >= plan.routes.size()) {
         co_return;
     }
 
-    // Где робот сейчас: последний пройденный узел текущего шага; ещё не тронулся — начало его маршрута
-    const size_t current = static_cast<size_t>(mission->current_step.value_or(0));
-    plan.last_node = plan.routes[std::min(current, plan.routes.size() - 1)].front();
-    for (const auto& step : response.status().steps()) {
-        if (step.state() == fms1::STEP_STATE_RUNNING && step.has_move() && !step.move().last_node_id().empty()) {
-            plan.last_node = step.move().last_node_id();
-        }
-    }
-    spdlog::info("[runner] mission {}: route restored from dispatch, {} steps", mission_id, plan.routes.size());
+    plan.last_node = plan.routes[current].front();
+
+    // Используем последний статус, полученный control из стрима.
+    // response.status() намеренно не применяем: пока RPC летел,
+    // робот мог пройти ещё несколько узлов или сменить шаг.
+    update_plan(plan, latest->second);
+
+    spdlog::info(
+        "[runner] mission {}: route restored from dispatch, {} steps",
+        mission_id, plan.routes.size());
+
     plans_[mission_id] = std::move(plan);
+    waiting_plans_.erase(latest);
 }
 
 // ==================================================================== отмена
@@ -607,42 +768,122 @@ asio::awaitable<grpc::Status> MissionRunner::cancel(const std::string& mission_i
 
 // ==================================================================== c2: маршруты для UI
 
-std::vector<MissionRunner::RobotRoute> MissionRunner::routes(const std::string& map_id) {
+std::vector<MissionRunner::RobotRoute>
+MissionRunner::routes(const std::string& map_id) {
     std::vector<RobotRoute> result;
+
     for (Mission* mission : missions_.active()) {
         if (!map_id.empty() && mission->map_id != map_id) {
             continue;
         }
+
         auto plan = plans_.find(mission->id);
         if (plan == plans_.end()) {
-            continue;   // в очереди, следующая (c1b) или после перезапуска control — маршрута нет
-        }
-        const size_t current = static_cast<size_t>(mission->current_step.value_or(0));
-        if (current >= plan->second.routes.size()) {
             continue;
         }
 
-        // Пройденное отрезаем: маршрут — с последнего узла, где был робот. Ребро k идёт от узла k к k+1,
-        // поэтому рёбра режем по тому же индексу. Узла в маршруте нет (ещё не тронулся) — маршрут весь
-        const auto& nodes = plan->second.routes[current];
-        const auto& edges = plan->second.edges[current];
-        auto at = std::ranges::find(nodes, plan->second.last_node);
-        const size_t from = at == nodes.end() ? 0 : static_cast<size_t>(at - nodes.begin());
+        const int current_step = mission->current_step.value_or(0);
+        if (current_step < 0) {
+            continue;
+        }
+
+        const size_t current = static_cast<size_t>(current_step);
+        const Plan& saved = plan->second;
+
+        if (current >= saved.routes.size() ||
+            current >= saved.edges.size() ||
+            current >= saved.progress.size()) {
+            continue;
+            }
+
+        auto parts = split_route(
+            saved.routes[current],
+            saved.edges[current],
+            saved.progress[current]);
+
+        if (!parts) {
+            continue;
+        }
 
         RobotRoute route;
         route.robot_id = mission->robot_id;
         route.map_id = mission->map_id;
         route.mission_id = mission->id;
-        route.step_index = static_cast<int>(current);
-        route.nodes.assign(nodes.begin() + from, nodes.end());
-        route.edges.assign(edges.begin() + from, edges.end());
+        route.step_index = current_step;
+
+        route.nodes = std::move(parts->released.nodes);
+        route.edges = std::move(parts->released.edges);
+        route.planned_nodes = std::move(parts->planned.nodes);
+        route.planned_edges = std::move(parts->planned.edges);
+
         for (size_t i = current; i < mission->steps.size(); ++i) {
             route.goals.push_back(mission->steps[i].node_id);
         }
-        if (auto next = next_.find(mission->robot_id); next != next_.end()) {
+
+        if (auto next = next_.find(mission->robot_id);
+            next != next_.end()) {
             route.next_mission_id = next->second.mission_id;
-        }
+            }
+
         result.push_back(std::move(route));
     }
+
     return result;
+}
+
+void MissionRunner::request_restore(const std::string& mission_id) {
+    if (stopped_ ||
+        plans_.contains(mission_id) ||
+        !waiting_plans_.contains(mission_id) ||
+        sending_.contains(mission_id) ||
+        is_next(mission_id)) {
+        return;
+        }
+
+    Mission* mission = missions_.find(mission_id);
+    if (!mission || mission->finished() || mission->state == "QUEUED") {
+        return;
+    }
+
+    if (!restoring_.insert(mission_id).second) {
+        return;
+    }
+
+    asio::co_spawn(
+        io_context_,
+        restore(mission_id),
+        [this, mission_id](std::exception_ptr error) {
+            // Освобождаем отметку и при исключении:
+            // следующая попытка не должна заблокироваться навсегда.
+            restoring_.erase(mission_id);
+            log_failure(error);
+        });
+}
+
+asio::awaitable<void> MissionRunner::restore_loop() {
+    while (!stopped_) {
+        restore_timer_.expires_after(kRestorePeriod);
+        co_await restore_timer_.async_wait(asio::as_tuple(asio::use_awaitable));
+
+        if (stopped_) {
+            co_return;
+        }
+
+        if (!(missions_.loaded() && maps_.loaded())) {
+            continue;
+        }
+
+        // Сначала копируем id: запущенная корутина может убрать
+        // восстановленную миссию из waiting_plans_.
+        std::vector<std::string> ids;
+        ids.reserve(waiting_plans_.size());
+
+        for (const auto& [id, status] : waiting_plans_) {
+            ids.push_back(id);
+        }
+
+        for (const auto& id : ids) {
+            request_restore(id);
+        }
+    }
 }

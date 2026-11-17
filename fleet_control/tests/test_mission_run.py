@@ -1,6 +1,7 @@
 """Миссии едут (M-3c): назначение роботу, исполнение через dispatch, статусы, отмена — с двумя роботами симулятора.
 
 Нужен симулятор с роботами ktc/amr1 и ktc/amr2 (оба на карте map_1). Без него тесты пропускаются.
+Другую пару можно задать через VDA_SERIAL и VDA_SECOND_SERIAL, карту — через VDA_MAP_ID.
 Карта map_1 — своя, на время теста; если map_1 уже есть в fms, тесты пропускаются: чужую карту не меняем.
 
     a ──4 м── b ──4 м── c ──────8 м────── d        дороги в обе стороны, 1 м/с
@@ -69,7 +70,10 @@ def run_map(maps) -> dict:
 def two_robots(robots, run_map) -> tuple[str, str]:
     """amr1 на a, amr2 на d, оба IDLE."""
     ids = []
-    for serial, node in (("amr1", "a"), ("amr2", "d")):
+    first = os.environ.get("VDA_SERIAL", "amr1")
+    second = os.environ.get("VDA_SECOND_SERIAL", "amr2")
+    assert first != second, "test robots must have different serial numbers"
+    for serial, node in ((first, "a"), (second, "d")):
         code, robot = robots.register(manufacturer=SIM_MANUFACTURER, serialNumber=serial)
         if code == 409:
             pytest.fail(f"{SIM_MANUFACTURER}/{serial} is already registered under another id — delete it first")

@@ -14,6 +14,7 @@
 
 #include "maps/MapStore.hpp"
 #include "missions/MissionStore.hpp"
+#include "missions/RouteParts.hpp"
 #include "services/Services.hpp"
 
 // Исполнение миссий (M-3c): назначенную миссию — в dispatch, статусы из dispatch — в документ миссии.
@@ -55,10 +56,17 @@ public:
         std::string map_id;
         std::string mission_id;
         int step_index = 0;
-        std::vector<std::string> nodes;   // released: от последнего пройденного узла до конца шага
-        std::vector<std::string> edges;   // рёбра между ними
-        std::vector<std::string> goals;   // узлы текущего и следующих шагов
-        std::string next_mission_id;      // "" — следующей миссии нет (c1b)
+
+        // Оставшаяся разрешённая часть пути.
+        std::vector<std::string> nodes;
+        std::vector<std::string> edges;
+
+        // Ещё не разрешённая часть пути.
+        std::vector<std::string> planned_nodes;
+        std::vector<std::string> planned_edges;
+
+        std::vector<std::string> goals;
+        std::string next_mission_id;
     };
     std::vector<RobotRoute> routes(const std::string& map_id);   // map_id "" — все карты
 
@@ -69,8 +77,11 @@ private:
     struct Plan {
         std::vector<std::vector<std::string>> routes;   // узлы маршрута каждого шага (nodeId)
         std::vector<std::vector<std::string>> edges;    // рёбра маршрута каждого шага (edgeId), для UI
+        std::vector<std::string> planned_nodes;
+        std::vector<std::string> planned_edges;
         std::vector<double> seconds;                     // время каждого шага по графу
         std::string last_node;                           // где робот сейчас (из стрима)
+        std::vector<fms::v1::MoveProgress> progress;
     };
     // Следующая миссия робота
     struct Next {
@@ -82,6 +93,11 @@ private:
     asio::awaitable<void> watch_dispatch();
     asio::awaitable<void> overdue_loop();
     asio::awaitable<void> restore(std::string mission_id);
+    void request_restore(const std::string& mission_id);
+    asio::awaitable<void> restore_loop();
+
+    void update_plan(Plan& plan, const fms::v1::MissionStatus& status);
+
     void on_update(const fms::dispatch::v1::MissionStatusUpdate& update);
     void reconcile(const fms::dispatch::v1::MissionSnapshot& snapshot);
 
@@ -102,10 +118,17 @@ private:
     MapStore& maps_;
     std::set<std::string> sending_;          // AddMission в пути: сверка не должна вернуть их в очередь
     std::map<std::string, Plan> plans_;      // миссия → маршрут; есть у отправленных в dispatch
+    // Пока маршрута нет, сохраняем последний статус из стрима.
+    // GetMission не должен заменить его более старым статусом.
+    std::map<std::string, fms::v1::MissionStatus> waiting_plans_;
+
+    // Не запускаем несколько GetMission одновременно для одной миссии.
+    std::set<std::string> restoring_;
     std::map<std::string, Next> next_;       // робот → его следующая миссия (c1b)
     StreamRPC* stream_ = nullptr;            // текущий стрим — stop() его прерывает
     asio::steady_timer reconnect_timer_;
     asio::steady_timer overdue_timer_;
+    asio::steady_timer restore_timer_;
     bool stopped_ = false;
 };
 

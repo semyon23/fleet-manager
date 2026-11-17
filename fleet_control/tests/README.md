@@ -66,6 +66,7 @@ python3 -m venv .venv
 | `DATABASE_ADDRESS` | `localhost:5002` | gRPC fleet_database |
 | `DISPATCH_ADDRESS` | `localhost:5001` | gRPC fleet_dispatch |
 | `VDA_MANUFACTURER` / `VDA_SERIAL` | `ktc` / `amr1` | Робот симулятора для тестов с живым роботом |
+| `VDA_SECOND_SERIAL` | `amr2` | Второй робот для `test_mission_run.py`; первый задаётся через `VDA_SERIAL` (по умолчанию `amr1`). Оба робота должны иметь включённую тестовую карту и не быть зарегистрированы под другими id |
 | `VDA_MAP_ID` | `map_1` | Карта робота симулятора |
 | `CONTROL_RESTART` | — | Команда, которая перезапускает fleet_control (T1.0b, `test_route_survives_control_restart`). Не задана — тест пропускается. Control должен работать отдельно от `deploy/run-stand.sh`: там остановка одного сервиса останавливает все. Пример ниже |
 

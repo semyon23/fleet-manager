@@ -18,7 +18,8 @@ asio::awaitable<HttpResponse> RouteApi::list(const HttpRequest& req) {
             {"stepIndex", route.step_index},
             {"released", {{"nodes", route.nodes}, {"edges", route.edges}}},
             // Пока трафика нет, весь маршрут шага разрешён сразу — неразрешённой части нет (T1)
-            {"planned", {{"nodes", nlohmann::json::array()}, {"edges", nlohmann::json::array()}}},
+            // Пока трафика нет ...
+        {"planned", {{"nodes", route.planned_nodes},{"edges", route.planned_edges}}},
             {"goals", route.goals},
             {"nextMissionId", route.next_mission_id.empty() ? nlohmann::json(nullptr)
                                                             : nlohmann::json(route.next_mission_id)},

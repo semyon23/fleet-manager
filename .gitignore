@@ -19,3 +19,12 @@ __pycache__/
 /fleet_database/tests/.venv
 /fleet_database/tests/_gen
 /fleet_database/tests/.pytest_cache
+
+# Python environments and test caches (at any depth)
+.venv/
+venv/
+.pytest_cache/
+
+# Alternative CMake build directory and dependencies
+/build/
+/vcpkg_installed/
