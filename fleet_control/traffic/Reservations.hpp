@@ -6,12 +6,11 @@
 #include <optional>
 #include <span>
 #include <vector>
-
 #include "ResourceMap.hpp"
-
+#include "Types.hpp"
 namespace traffic {
 
-    using RobotId = std::uint32_t;
+
 
     // Почему набор ресурсов не удалось захватить.
     struct Conflict {

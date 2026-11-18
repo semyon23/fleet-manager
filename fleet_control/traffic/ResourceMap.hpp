@@ -7,10 +7,10 @@
 #include <string>
 #include <vector>
 #include "maps/Graph.hpp"
-
+#include "Types.hpp"
 namespace traffic {
 
-    using ResourceId = std::uint32_t;
+
 
     // Ресурсы одной версии Graph.
     //
