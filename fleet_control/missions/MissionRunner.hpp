@@ -34,8 +34,8 @@ public:
     // Миссия назначена (ASSIGNED), робот стоит на start_node: построить маршруты и отправить в dispatch
     void start_mission(Mission& mission, const std::string& start_node);
 
-    // Отменить начатую миссию (ASSIGNED, RUNNING, PAUSED): CancelMission в dispatch, миссия → CANCELING.
-    // dispatch её не знает или это следующая миссия робота — сразу CANCELED. Ошибка — dispatch недоступен
+    // Отменить начатую миссию: сохраняем CANCELING до RPC.
+    // Намерение отмены сохраняется; NOT_FOUND не доказывает отмену.
     asio::awaitable<grpc::Status> cancel(const std::string& mission_id);
 
     // c1b. Робот выполняет миссию, и дальше у него только езда: где и через сколько он освободится
@@ -95,7 +95,7 @@ private:
     asio::awaitable<void> restore(std::string mission_id);
     void request_restore(const std::string& mission_id);
     asio::awaitable<void> restore_loop();
-
+    asio::awaitable<void> uncertain_loop();
     void update_plan(Plan& plan, const fms::v1::MissionStatus& status);
 
     void on_update(const fms::dispatch::v1::MissionStatusUpdate& update);
@@ -129,6 +129,8 @@ private:
     asio::steady_timer reconnect_timer_;
     asio::steady_timer overdue_timer_;
     asio::steady_timer restore_timer_;
+    std::set<std::string> uncertain_;
+    asio::steady_timer uncertain_timer_;
     bool stopped_ = false;
 };
 

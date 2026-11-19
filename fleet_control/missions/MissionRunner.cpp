@@ -79,12 +79,15 @@ MissionRunner::MissionRunner(asio::io_context& io_context, Services& services, M
       maps_(maps),
       reconnect_timer_(io_context),
       overdue_timer_(io_context),
-      restore_timer_(io_context) {}
+      restore_timer_(io_context),
+      uncertain_timer_(io_context) {}
+
 
 void MissionRunner::start() {
     asio::co_spawn(io_context_, watch_dispatch(), log_failure);
     asio::co_spawn(io_context_, overdue_loop(), log_failure);
     asio::co_spawn(io_context_, restore_loop(), log_failure);
+    asio::co_spawn(io_context_, uncertain_loop(), log_failure);
 }
 
 void MissionRunner::stop() {
@@ -95,6 +98,7 @@ void MissionRunner::stop() {
     reconnect_timer_.cancel();
     overdue_timer_.cancel();
     restore_timer_.cancel();
+    uncertain_timer_.cancel();
 }
 
 // ==================================================================== отправка в dispatch
@@ -105,7 +109,7 @@ void MissionRunner::start_mission(Mission& mission, const std::string& start_nod
 }
 
 asio::awaitable<void> MissionRunner::send(std::string mission_id, std::string start_node) {
-    Mission* mission = missions_.find(mission_id);
+     Mission* mission = missions_.find(mission_id);
     if (!mission || mission->state != "ASSIGNED") {
         sending_.erase(mission_id);
         co_return;
@@ -141,18 +145,24 @@ asio::awaitable<void> MissionRunner::send(std::string mission_id, std::string st
         }
         co_return;
     }
-    if (!mission) {
-        co_return;
-    }
+    if (!mission || mission->finished()) co_return;
+    // Статус из стрима либо намерение отмены новее ответа отправки.
+    if (mission->state != "ASSIGNED") co_return;
     switch (status.error_code()) {
-        case grpc::StatusCode::NOT_FOUND:             // робота уже нет в dispatch (удалили)
-        case grpc::StatusCode::FAILED_PRECONDITION:   // робот уже занят или не на узле — dispatch знает свежее
-        case grpc::StatusCode::UNAVAILABLE:
-        case grpc::StatusCode::DEADLINE_EXCEEDED:
+        case grpc::StatusCode::NOT_FOUND:
+        case grpc::StatusCode::FAILED_PRECONDITION:
             back_to_queue(*mission, status.error_message());
             break;
-        default:   // INVALID_ARGUMENT и прочее — ошибка в control
-            finish(*mission, "FAILED", MissionError{"INTERNAL", "dispatch rejected the mission: " + status.error_message()});
+        case grpc::StatusCode::INVALID_ARGUMENT:
+        case grpc::StatusCode::UNIMPLEMENTED:
+            finish(*mission, "FAILED", MissionError{
+                "INTERNAL", "dispatch rejected the mission: " + status.error_message()});
+            break;
+        default:
+            // Не повторять AddMission: dispatch мог уже принять и закончить её.
+            uncertain_.insert(mission_id);
+            spdlog::warn("[runner] mission {}: send outcome unknown: {}",
+                         mission_id, status.error_message());
     }
 }
 
@@ -276,6 +286,11 @@ void MissionRunner::update_plan(
 // ==================================================================== статусы
 
 void MissionRunner::apply(Mission& mission, const fms1::MissionStatus& status) {
+
+    if (mission.finished() || status.robot_id() != mission.robot_id) {
+        return;
+    }
+    uncertain_.erase(mission.id);
     auto plan = plans_.find(mission.id);
 
     if (plan != plans_.end()) {
@@ -288,6 +303,12 @@ void MissionRunner::apply(Mission& mission, const fms1::MissionStatus& status) {
     const std::string old_state = mission.state;
 
     mission.state = without_prefix(fms1::MissionState_Name(status.state()), "MISSION_STATE_");
+    // Старый RUNNING не отменяет намерение оператора.
+    // Терминальный COMPLETED/FAILED/CANCELED сохраняем как фактический итог.
+    if (old_state == "CANCELING" && !mission.finished()) {
+        mission.state = "CANCELING";
+    }
+
     if (!mission.started_at_ms) {
         mission.started_at_ms = millis(status.started_at());
     }
@@ -542,34 +563,39 @@ void MissionRunner::on_update(const dpv1::MissionStatusUpdate& update) {
     }
 }
 
-// Первое сообщение стрима — что сейчас в dispatch: активные миссии и недавно завершённые.
-// Так control узнаёт итог миссий, закончившихся, пока он лежал или стрим был оборван
 void MissionRunner::reconcile(const dpv1::MissionSnapshot& snapshot) {
     std::set<std::string> in_dispatch;
+
     for (const auto& status : snapshot.missions()) {
         in_dispatch.insert(status.mission_id());
+
         Mission* mission = missions_.find(status.mission_id());
         if (!mission) {
             continue;
         }
+
         apply(*mission, status);
         request_restore(status.mission_id());
     }
 
-    int lost = 0;
+    int uncertain = 0;
+
     for (Mission* mission : missions_.active()) {
-        if (mission->state == "QUEUED" || in_dispatch.contains(mission->id) || sending_.contains(mission->id) ||
+        if (mission->state == "QUEUED" ||
+            in_dispatch.contains(mission->id) ||
+            sending_.contains(mission->id) ||
             is_next(mission->id)) {
-            continue;   // следующей миссии и не должно быть в dispatch — она ждёт своего робота
-        }
-        if (mission->state == "ASSIGNED") {
-            back_to_queue(*mission, "not in dispatch: AddMission did not get there");
-        } else {
-            finish(*mission, "FAILED", MissionError{"INTERNAL", "mission lost while fms restarted"});
-        }
-        ++lost;
+            continue;
+            }
+
+        // Отсутствие в снимке не запрещает позднюю доставку AddMission.
+        uncertain_.insert(mission->id);
+        ++uncertain;
     }
-    spdlog::info("[runner] connected to dispatch: {} missions there, {} lost", snapshot.missions_size(), lost);
+
+    spdlog::info(
+        "[runner] connected to dispatch: {} missions there, {} unresolved",
+        snapshot.missions_size(), uncertain);
 }
 
 // Маршруты — ровно те, что ушли роботу: из миссии в dispatch, а не построенные заново (карта могла измениться).
@@ -730,40 +756,42 @@ asio::awaitable<void> MissionRunner::restore(std::string mission_id) {
 
 // ==================================================================== отмена
 
-asio::awaitable<grpc::Status> MissionRunner::cancel(const std::string& mission_id) {
-    // Следующая миссия робота: в dispatch её нет — отменить сразу, как из очереди
+asio::awaitable<grpc::Status>
+MissionRunner::cancel(const std::string& mission_id) {
+    // Следующая миссия ещё не отправлялась — её можно отменить сразу.
     for (auto it = next_.begin(); it != next_.end(); ++it) {
         if (it->second.mission_id == mission_id) {
             next_.erase(it);
+
             if (Mission* mission = missions_.find(mission_id)) {
-                finish(*mission, "CANCELED", std::nullopt, "canceled by operator");
+                finish(
+                    *mission, "CANCELED", std::nullopt,
+                    "canceled by operator");
             }
+
             co_return grpc::Status::OK;
         }
     }
 
+    Mission* mission = missions_.find(mission_id);
+    if (!mission || mission->finished()) {
+        co_return grpc::Status::OK;
+    }
+
+    if (mission->state != "CANCELING") {
+        mission->state = "CANCELING";
+        missions_.changed(*mission, "canceled by operator");
+    }
+
+    // Намерение уже принято control. Доставку повторит uncertain_loop.
     dpv1::CancelMissionRequest request;
     request.set_mission_id(mission_id);
-    dpv1::CancelMissionResponse response;
-    grpc::Status status = co_await services_.call<&Dispatch::PrepareAsyncCancelMission>(*services_.dispatch, request, response);
 
-    Mission* mission = missions_.find(mission_id);
-    if (!mission) {
-        co_return grpc::Status::OK;   // закончилась сама, пока ждали
-    }
-    if (status.ok()) {
-        if (mission->state != "CANCELING") {
-            mission->state = "CANCELING";   // CANCELED придёт по стриму, когда робот подтвердит
-            missions_.changed(*mission, "canceled by operator");
-        }
-        co_return grpc::Status::OK;
-    }
-    if (status.error_code() == grpc::StatusCode::NOT_FOUND) {
-        // dispatch её не знает: AddMission ещё в пути (дойдёт — send() сам её остановит) или потерян
-        finish(*mission, "CANCELED", std::nullopt, "canceled by operator");
-        co_return grpc::Status::OK;
-    }
-    co_return status;   // dispatch недоступен
+    dpv1::CancelMissionResponse response;
+    co_await services_.call<&Dispatch::PrepareAsyncCancelMission>(
+        *services_.dispatch, request, response);
+
+    co_return grpc::Status::OK;
 }
 
 // ==================================================================== c2: маршруты для UI
@@ -885,5 +913,96 @@ asio::awaitable<void> MissionRunner::restore_loop() {
         for (const auto& id : ids) {
             request_restore(id);
         }
+    }
+}
+
+asio::awaitable<void> MissionRunner::uncertain_loop() {
+    std::string cursor;
+
+    while (!stopped_) {
+        uncertain_timer_.expires_after(std::chrono::milliseconds(500));
+        co_await uncertain_timer_.async_wait(
+            asio::as_tuple(asio::use_awaitable));
+
+        if (stopped_) co_return;
+        if (!(missions_.loaded() && maps_.loaded())) continue;
+
+        // Одна сверка одновременно, без неограниченного fan-out.
+        std::set<std::string> pending = uncertain_;
+
+        for (const Mission* mission : missions_.active()) {
+            if (mission->state == "CANCELING") {
+                pending.insert(mission->id);
+            }
+        }
+
+        for (auto it = pending.begin(); it != pending.end();) {
+            Mission* mission = missions_.find(*it);
+
+            if (!mission ||
+                mission->finished() ||
+                mission->state == "QUEUED") {
+                uncertain_.erase(*it);
+                it = pending.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        if (pending.empty()) continue;
+
+        auto selected = pending.upper_bound(cursor);
+        if (selected == pending.end()) {
+            selected = pending.begin();
+        }
+
+        const std::string id = *selected;
+        cursor = id;
+
+        if (sending_.contains(id) || is_next(id)) continue;
+
+        dpv1::GetMissionRequest request;
+        request.set_mission_id(id);
+        dpv1::GetMissionResponse response;
+
+        const auto status =
+            co_await services_.call<&Dispatch::PrepareAsyncGetMission>(
+                *services_.dispatch, request, response);
+
+        if (stopped_) co_return;
+
+        Mission* mission = missions_.find(id);
+        if (!mission || mission->finished()) {
+            uncertain_.erase(id);
+            continue;
+        }
+
+        // Более свежий стрим уже разрешил неопределённость.
+        // Ответ RPC не должен откатить полученный за время ожидания прогресс.
+        if (status.ok() &&
+            uncertain_.contains(id) &&
+            response.status().mission_id() == id &&
+            response.status().robot_id() == mission->robot_id &&
+            !waiting_plans_.contains(id)) {
+            apply(*mission, response.status());
+            request_restore(id);
+        }
+
+        mission = missions_.find(id);
+        if (!mission ||
+            mission->finished() ||
+            mission->state != "CANCELING") {
+            continue;
+        }
+
+        dpv1::CancelMissionRequest cancel;
+        cancel.set_mission_id(id);
+        dpv1::CancelMissionResponse cancelled;
+
+        co_await services_.call<&Dispatch::PrepareAsyncCancelMission>(
+            *services_.dispatch, cancel, cancelled);
+
+        // OK означает начало отмены, NOT_FOUND — неизвестный результат.
+        // Терминальный статус получаем по стриму, включая COMPLETED.
     }
 }
