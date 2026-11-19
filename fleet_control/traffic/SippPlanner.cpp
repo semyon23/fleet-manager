@@ -1,5 +1,5 @@
 #include "SippPlanner.hpp"
-
+#include "TravelTime.hpp"
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -16,20 +16,6 @@ namespace traffic {
 namespace {
 
 constexpr auto kNoState = std::numeric_limits<std::size_t>::max();
-
-Time travel_time(const GraphEdge& edge, double default_speed) {
-    const double speed = edge.max_speed.value_or(default_speed);
-    if (!std::isfinite(edge.length) || edge.length < 0 ||
-        !std::isfinite(speed) || speed <= 0) {
-        throw std::invalid_argument("invalid SIPP edge length or speed");
-    }
-    const long double ms = std::ceil(
-        static_cast<long double>(edge.length) / speed * 1000);
-    if (!std::isfinite(ms) || ms >= static_cast<long double>(kForever)) {
-        throw std::invalid_argument("SIPP edge duration is too large");
-    }
-    return std::max<Time>(1, static_cast<Time>(ms));
-}
 
 // Самый ранний выезд в заданный безопасный интервал следующего узла.
 std::optional<Time> earliest_departure(

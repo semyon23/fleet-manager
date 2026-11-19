@@ -34,6 +34,7 @@ add_executable(fleet_control fc_main.cpp
         traffic/SippPlanner.cpp
         traffic/TrafficCoordinator.cpp
         traffic/BaseGuard.cpp
+        traffic/BasePlanner.cpp
 )
 target_include_directories(fleet_control PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(fleet_control PRIVATE
@@ -63,6 +64,7 @@ if(FMS_BUILD_TESTS)
             unit_tests/test_sipp.cpp
             unit_tests/test_traffic_coordinator.cpp
             unit_tests/test_base_guard.cpp
+            unit_tests/test_base_planner.cpp
             routing/Router.cpp
             maps/Graph.cpp
             missions/Mission.cpp
@@ -75,6 +77,7 @@ if(FMS_BUILD_TESTS)
             traffic/SippPlanner.cpp
             traffic/TrafficCoordinator.cpp
             traffic/BaseGuard.cpp
+            traffic/BasePlanner.cpp
     )
     target_include_directories(fleet_control_unit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(fleet_control_unit PRIVATE
@@ -91,6 +94,7 @@ if(FMS_BUILD_TESTS)
             unit_tests/warehouse.cpp
             routing/Router.cpp
             maps/Graph.cpp
+
 
 
     )
