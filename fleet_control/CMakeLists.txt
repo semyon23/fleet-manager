@@ -32,6 +32,7 @@ add_executable(fleet_control fc_main.cpp
         traffic/Reservations.cpp
         traffic/ReservationTable.cpp
         traffic/SippPlanner.cpp
+        traffic/TrafficCoordinator.cpp
 )
 target_include_directories(fleet_control PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(fleet_control PRIVATE
@@ -59,6 +60,7 @@ if(FMS_BUILD_TESTS)
             unit_tests/test_traffic_resources.cpp
             unit_tests/test_reservation_table.cpp
             unit_tests/test_sipp.cpp
+            unit_tests/test_traffic_coordinator.cpp
             routing/Router.cpp
             maps/Graph.cpp
             missions/Mission.cpp
@@ -69,6 +71,7 @@ if(FMS_BUILD_TESTS)
             traffic/Reservations.cpp
             traffic/ReservationTable.cpp
             traffic/SippPlanner.cpp
+            traffic/TrafficCoordinator.cpp
     )
     target_include_directories(fleet_control_unit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(fleet_control_unit PRIVATE
