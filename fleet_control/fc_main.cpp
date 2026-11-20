@@ -69,6 +69,9 @@ int main() {
 
 
         MissionRunner runner{io_context, services, missions, maps};
+        runner.configure_traffic(availability,env_or("FMS_TRAFFIC_ENABLED", "0") == "1");
+
+
         MissionAssigner assigner{io_context, missions, availability, maps, runner};
 
 
@@ -83,7 +86,7 @@ int main() {
         ApiRouter router;
         HealthApi health_api{services, router};
         RobotApi robot_api{services, fleet_sync, availability, maps, journal, router};
-        MapApi map_api{services, maps, journal, router};
+        MapApi map_api{services, maps, journal, router, &runner};
         AlarmApi alarm_api{alarm_engine, router};
         MissionApi mission_api{services, maps, missions, runner, router};
         RouteApi route_api{runner, router};

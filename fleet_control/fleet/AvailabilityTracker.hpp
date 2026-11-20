@@ -12,7 +12,7 @@
 #include <string>
 #include "maps/MapStore.hpp"
 #include "services/Services.hpp"
-
+#include "traffic/FixedRouteGate.hpp"
 
 class AvailabilityTracker {
 public:
@@ -36,6 +36,14 @@ public:
         std::string last_node_id;
     };
     std::vector<IdleRobot> idle_robots() const;
+
+    void set_traffic_registry_ready(bool ready) {
+        traffic_registry_ready_ = ready;
+    }
+
+    bool traffic_inventory_ready() const;
+
+    std::vector<traffic::TrafficOccupant> traffic_occupants() const;
 
     std::function<void()> on_idle;   // робот стал IDLE: Allocator проверяет очередь
 
@@ -63,6 +71,7 @@ private:
     Services& services_;
     const MapStore& maps_;
     double low_battery_percent_;
+    bool traffic_registry_ready_ = false;
     bool dispatch_connected_ = false;
     std::map<std::string, Robot> robots_;
     std::map<std::string, fms::database::v1::RobotAvailability> current_;   // последнее посчитанное

@@ -7,6 +7,8 @@
 #include "api_json.hpp"
 #include <format>
 #include "routing/Router.hpp"
+#include "missions/MissionRunner.hpp"
+
 namespace dbv1 = fms::database::v1;
 using Control = dbv1::ControlStorage::Stub;
 using Registry = dbv1::RobotRegistry::Stub;
@@ -114,8 +116,8 @@ HttpResponse confirmation_required(const HttpRequest& req, const std::vector<std
 
 }  // namespace
 
-MapApi::MapApi(Services& services, MapStore& maps, Journal& journal, ApiRouter& router)
-    : services_(services), maps_(maps), journal_(journal) {
+MapApi::MapApi(Services& services, MapStore& maps, Journal& journal, ApiRouter& router, MissionRunner* runner)
+    : services_(services), maps_(maps), journal_(journal), runner_(runner) {
     router.add_route(http::verb::post, "/api/fms/maps",
         [this](const HttpRequest& req, const PathParams&) { return create_map(req); });
     router.add_route(http::verb::patch, "/api/fms/maps/{id}",
@@ -198,6 +200,27 @@ asio::awaitable<HttpResponse> MapApi::create_map(const HttpRequest& req) {
 // ==================================================================== PATCH /maps/{id}
 
 asio::awaitable<HttpResponse> MapApi::update_map(const HttpRequest& req, std::string map_id) {
+
+    if (runner_ && !runner_->try_map_edit(map_id)) {
+        co_return error_response(
+            req,
+            http::status::conflict,
+            "TRAFFIC_ACTIVE",
+            "map has protected routes or "
+            "traffic reconciliation is pending");
+    }
+
+    struct Unlock {
+        MissionRunner* runner;
+        std::string map;
+
+        ~Unlock() {
+            if (runner) {
+                runner->end_map_edit(map);
+            }
+        }
+    } unlock{runner_, map_id};
+
     if (!maps_.loaded()) {
         co_return maps_loading(req);
     }
@@ -303,6 +326,27 @@ asio::awaitable<HttpResponse> MapApi::conflict_with_current(const HttpRequest& r
 // ==================================================================== DELETE /maps/{id}
 
 asio::awaitable<HttpResponse> MapApi::delete_map(const HttpRequest& req, std::string map_id) {
+
+    if (runner_ && !runner_->try_map_edit(map_id)) {
+        co_return error_response(
+            req,
+            http::status::conflict,
+            "TRAFFIC_ACTIVE",
+            "map has protected routes or "
+            "traffic reconciliation is pending");
+    }
+
+    struct Unlock {
+        MissionRunner* runner;
+        std::string map;
+
+        ~Unlock() {
+            if (runner) {
+                runner->end_map_edit(map);
+            }
+        }
+    } unlock{runner_, map_id};
+
     if (!maps_.loaded()) {
         co_return maps_loading(req);
     }

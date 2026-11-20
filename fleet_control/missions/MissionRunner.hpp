@@ -17,6 +17,8 @@
 #include "missions/RouteParts.hpp"
 #include "missions/ExtensionCommand.hpp"
 #include "services/Services.hpp"
+#include "fleet/AvailabilityTracker.hpp"
+#include "traffic/FixedRouteGate.hpp"
 
 // Исполнение миссий (M-3c): назначенную миссию — в dispatch, статусы из dispatch — в документ миссии.
 //
@@ -32,6 +34,13 @@ public:
     void start();   // стрим статусов миссий из dispatch и проверка затянувшихся
     void stop();
 
+    void configure_traffic(AvailabilityTracker& availability,bool enabled);
+
+    bool traffic_ready() const;
+
+    bool try_map_edit(const std::string& map);
+
+    void end_map_edit(const std::string& map);
     // До вызова traffic обязан захватить hard-ресурсы нового base.
     // true — команда сохранена для отправки, НЕ подтверждение робота.
     // false — сейчас нельзя принять команду; invalid_argument — неверные данные.
@@ -86,6 +95,7 @@ private:
 
     // Маршрут отправленной миссии
     struct Plan {
+        std::uint32_t traffic_version = 0;
         std::vector<std::vector<std::string>> routes;   // узлы маршрута каждого шага (nodeId)
         std::vector<std::vector<std::string>> edges;    // рёбра маршрута каждого шага (edgeId), для UI
         std::vector<std::string> planned_nodes;
@@ -148,6 +158,26 @@ private:
     asio::steady_timer uncertain_timer_;
     std::map<std::string, ExtensionCommand> extensions_;
     asio::steady_timer extension_timer_;
+
+    void track_traffic(
+    Mission& mission,
+    Plan& plan,
+    std::size_t step);
+
+    asio::awaitable<void> traffic_loop();
+
+    AvailabilityTracker* traffic_availability_ = nullptr;
+    bool traffic_enabled_ = false;
+    bool traffic_snapshot_ = false;
+    bool traffic_fault_ = false;
+
+    std::string traffic_error_;
+    std::set<std::string> traffic_editing_;
+    std::map<std::string, traffic::ProtectedRoute> traffic_routes_;
+
+    traffic::FixedRouteGate traffic_gate_;
+    asio::steady_timer traffic_timer_;
+
     bool stopped_ = false;
 };
 

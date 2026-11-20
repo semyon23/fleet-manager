@@ -10,9 +10,17 @@
 #include "maps/MapStore.hpp"
 #include "services/Services.hpp"
 #include "journal/Journal.hpp"
+
+class MissionRunner;
+
 class MapApi {
 public:
-    MapApi(Services& services, MapStore& maps, Journal& journal, ApiRouter& router);
+    MapApi(
+    Services& services,
+    MapStore& maps,
+    Journal& journal,
+    ApiRouter& router,
+    MissionRunner* runner = nullptr);
 
 private:
     asio::awaitable<HttpResponse> create_map(const HttpRequest& req);
@@ -20,6 +28,7 @@ private:
     asio::awaitable<HttpResponse> delete_map(const HttpRequest& req, std::string map_id);
     asio::awaitable<HttpResponse> conflict_with_current(const HttpRequest& req, const std::string& map_id);
     asio::awaitable<std::pair<grpc::Status, std::vector<std::string>>> robots_losing_node(const std::string& map_id,const Graph& graph);
+    MissionRunner* runner_;
     Services& services_;
     MapStore& maps_;
     Journal& journal_;

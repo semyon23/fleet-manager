@@ -81,6 +81,11 @@ void AvailabilityTracker::set_deleting(const std::string& robot_id) {
 void AvailabilityTracker::set_dispatch_connected(bool connected) {
     if (on_dispatch) on_dispatch(connected);
     dispatch_connected_ = connected;
+
+    if (!connected) {
+        traffic_registry_ready_ = false;
+    }
+
     for (auto& [robot_id, robot] : robots_) {
         if (!connected) {
             robot.status_from_stream = false;   // статусы устарели; после переподключения придёт свежий снимок
@@ -194,4 +199,43 @@ asio::awaitable<void> AvailabilityTracker::write_loop() {
             co_await retry_timer_.async_wait(asio::as_tuple(asio::use_awaitable));
         }
     }
+}
+
+bool AvailabilityTracker::traffic_inventory_ready() const {
+    if (!dispatch_connected_ || !traffic_registry_ready_) {
+        return false;
+    }
+
+    for (const auto& [id, robot] : robots_) {
+        if (!robot.status || !robot.status_from_stream) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+std::vector<traffic::TrafficOccupant>AvailabilityTracker::traffic_occupants() const {std::vector<traffic::TrafficOccupant> result;
+
+    for (const auto& [id, robot] : robots_) {
+        traffic::TrafficOccupant item;
+        item.robot = id;
+
+        if (robot.status && robot.status_from_stream) {
+            const auto& status = *robot.status;
+
+            if (status.has_pose()) {
+                item.map = status.pose().map_id();
+            }
+
+            item.node = status.last_node_id();
+            item.stationary =
+                status.localized() && !status.driving();
+            item.has_mission = !status.mission_id().empty();
+        }
+
+        result.push_back(std::move(item));
+    }
+
+    return result;
 }

@@ -36,6 +36,7 @@ add_executable(fleet_control fc_main.cpp
         traffic/BaseGuard.cpp
         traffic/BasePlanner.cpp
         missions/ExtensionCommand.cpp
+        traffic/FixedRouteGate.cpp
 )
 target_include_directories(fleet_control PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(fleet_control PRIVATE
@@ -67,6 +68,7 @@ if(FMS_BUILD_TESTS)
             unit_tests/test_base_guard.cpp
             unit_tests/test_base_planner.cpp
             unit_tests/test_extension_command.cpp
+            unit_tests/test_fixed_route_gate.cpp
             routing/Router.cpp
             maps/Graph.cpp
             missions/Mission.cpp
@@ -81,6 +83,7 @@ if(FMS_BUILD_TESTS)
             traffic/BaseGuard.cpp
             traffic/BasePlanner.cpp
             missions/ExtensionCommand.cpp
+            traffic/FixedRouteGate.cpp
 
     )
     target_include_directories(fleet_control_unit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

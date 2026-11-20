@@ -74,7 +74,7 @@ asio::awaitable<void> MissionAssigner::loop() {
 
 
 void MissionAssigner::assign() {
-    if (!maps_.loaded() || !missions_.loaded()) {
+    if (!maps_.loaded() || !missions_.loaded() || !runner_.traffic_ready()) {
         return;
     }
     std::vector<Mission*> queue = missions_.queue();

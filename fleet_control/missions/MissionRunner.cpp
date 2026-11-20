@@ -6,6 +6,8 @@
 #include <format>
 #include <google/protobuf/util/json_util.h>
 #include <google/protobuf/util/time_util.h>
+#include <algorithm>
+#include <type_traits>
 #include <spdlog/spdlog.h>
 
 namespace dpv1 = fms::dispatch::v1;
@@ -81,7 +83,8 @@ MissionRunner::MissionRunner(asio::io_context& io_context, Services& services, M
       overdue_timer_(io_context),
       restore_timer_(io_context),
       uncertain_timer_(io_context),
-      extension_timer_(io_context) {}
+      extension_timer_(io_context),
+      traffic_timer_(io_context) {}
 
 
 void MissionRunner::start() {
@@ -90,6 +93,7 @@ void MissionRunner::start() {
     asio::co_spawn(io_context_, restore_loop(), log_failure);
     asio::co_spawn(io_context_, uncertain_loop(), log_failure);
     asio::co_spawn(io_context_, extension_loop(), log_failure);
+    asio::co_spawn(io_context_, traffic_loop(), log_failure);
 }
 
 void MissionRunner::stop() {
@@ -102,6 +106,7 @@ void MissionRunner::stop() {
     restore_timer_.cancel();
     uncertain_timer_.cancel();
     extension_timer_.cancel();
+    traffic_timer_.cancel();
 }
 
 // ==================================================================== отправка в dispatch
@@ -187,6 +192,7 @@ std::optional<fms1::Mission> MissionRunner::build(const Mission& mission, const 
     result.set_mission_id(mission.id);
     result.set_robot_id(mission.robot_id);
     Plan plan;
+    plan.traffic_version = graph->version;
 
     for (size_t i = 0; i < mission.steps.size(); ++i) {
         const MissionStep& step = mission.steps[i];
@@ -234,6 +240,11 @@ std::optional<fms1::Mission> MissionRunner::build(const Mission& mission, const 
             }
             edge_ids.push_back(edge.id);
         }
+
+        if (traffic_enabled_) {
+            move->set_released_nodes(1);
+        }
+
         plan.routes.push_back(std::move(ids));
         plan.edges.push_back(std::move(edge_ids));
         plan.seconds.push_back(route->seconds);
@@ -243,7 +254,7 @@ std::optional<fms1::Mission> MissionRunner::build(const Mission& mission, const 
         fms1::MoveProgress progress;
         progress.set_last_node_id(move->nodes(0).node_id());
         progress.set_last_node_index(0);
-        progress.set_released_nodes(static_cast<std::uint32_t>(move->nodes_size()));
+        progress.set_released_nodes(traffic_enabled_ ? 1 : static_cast<std::uint32_t>(move->nodes_size()));
         progress.set_total_nodes(static_cast<std::uint32_t>(move->nodes_size()));
 
         plan.progress.push_back(std::move(progress));
@@ -301,6 +312,37 @@ void MissionRunner::apply(Mission& mission, const fms1::MissionStatus& status) {
         update_plan(plan->second, status);
     } else {
         waiting_plans_[mission.id] = status;
+    }
+
+    if (traffic_enabled_ && plan != plans_.end()) {
+        try {
+            for (std::size_t i = 0;
+                 i < plan->second.progress.size(); ++i) {
+                const auto step_id = "s" + std::to_string(i);
+
+                for (const auto& step : status.steps()) {
+                    const auto held =
+                        traffic_routes_.find(mission.robot_id);
+
+                    const bool finishing_held =
+                        step.state() == fms1::STEP_STATE_COMPLETED &&
+                        held != traffic_routes_.end() &&
+                        held->second.key ==
+                            mission.id + "/" + step_id;
+
+                    if (step.node_id() == step_id &&
+                        step.has_move() &&
+                        (finishing_held ||
+                         status.current_node_id() == step_id)) {
+                        track_traffic(mission, plan->second, i);
+                         }
+                }
+                 }
+        } catch (const std::exception& error) {
+            traffic_fault_ = true;
+            spdlog::error(
+                "[traffic] grants blocked: {}", error.what());
+        }
     }
 
     const json before = mission_json(mission);
@@ -411,6 +453,10 @@ void MissionRunner::finish(Mission& mission, const std::string& state, std::opti
 
 std::vector<MissionRunner::SoonFree> MissionRunner::soon_free() {
     std::vector<SoonFree> result;
+    if (traffic_enabled_) {
+        return result;
+    }
+
     for (Mission* mission : missions_.active()) {
         if (mission->state != "RUNNING" || !mission->current_step || next_.contains(mission->robot_id)) {
             continue;
@@ -547,6 +593,7 @@ asio::awaitable<void> MissionRunner::watch_dispatch() {
         }
         grpc::Status status = co_await rpc.finish(asio::use_awaitable);
         stream_ = nullptr;
+        traffic_snapshot_ = false;
         if (stopped_) {
             break;
         }
@@ -568,6 +615,26 @@ void MissionRunner::on_update(const dpv1::MissionStatusUpdate& update) {
 }
 
 void MissionRunner::reconcile(const dpv1::MissionSnapshot& snapshot) {
+    traffic_snapshot_ = true;
+
+    if (traffic_enabled_) {
+        for (Mission* mission : missions_.active()) {
+            if (mission->state != "QUEUED" &&
+                !is_next(mission->id) &&
+                !sending_.contains(mission->id) &&
+                !plans_.contains(mission->id)) {
+                // Нет долговременной записи неподтверждённых разрешений.
+                // GetMission не исключает ещё летящую команду.
+                traffic_fault_ = true;
+
+                spdlog::error(
+                    "[traffic] restart with active mission {}: "
+                    "grants require reconciliation",
+                    mission->id);
+                }
+        }
+    }
+
     std::set<std::string> in_dispatch;
 
     for (const auto& status : snapshot.missions()) {
@@ -664,6 +731,12 @@ asio::awaitable<void> MissionRunner::restore(std::string mission_id) {
 
     Plan plan;
 
+    if (traffic_enabled_ && !graph) {
+        co_return;
+    }
+
+    plan.traffic_version = graph ? graph->version : 0;
+
     for (int i = 0; i < source.nodes_size(); ++i) {
         const auto& node = source.nodes(i);
 
@@ -702,6 +775,21 @@ asio::awaitable<void> MissionRunner::restore(std::string mission_id) {
 
         std::vector<std::string> ids;
         for (const auto& route_node : move.nodes()) {
+
+            if (traffic_enabled_) {
+                const auto at = graph->find_node(route_node.node_id());
+
+                if (!at ||
+                    route_node.map_id() != graph->map_id ||
+                    route_node.x() != graph->nodes[*at].x ||
+                    route_node.y() != graph->nodes[*at].y) {
+                    spdlog::error(
+                        "[traffic] cannot restore route on changed map: {}",
+                        mission_id);
+                    co_return;
+                    }
+            }
+
             ids.push_back(route_node.node_id());
         }
 
@@ -1104,6 +1192,8 @@ asio::awaitable<void> MissionRunner::extension_loop() {
         if (stopped_) co_return;
         if (extensions_.empty()) continue;
 
+        if (traffic_enabled_ && !traffic_ready()) continue;
+
         auto entry = extensions_.upper_bound(cursor);
         if (entry == extensions_.end()) {
             entry = extensions_.begin();
@@ -1155,7 +1245,8 @@ asio::awaitable<void> MissionRunner::extension_loop() {
             continue;
         }
 
-        if (!checked.ok()) {
+        if (!checked.ok() ||
+            (traffic_enabled_ && !traffic_ready())) {
             continue;
         }
 
@@ -1228,6 +1319,391 @@ asio::awaitable<void> MissionRunner::extension_loop() {
             spdlog::warn(
                 "[runner] extension {} blocked: {}",
                 id, entry->second.reason());
+        }
+    }
+}
+
+void MissionRunner::configure_traffic(AvailabilityTracker& availability, bool enabled) {
+
+    traffic_availability_ = &availability;
+    traffic_enabled_ = enabled;
+}
+
+bool MissionRunner::traffic_ready() const {
+    if (!traffic_enabled_) return true;
+
+    if (traffic_fault_ ||
+        !traffic_availability_ ||
+        !traffic_snapshot_ ||
+        !maps_.loaded() ||
+        !missions_.loaded() ||
+        !traffic_availability_->traffic_inventory_ready() ||
+        !traffic_editing_.empty()) {
+        return false;
+    }
+
+    for (Mission* mission : missions_.active()) {
+        if (mission->state != "QUEUED" &&
+            !is_next(mission->id) &&
+            !plans_.contains(mission->id)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool MissionRunner::try_map_edit(const std::string& map) {
+    if (!traffic_enabled_) return true;
+    if (!traffic_ready()) return false;
+
+    for (Mission* mission : missions_.active()) {
+        if (mission->map_id == map &&
+            mission->state != "QUEUED") {
+            return false;
+        }
+    }
+
+    for (const auto& [robot, route] : traffic_routes_) {
+        if (route.map == map &&
+            route.reached + 1 < route.nodes.size()) {
+            return false;
+        }
+    }
+
+    return traffic_editing_.insert(map).second;
+}
+
+void MissionRunner::end_map_edit(const std::string& map) {
+    traffic_editing_.erase(map);
+}
+
+void MissionRunner::track_traffic(
+    Mission& mission,
+    Plan& plan,
+    std::size_t step) {
+
+    if (step >= plan.progress.size() ||
+        step >= plan.routes.size() ||
+        step >= plan.edges.size()) {
+        throw std::runtime_error("traffic step outside plan");
+    }
+
+    const auto* graph = maps_.find(mission.map_id);
+
+    if (!graph || graph->version != plan.traffic_version) {
+        throw std::runtime_error("traffic map version changed");
+    }
+
+    const auto& progress = plan.progress[step];
+    const auto& nodes = plan.routes[step];
+    const auto& edges = plan.edges[step];
+
+    if (nodes.empty() ||
+        edges.size() != nodes.size() - 1 ||
+        progress.total_nodes() != nodes.size() ||
+        progress.released_nodes() == 0 ||
+        progress.released_nodes() > nodes.size() ||
+        progress.last_node_index() >= progress.released_nodes() ||
+        progress.last_node_id() !=
+            nodes[progress.last_node_index()]) {
+        throw std::runtime_error(
+            "invalid indexed traffic progress");
+    }
+
+    traffic::ProtectedRoute next;
+    next.robot = mission.robot_id;
+    next.key = mission.id + "/s" + std::to_string(step);
+    next.map = mission.map_id;
+    next.version = graph->version;
+    next.reached = progress.last_node_index();
+
+    std::size_t released = progress.released_nodes();
+    auto old = traffic_routes_.find(mission.robot_id);
+
+    if (old != traffic_routes_.end()) {
+        const auto& held = old->second;
+
+        if (held.key == next.key) {
+            if (held.map != next.map ||
+                held.version != next.version) {
+                throw std::runtime_error(
+                    "protected traffic map changed");
+            }
+
+            released = std::max(released, held.nodes.size());
+            next.reached = std::max(next.reached, held.reached);
+        } else {
+            const auto start = graph->find_node(nodes.front());
+
+            if (!start ||
+                held.map != next.map ||
+                held.version != next.version ||
+                held.reached + 1 != held.nodes.size() ||
+                held.nodes.back() != *start) {
+                throw std::runtime_error(
+                    "previous base has not been cleared");
+            }
+        }
+    }
+
+    if (released > nodes.size()) {
+        throw std::runtime_error(
+            "protected base exceeds route");
+    }
+
+    for (std::size_t i = 0; i < released; ++i) {
+        const auto node = graph->find_node(nodes[i]);
+
+        if (!node) {
+            throw std::runtime_error(
+                "traffic node missing from map");
+        }
+
+        next.nodes.push_back(*node);
+
+        if (i != 0) {
+            auto edge = std::find_if(
+                graph->edges.begin(),
+                graph->edges.end(),
+                [&](const auto& edge) {
+                    return edge.id == edges[i - 1];
+                });
+
+            if (edge == graph->edges.end() ||
+                edge->from != next.nodes[i - 1] ||
+                edge->to != next.nodes[i]) {
+                throw std::runtime_error(
+                    "traffic edge mismatch");
+            }
+
+            next.edges.push_back(
+                static_cast<std::uint32_t>(
+                    edge - graph->edges.begin()));
+        }
+    }
+
+    if (old != traffic_routes_.end() &&
+        old->second.key == next.key &&
+        (!std::equal(
+            old->second.nodes.begin(),
+            old->second.nodes.end(),
+            next.nodes.begin()) ||
+         !std::equal(
+            old->second.edges.begin(),
+            old->second.edges.end(),
+            next.edges.begin()))) {
+        throw std::runtime_error(
+            "protected traffic prefix changed");
+    }
+
+    traffic_routes_.insert_or_assign(
+        mission.robot_id, std::move(next));
+}
+
+asio::awaitable<void> MissionRunner::traffic_loop() {
+    while (!stopped_) {
+        traffic_timer_.expires_after(
+            std::chrono::milliseconds(200));
+
+        co_await traffic_timer_.async_wait(
+            asio::as_tuple(asio::use_awaitable));
+
+        if (stopped_) co_return;
+        if (!traffic_enabled_ || !traffic_ready()) continue;
+
+        try {
+            const auto active = missions_.active();
+
+            std::set<std::string> active_robots;
+            for (auto* mission : active) {
+                if (mission->state != "QUEUED") {
+                    active_robots.insert(mission->robot_id);
+                }
+            }
+
+            // Завершённый путь заменяется фактической позицией
+            // стоящего робота из полного inventory.
+            std::erase_if(
+                traffic_routes_,
+                [&](const auto& item) {
+                    return
+                        !active_robots.contains(item.first) &&
+                        item.second.reached + 1 ==
+                            item.second.nodes.size();
+                });
+
+            // Сначала учитываем ВСЕ активные разрешённые пути.
+            for (Mission* mission : active) {
+                if (mission->state == "QUEUED" ||
+                    is_next(mission->id)) {
+                    continue;
+                }
+
+                auto plan = plans_.find(mission->id);
+                if (plan == plans_.end()) {
+                    throw std::runtime_error(
+                        "traffic plan missing");
+                }
+
+                const int step =
+                    mission->current_step.value_or(0);
+
+                if (step < 0) {
+                    throw std::runtime_error(
+                        "invalid traffic current step");
+                }
+
+                track_traffic(
+                    *mission,
+                    plan->second,
+                    static_cast<std::size_t>(step));
+            }
+
+            std::vector<traffic::ProtectedRoute> held;
+            for (const auto& [robot, route] : traffic_routes_) {
+                held.push_back(route);
+            }
+
+            const auto occupants =
+                traffic_availability_->traffic_occupants();
+
+            auto ordered = active;
+            const auto now = now_ms();
+
+            std::sort(
+                ordered.begin(),
+                ordered.end(),
+                [&](auto* a, auto* b) {
+                    auto score = [&](auto* mission) {
+                        const auto since =
+                            mission->assigned_at_ms.value_or(
+                                mission->created_at_ms);
+
+                        return
+                            static_cast<std::uint64_t>(
+                                mission->priority) +
+                            static_cast<std::uint64_t>(
+                                std::max<std::int64_t>(
+                                    0, now - since) / 30'000);
+                    };
+
+                    if (score(a) != score(b)) {
+                        return score(a) > score(b);
+                    }
+
+                    const auto since_a =
+                        a->assigned_at_ms.value_or(
+                            a->created_at_ms);
+                    const auto since_b =
+                        b->assigned_at_ms.value_or(
+                            b->created_at_ms);
+
+                    if (since_a != since_b) {
+                        return since_a < since_b;
+                    }
+
+                    return a->id < b->id;
+                });
+
+            // Не более одного нового запроса за цикл.
+            for (Mission* mission : ordered) {
+                if (mission->state != "RUNNING" ||
+                    extensions_.contains(mission->id) ||
+                    !mission->current_step) {
+                    continue;
+                }
+
+                auto& plan = plans_.at(mission->id);
+                const auto step =
+                    static_cast<std::size_t>(
+                        *mission->current_step);
+                const auto& progress = plan.progress.at(step);
+
+                if (progress.revision() !=
+                        progress.confirmed_revision() ||
+                    !progress.update_rejected().empty() ||
+                    progress.released_nodes() ==
+                        progress.total_nodes()) {
+                    continue;
+                }
+
+                const auto* graph =
+                    maps_.find(mission->map_id);
+
+                auto wanted =
+                    traffic_routes_.at(mission->robot_id);
+
+                const auto old_size = wanted.nodes.size();
+
+                for (std::size_t i = old_size;
+                     i < plan.routes[step].size(); ++i) {
+                    const auto node =
+                        graph->find_node(plan.routes[step][i]);
+
+                    if (!node) {
+                        throw std::runtime_error(
+                            "traffic node missing");
+                    }
+
+                    wanted.nodes.push_back(*node);
+
+                    auto edge = std::find_if(
+                        graph->edges.begin(),
+                        graph->edges.end(),
+                        [&](const auto& e) {
+                            return e.id ==
+                                plan.edges[step][i - 1];
+                        });
+
+                    if (edge == graph->edges.end()) {
+                        throw std::runtime_error(
+                            "traffic edge missing");
+                    }
+
+                    wanted.edges.push_back(
+                        static_cast<std::uint32_t>(
+                            edge - graph->edges.begin()));
+                }
+
+                const auto allowed = traffic_gate_.check(
+                    *graph, occupants, held, wanted);
+
+                if (!allowed.granted) continue;
+
+                dpv1::ExtendMissionRequest request;
+                request.set_mission_id(mission->id);
+                request.set_move_node_id("s" + std::to_string(step));
+                request.set_revision(progress.revision() + 1);
+                request.set_released_nodes(progress.total_nodes());
+
+                if (queue_extension(request)) {
+                    // Зафиксировать резерв до следующего await.
+                    static_assert(
+                        std::is_nothrow_move_assignable_v<
+                            traffic::ProtectedRoute>);
+
+                    traffic_routes_.at(mission->robot_id) =
+                        std::move(wanted);
+
+                    spdlog::info(
+                        "[traffic] mission {}: reserved {} "
+                        "nodes before extension",
+                        mission->id, progress.total_nodes());
+                }
+
+                break;
+            }
+        } catch (const std::exception& error) {
+            traffic_fault_ = true;
+
+            if (traffic_error_ != error.what()) {
+                traffic_error_ = error.what();
+
+                spdlog::error(
+                    "[traffic] movement grants blocked: {}",
+                    traffic_error_);
+            }
         }
     }
 }

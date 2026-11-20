@@ -77,10 +77,11 @@ void FleetSync::on_update(const dpv1::RobotStatusUpdate& update) {
         }
         connected_ = true;
         spdlog::info("[fleet_sync] connected to dispatch, it has {} robots", in_dispatch_.size());
-        availability_.set_dispatch_connected(true);   // C-4b
+
         for (const auto& robot : update.snapshot().robots()) {
             availability_.on_status(robot);
         }
+        availability_.set_dispatch_connected(true);   // C-4b
         sync_timer_.cancel();
     } else if (update.has_status()) {
         in_dispatch_.insert(update.status().robot_id());
@@ -109,6 +110,7 @@ asio::awaitable<void> FleetSync::sync() {
     dbv1::ListRobotsResponse response;
     grpc::Status status = co_await services_.call<&Registry::PrepareAsyncListRobots>(*services_.registry, request, response);
     if (!status.ok()) {
+        availability_.set_traffic_registry_ready(false);
         if (database_ok_) {
             spdlog::warn("[fleet_sync] database unavailable ({}), robots are not reconciled", status.error_message());
             database_ok_ = false;
@@ -134,6 +136,7 @@ asio::awaitable<void> FleetSync::sync() {
         }
     }
     availability_.keep_only(in_database);
+    availability_.set_traffic_registry_ready(connected_);
 }
 
 // ==================================================================== общие шаги
