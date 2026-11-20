@@ -80,7 +80,8 @@ MissionRunner::MissionRunner(asio::io_context& io_context, Services& services, M
       reconnect_timer_(io_context),
       overdue_timer_(io_context),
       restore_timer_(io_context),
-      uncertain_timer_(io_context) {}
+      uncertain_timer_(io_context),
+      extension_timer_(io_context) {}
 
 
 void MissionRunner::start() {
@@ -88,6 +89,7 @@ void MissionRunner::start() {
     asio::co_spawn(io_context_, overdue_loop(), log_failure);
     asio::co_spawn(io_context_, restore_loop(), log_failure);
     asio::co_spawn(io_context_, uncertain_loop(), log_failure);
+    asio::co_spawn(io_context_, extension_loop(), log_failure);
 }
 
 void MissionRunner::stop() {
@@ -99,6 +101,7 @@ void MissionRunner::stop() {
     overdue_timer_.cancel();
     restore_timer_.cancel();
     uncertain_timer_.cancel();
+    extension_timer_.cancel();
 }
 
 // ==================================================================== отправка в dispatch
@@ -253,9 +256,7 @@ std::optional<fms1::Mission> MissionRunner::build(const Mission& mission, const 
 }
 
 
-void MissionRunner::update_plan(
-    Plan& plan,
-    const fms1::MissionStatus& status) {
+void MissionRunner::update_plan(Plan& plan, const fms1::MissionStatus& status) {
 
     for (size_t i = 0; i < plan.progress.size(); ++i) {
         const std::string step_id = std::format("s{}", i);
@@ -290,6 +291,9 @@ void MissionRunner::apply(Mission& mission, const fms1::MissionStatus& status) {
     if (mission.finished() || status.robot_id() != mission.robot_id) {
         return;
     }
+
+    observe_extension(status);
+
     uncertain_.erase(mission.id);
     auto plan = plans_.find(mission.id);
 
@@ -1004,5 +1008,226 @@ asio::awaitable<void> MissionRunner::uncertain_loop() {
 
         // OK означает начало отмены, NOT_FOUND — неизвестный результат.
         // Терминальный статус получаем по стриму, включая COMPLETED.
+    }
+}
+
+bool MissionRunner::queue_extension(
+    const dpv1::ExtendMissionRequest& request) {
+
+    Mission* mission = missions_.find(request.mission_id());
+
+    if (!mission ||
+        mission->state != "RUNNING" ||
+        sending_.contains(mission->id) ||
+        extensions_.contains(mission->id) ||
+        !mission->current_step ||
+        request.move_node_id() !=
+            "s" + std::to_string(*mission->current_step)) {
+        return false;
+    }
+
+    auto plan = plans_.find(mission->id);
+    if (plan == plans_.end()) {
+        return false;
+    }
+
+    const auto step =
+        static_cast<std::size_t>(*mission->current_step);
+
+    if (step >= plan->second.progress.size()) {
+        return false;
+    }
+
+    ExtensionCommand command(
+        request, plan->second.progress[step]);
+
+    extensions_.emplace(mission->id, std::move(command));
+    return true;
+}
+
+std::optional<ExtensionCommand::State>
+MissionRunner::extension_state(
+    const std::string& mission_id) const {
+
+    auto found = extensions_.find(mission_id);
+    if (found == extensions_.end()) {
+        return std::nullopt;
+    }
+
+    return found->second.state();
+}
+
+void MissionRunner::observe_extension(
+    const fms1::MissionStatus& status) {
+
+    auto found = extensions_.find(status.mission_id());
+    Mission* mission = missions_.find(status.mission_id());
+
+    if (found == extensions_.end() ||
+        !mission ||
+        status.robot_id() != mission->robot_id) {
+        return;
+    }
+
+    auto& command = found->second;
+
+    for (const auto& step : status.steps()) {
+        if (step.node_id() ==
+                command.request().move_node_id() &&
+            step.has_move()) {
+
+            const auto before = command.state();
+            command.observe(step.move());
+
+            if (before != ExtensionCommand::State::Blocked &&
+                command.state() == ExtensionCommand::State::Blocked) {
+                spdlog::warn(
+                    "[runner] extension {} blocked: {}",
+                    status.mission_id(), command.reason());
+            }
+
+            break;
+        }
+    }
+}
+
+asio::awaitable<void> MissionRunner::extension_loop() {
+    std::string cursor;
+
+    while (!stopped_) {
+        extension_timer_.expires_after(
+            std::chrono::milliseconds(500));
+
+        co_await extension_timer_.async_wait(
+            asio::as_tuple(asio::use_awaitable));
+
+        if (stopped_) co_return;
+        if (extensions_.empty()) continue;
+
+        auto entry = extensions_.upper_bound(cursor);
+        if (entry == extensions_.end()) {
+            entry = extensions_.begin();
+        }
+
+        const std::string id = entry->first;
+        cursor = id;
+
+        Mission* mission = missions_.find(id);
+
+        if (!mission ||
+            mission->finished() ||
+            entry->second.state() ==
+                ExtensionCommand::State::Confirmed) {
+            extensions_.erase(entry);
+            continue;
+        }
+
+        if (mission->state != "RUNNING" ||
+            entry->second.state() ==
+                ExtensionCommand::State::Blocked) {
+            continue;
+        }
+
+        // Сначала сверяем миссию и шаг.
+        // NOT_FOUND не снимает резервы.
+        dpv1::GetMissionRequest get;
+        get.set_mission_id(id);
+
+        dpv1::GetMissionResponse got;
+
+        const auto checked =
+            co_await services_.call<
+                &Dispatch::PrepareAsyncGetMission>(
+                *services_.dispatch, get, got);
+
+        if (stopped_) co_return;
+
+        entry = extensions_.find(id);
+        mission = missions_.find(id);
+
+        if (entry == extensions_.end() ||
+            !mission ||
+            mission->state != "RUNNING" ||
+            entry->second.state() ==
+                ExtensionCommand::State::Blocked ||
+            entry->second.state() ==
+                ExtensionCommand::State::Confirmed) {
+            continue;
+        }
+
+        if (!checked.ok()) {
+            continue;
+        }
+
+        if (got.status().mission_id() != id ||
+            got.status().robot_id() != mission->robot_id ||
+            got.status().state() != fms1::MISSION_STATE_RUNNING ||
+            got.status().current_node_id() !=
+                entry->second.request().move_node_id()) {
+
+            entry->second.block(
+                "mission or current step changed; "
+                "reconcile before extending");
+
+            spdlog::warn(
+                "[runner] extension {} blocked: {}",
+                id, entry->second.reason());
+
+            continue;
+        }
+
+        observe_extension(got.status());
+
+        entry = extensions_.find(id);
+
+        if (entry->second.state() !=
+            ExtensionCommand::State::DispatchPending) {
+            continue;
+        }
+
+        // Копия переживает await; сохранённую команду не изменяем.
+        const auto request = entry->second.request();
+        dpv1::ExtendMissionResponse response;
+
+        const auto sent =
+            co_await services_.call<
+                &Dispatch::PrepareAsyncExtendMission>(
+                *services_.dispatch, request, response);
+
+        if (stopped_) co_return;
+
+        entry = extensions_.find(id);
+        mission = missions_.find(id);
+
+        if (entry == extensions_.end() ||
+            !mission ||
+            mission->state != "RUNNING") {
+            continue;
+        }
+
+        if (sent.ok()) {
+            entry->second.observe(response.progress());
+        } else {
+            switch (sent.error_code()) {
+                case grpc::StatusCode::UNAVAILABLE:
+                case grpc::StatusCode::DEADLINE_EXCEEDED:
+                case grpc::StatusCode::CANCELLED:
+                case grpc::StatusCode::UNKNOWN:
+                case grpc::StatusCode::INTERNAL:
+                    // Сверка и повтор только сохранённого запроса.
+                    break;
+
+                default:
+                    entry->second.block(sent.error_message());
+                    break;
+            }
+        }
+
+        if (entry->second.state() ==
+            ExtensionCommand::State::Blocked) {
+            spdlog::warn(
+                "[runner] extension {} blocked: {}",
+                id, entry->second.reason());
+        }
     }
 }

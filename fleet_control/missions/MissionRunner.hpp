@@ -15,6 +15,7 @@
 #include "maps/MapStore.hpp"
 #include "missions/MissionStore.hpp"
 #include "missions/RouteParts.hpp"
+#include "missions/ExtensionCommand.hpp"
 #include "services/Services.hpp"
 
 // Исполнение миссий (M-3c): назначенную миссию — в dispatch, статусы из dispatch — в документ миссии.
@@ -30,6 +31,16 @@ public:
 
     void start();   // стрим статусов миссий из dispatch и проверка затянувшихся
     void stop();
+
+    // До вызова traffic обязан захватить hard-ресурсы нового base.
+    // true — команда сохранена для отправки, НЕ подтверждение робота.
+    // false — сейчас нельзя принять команду; invalid_argument — неверные данные.
+    // При false/исключении вызывающий не должен слепо снимать резервы:
+    // необходимо согласовать их с уже выданным base.
+    bool queue_extension(
+        const fms::dispatch::v1::ExtendMissionRequest& request);
+
+    std::optional<ExtensionCommand::State> extension_state(const std::string& mission_id) const;
 
     // Миссия назначена (ASSIGNED), робот стоит на start_node: построить маршруты и отправить в dispatch
     void start_mission(Mission& mission, const std::string& start_node);
@@ -96,6 +107,10 @@ private:
     void request_restore(const std::string& mission_id);
     asio::awaitable<void> restore_loop();
     asio::awaitable<void> uncertain_loop();
+    asio::awaitable<void> extension_loop();
+
+    void observe_extension(const fms::v1::MissionStatus& status);
+
     void update_plan(Plan& plan, const fms::v1::MissionStatus& status);
 
     void on_update(const fms::dispatch::v1::MissionStatusUpdate& update);
@@ -131,6 +146,8 @@ private:
     asio::steady_timer restore_timer_;
     std::set<std::string> uncertain_;
     asio::steady_timer uncertain_timer_;
+    std::map<std::string, ExtensionCommand> extensions_;
+    asio::steady_timer extension_timer_;
     bool stopped_ = false;
 };
 
