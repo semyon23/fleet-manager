@@ -4,6 +4,7 @@
 #include "../include/MissionTable.hpp"
 #include "../include/EventTable.hpp"
 #include "../include/AlarmTable.hpp"
+#include "../include/ControlCommandTable.hpp"
 #include "spdlog/spdlog.h"
 #include <google/protobuf/util/time_util.h>
 #include <nlohmann/json.hpp>
@@ -25,6 +26,10 @@ using ReserveHeaderIdsRPC     = agrpc::ServerRPC<&Storage::RequestReserveHeaderI
 using SaveRobotAvailabilityRPC = agrpc::ServerRPC<&Registry::RequestSaveRobotAvailability>;
 
 using Control = dbv1::ControlStorage::AsyncService;
+
+using PutControlCommandRPC = agrpc::ServerRPC<&Control::RequestPutControlCommand>;
+using ListControlCommandsRPC = agrpc::ServerRPC<&Control::RequestListControlCommands>;
+using ResolveControlCommandRPC = agrpc::ServerRPC<&Control::RequestResolveControlCommand>;
 
 using CreateMapRPC = agrpc::ServerRPC<&Control::RequestCreateMap>;
 using UpdateMapRPC = agrpc::ServerRPC<&Control::RequestUpdateMap>;
@@ -346,6 +351,51 @@ void DatabaseService::start() {
         [this](ListOpenAlarmsRPC& rpc, ListOpenAlarmsRPC::Request& request) -> asio::awaitable<void> {
             ListOpenAlarmsRPC::Response response;
             grpc::Status status = co_await list_open_alarms(request, response);
+            co_await rpc.finish(response, status);
+        },
+        on_handler_done);
+
+    agrpc::register_awaitable_rpc_handler<PutControlCommandRPC>(
+    grpc_context_, control_,
+    [this](
+        PutControlCommandRPC& rpc,
+        PutControlCommandRPC::Request& request)
+        -> asio::awaitable<void> {
+
+        PutControlCommandRPC::Response response;
+        const auto status =
+            co_await put_control_command(request, response);
+
+        co_await rpc.finish(response, status);
+    },
+    on_handler_done);
+
+    agrpc::register_awaitable_rpc_handler<ListControlCommandsRPC>(
+        grpc_context_, control_,
+        [this](
+            ListControlCommandsRPC& rpc,
+            ListControlCommandsRPC::Request& request)
+            -> asio::awaitable<void> {
+
+            ListControlCommandsRPC::Response response;
+            const auto status =
+                co_await list_control_commands(request, response);
+
+            co_await rpc.finish(response, status);
+        },
+        on_handler_done);
+
+    agrpc::register_awaitable_rpc_handler<ResolveControlCommandRPC>(
+        grpc_context_, control_,
+        [this](
+            ResolveControlCommandRPC& rpc,
+            ResolveControlCommandRPC::Request& request)
+            -> asio::awaitable<void> {
+
+            ResolveControlCommandRPC::Response response;
+            const auto status =
+                co_await resolve_control_command(request, response);
+
             co_await rpc.finish(response, status);
         },
         on_handler_done);
@@ -758,5 +808,95 @@ asio::awaitable<grpc::Status> DatabaseService::list_open_alarms(const dbv1::List
     for (auto& alarm : alarms) {
         *response.add_alarms() = std::move(alarm);
     }
+    co_return grpc::Status::OK;
+}
+
+asio::awaitable<grpc::Status>
+DatabaseService::put_control_command(
+    const dbv1::PutControlCommandRequest& request,
+    dbv1::PutControlCommandResponse& response) {
+
+    if (const auto error =
+            control_command_error(request.command());
+        !error.empty()) {
+        co_return grpc::Status{
+            grpc::StatusCode::INVALID_ARGUMENT,
+            error
+        };
+    }
+
+    try {
+        co_await database_.run([&](pqxx::work& tx) {
+            response.set_resolved(
+                ::put_control_command(tx, request.command()));
+        });
+    } catch (const ControlCommandConflict& error) {
+        co_return grpc::Status{
+            grpc::StatusCode::ALREADY_EXISTS,
+            error.what()
+        };
+    } catch (const std::exception& error) {
+        co_return database_error(error);
+    }
+
+    // Database::run уже выполнил COMMIT.
+    co_return grpc::Status::OK;
+}
+
+asio::awaitable<grpc::Status>
+DatabaseService::list_control_commands(
+    const dbv1::ListControlCommandsRequest& request,
+    dbv1::ListControlCommandsResponse& response) {
+
+    std::vector<dbv1::StoredControlCommand> commands;
+
+    try {
+        co_await database_.run([&](pqxx::work& tx) {
+            commands = ::list_control_commands(
+                tx,
+                request.robot_id(),
+                request.include_resolved());
+        });
+    } catch (const std::exception& error) {
+        co_return database_error(error);
+    }
+
+    for (auto& command : commands) {
+        *response.add_commands() = std::move(command);
+    }
+
+    co_return grpc::Status::OK;
+}
+
+asio::awaitable<grpc::Status>
+DatabaseService::resolve_control_command(
+    const dbv1::ResolveControlCommandRequest& request,
+    dbv1::ResolveControlCommandResponse&) {
+
+    if (request.command_id().empty()) {
+        co_return grpc::Status{
+            grpc::StatusCode::INVALID_ARGUMENT,
+            "command_id is required"
+        };
+    }
+
+    bool found = false;
+
+    try {
+        co_await database_.run([&](pqxx::work& tx) {
+            found = ::resolve_control_command(
+                tx, request.command_id());
+        });
+    } catch (const std::exception& error) {
+        co_return database_error(error);
+    }
+
+    if (!found) {
+        co_return grpc::Status{
+            grpc::StatusCode::NOT_FOUND,
+            "command not found"
+        };
+    }
+
     co_return grpc::Status::OK;
 }

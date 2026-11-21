@@ -11,6 +11,7 @@ add_executable(fleet_database
         src/MissionTable.cpp
         src/EventTable.cpp
         src/AlarmTable.cpp
+        src/ControlCommandTable.cpp
 )
 
 target_include_directories(fleet_database PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

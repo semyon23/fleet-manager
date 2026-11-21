@@ -56,6 +56,12 @@ private:
     asio::awaitable<grpc::Status> save_alarm(const dbv1::SaveAlarmRequest& request, dbv1::SaveAlarmResponse& response);
     asio::awaitable<grpc::Status> list_open_alarms(const dbv1::ListOpenAlarmsRequest& request, dbv1::ListOpenAlarmsResponse& response);
 
+    asio::awaitable<grpc::Status> put_control_command(const dbv1::PutControlCommandRequest& request, dbv1::PutControlCommandResponse& response);
+
+    asio::awaitable<grpc::Status> list_control_commands(const dbv1::ListControlCommandsRequest& request, dbv1::ListControlCommandsResponse& response);
+
+    asio::awaitable<grpc::Status> resolve_control_command(const dbv1::ResolveControlCommandRequest& request, dbv1::ResolveControlCommandResponse& response);
+
     agrpc::GrpcContext& grpc_context_;
     Database& database_;
     dbv1::RobotRegistry::AsyncService registry_;

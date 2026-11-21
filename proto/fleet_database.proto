@@ -255,6 +255,23 @@ service ControlStorage {
   rpc SaveAlarm(SaveAlarmRequest) returns (SaveAlarmResponse);
   // Открытые — активные или ещё не подтверждённые: control читает при старте
   rpc ListOpenAlarms(ListOpenAlarmsRequest) returns (ListOpenAlarmsResponse);
+
+  // OK приходит после COMMIT.
+  // До подтверждения записи control не отправляет команду dispatch.
+  //
+  // Повтор с тем же id и данными идемпотентен.
+  // Другие данные под тем же id — ALREADY_EXISTS.
+  rpc PutControlCommand(PutControlCommandRequest)
+      returns (PutControlCommandResponse);
+
+  rpc ListControlCommands(ListControlCommandsRequest)
+      returns (ListControlCommandsResponse);
+
+  // Только когда защищённое состояние надёжно завершено
+  // или заменено другим сохранённым состоянием.
+  // НЕ вызывать просто по успешному ответу dispatch.
+  rpc ResolveControlCommand(ResolveControlCommandRequest)
+      returns (ResolveControlCommandResponse);
 }
 
 message CreateMapRequest { MapRecord map = 1; }   // version, created_at, updated_at игнорируются
@@ -372,3 +389,69 @@ message SaveAlarmResponse {}
 
 message ListOpenAlarmsRequest {}
 message ListOpenAlarmsResponse { repeated AlarmRecord alarms = 1; }   // по created_at
+
+// Долговременное намерение control.
+// Это НЕ квитанция принятия команды dispatch или роботом.
+enum ControlCommandKind {
+  CONTROL_COMMAND_KIND_UNSPECIFIED = 0;
+  CONTROL_COMMAND_KIND_ADD_MISSION = 1;
+  CONTROL_COMMAND_KIND_EXTEND_MISSION = 2;
+  CONTROL_COMMAND_KIND_CANCEL_MISSION = 3;
+}
+
+message ControlCommandRecord {
+  // Стабильный id: повтор записи использует тот же id.
+  string command_id = 1;
+
+  string robot_id = 2;
+  string mission_id = 3;
+  string map_id = 4;
+  uint32 map_version = 5;
+
+  ControlCommandKind kind = 6;
+
+  // Только для EXTEND.
+  string move_node_id = 7;
+  uint32 revision = 8;
+
+  // Точный сериализованный
+  // AddMissionRequest / ExtendMissionRequest / CancelMissionRequest.
+  bytes request_proto = 9;
+
+  // Снимок восстановления принадлежит control.
+  // База проверяет, что это JSON object.
+  // Полноту и смысл снимка проверяет control.
+  uint32 recovery_version = 10;
+  string recovery_json = 11;
+}
+
+message PutControlCommandRequest {
+  ControlCommandRecord command = 1;
+}
+
+message PutControlCommandResponse {
+  // Завершённая запись не активируется повторным Put.
+  // resolved=true НЕ разрешает повторно посылать команду роботу.
+  bool resolved = 1;
+}
+
+message ListControlCommandsRequest {
+  // Пусто — все роботы.
+  string robot_id = 1;
+  bool include_resolved = 2;
+}
+
+message StoredControlCommand {
+  ControlCommandRecord command = 1;
+  bool resolved = 2;
+}
+
+message ListControlCommandsResponse {
+  repeated StoredControlCommand commands = 1;
+}
+
+message ResolveControlCommandRequest {
+  string command_id = 1;
+}
+
+message ResolveControlCommandResponse {}
