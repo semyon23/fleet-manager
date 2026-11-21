@@ -37,6 +37,8 @@ add_executable(fleet_control fc_main.cpp
         traffic/BasePlanner.cpp
         missions/ExtensionCommand.cpp
         traffic/FixedRouteGate.cpp
+        missions/ControlCommandJournal.cpp
+        missions/ControlCommandJournal.hpp
 )
 target_include_directories(fleet_control PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(fleet_control PRIVATE

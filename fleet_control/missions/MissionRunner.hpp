@@ -16,6 +16,7 @@
 #include "missions/MissionStore.hpp"
 #include "missions/RouteParts.hpp"
 #include "missions/ExtensionCommand.hpp"
+#include "missions/ControlCommandJournal.hpp"
 #include "services/Services.hpp"
 #include "fleet/AvailabilityTracker.hpp"
 #include "traffic/FixedRouteGate.hpp"
@@ -176,6 +177,20 @@ private:
 
     traffic::FixedRouteGate traffic_gate_;
     asio::steady_timer traffic_timer_;
+
+
+    ControlCommandJournal::Handle stage_command(const std::string& id, fms::database::v1::ControlCommandKind kind, const std::string& payload, const std::string& move_id = {},std::uint32_t revision = 0);
+
+    asio::awaitable<grpc::Status> journaled_cancel(std::string id);
+    asio::awaitable<void> journal_startup();
+    std::uint32_t journal_attempt(const std::string& id) const;
+
+    ControlCommandJournal command_journal_;
+    std::map<std::string, std::uint32_t> journal_attempts_;
+    std::set<std::string> add_rpc_started_;
+    std::set<std::string> local_adds_;
+    asio::steady_timer journal_timer_;
+    bool journal_loaded_ = false;
 
     bool stopped_ = false;
 };

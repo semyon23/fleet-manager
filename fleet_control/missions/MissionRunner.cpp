@@ -1,4 +1,5 @@
 #include "MissionRunner.hpp"
+#include <limits>
 
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -84,7 +85,9 @@ MissionRunner::MissionRunner(asio::io_context& io_context, Services& services, M
       restore_timer_(io_context),
       uncertain_timer_(io_context),
       extension_timer_(io_context),
-      traffic_timer_(io_context) {}
+      traffic_timer_(io_context),
+      command_journal_(services),
+      journal_timer_(io_context) {}
 
 
 void MissionRunner::start() {
@@ -94,6 +97,7 @@ void MissionRunner::start() {
     asio::co_spawn(io_context_, uncertain_loop(), log_failure);
     asio::co_spawn(io_context_, extension_loop(), log_failure);
     asio::co_spawn(io_context_, traffic_loop(), log_failure);
+    asio::co_spawn(io_context_, journal_startup(), log_failure);
 }
 
 void MissionRunner::stop() {
@@ -107,12 +111,14 @@ void MissionRunner::stop() {
     uncertain_timer_.cancel();
     extension_timer_.cancel();
     traffic_timer_.cancel();
+    journal_timer_.cancel();
 }
 
 // ==================================================================== отправка в dispatch
 
 void MissionRunner::start_mission(Mission& mission, const std::string& start_node) {
-    sending_.insert(mission.id);
+    if (!sending_.insert(mission.id).second) return;
+    local_adds_.insert(mission.id);
     asio::co_spawn(io_context_, send(mission.id, start_node), log_failure);
 }
 
@@ -132,20 +138,44 @@ asio::awaitable<void> MissionRunner::send(std::string mission_id, std::string st
 
     dpv1::AddMissionRequest request;
     *request.mutable_mission() = std::move(*built);
+    ControlCommandJournal::Handle saved_command;
+    try {
+        saved_command = stage_command(mission_id,
+            fms::database::v1::CONTROL_COMMAND_KIND_ADD_MISSION, request.SerializeAsString());
+    } catch (const std::exception& error) {
+        sending_.erase(mission_id);
+        traffic_fault_ = true;
+        spdlog::error("[journal] cannot stage AddMission {}: {}", mission_id, error.what());
+        co_return;
+    }
+    asio::steady_timer retry(io_context_);
+    for (;;) {
+        if (stopped_) { sending_.erase(mission_id); co_return; }
+        mission = missions_.find(mission_id);
+        if (!mission || mission->state != "ASSIGNED") {
+            sending_.erase(mission_id);
+            co_return;
+        }
+        const auto saved = co_await command_journal_.persist(saved_command);
+        if (saved.ok()) break;
+        retry.expires_after(std::chrono::seconds(1));
+        co_await retry.async_wait(asio::as_tuple(asio::use_awaitable));
+    }
+    mission = missions_.find(mission_id);
+    if (stopped_ || !mission || mission->state != "ASSIGNED") {
+        sending_.erase(mission_id);
+        co_return;
+    }
+    add_rpc_started_.insert(mission_id);
     dpv1::AddMissionResponse response;
     grpc::Status status = co_await services_.call<&Dispatch::PrepareAsyncAddMission>(*services_.dispatch, request, response);
     sending_.erase(mission_id);
 
     mission = missions_.find(mission_id);   // пока ждали — могли отменить: ссылки больше нет
     if (status.ok()) {
-        if (!mission) {
-            // Отменили, пока миссия летела в dispatch (отмена её уже завершила), — а там она началась: остановить
-            dpv1::CancelMissionRequest cancel;
-            cancel.set_mission_id(mission_id);
-            dpv1::CancelMissionResponse cancelled;
-            co_await services_.call<&Dispatch::PrepareAsyncCancelMission>(*services_.dispatch, cancel, cancelled);
-            co_return;
-        }
+        // Из памяти исчезают только завершённые миссии. Не шлём новую
+        // отмену по позднему успешному ответу уже завершённой миссии.
+        if (!mission) co_return;
         spdlog::info("[runner] mission {} sent to robot {}", mission_id, mission->robot_id);
         // Стрим статусов мог обогнать ответ на AddMission: тогда в миссии уже статус свежее этого
         if (mission->state == "ASSIGNED") {
@@ -158,9 +188,26 @@ asio::awaitable<void> MissionRunner::send(std::string mission_id, std::string st
     if (mission->state != "ASSIGNED") co_return;
     switch (status.error_code()) {
         case grpc::StatusCode::NOT_FOUND:
-        case grpc::StatusCode::FAILED_PRECONDITION:
+        case grpc::StatusCode::FAILED_PRECONDITION: {
+            auto& attempt = journal_attempts_[mission_id];
+            if (attempt == std::numeric_limits<std::uint32_t>::max()) {
+                traffic_fault_ = true;
+                spdlog::error("[journal] assignment attempt overflow: {}", mission_id);
+                break;
+            }
+            const auto held = traffic_routes_.find(mission->robot_id);
+            if (held != traffic_routes_.end() && held->second.nodes.size() == 1 &&
+                held->second.key == mission_id + "/" + std::to_string(attempt) + "/s0") {
+                // Add не принят. Стоящий робот остаётся занят через inventory,
+                // но больше не принадлежит отвергнутой попытке этой миссии.
+                traffic_routes_.erase(held);
+            }
+            add_rpc_started_.erase(mission_id);
+            local_adds_.erase(mission_id);
+            ++attempt; // Только доказанный отказ, НЕ тайм-аут.
             back_to_queue(*mission, status.error_message());
             break;
+        }
         case grpc::StatusCode::INVALID_ARGUMENT:
         case grpc::StatusCode::UNIMPLEMENTED:
             finish(*mission, "FAILED", MissionError{
@@ -326,7 +373,7 @@ void MissionRunner::apply(Mission& mission, const fms1::MissionStatus& status) {
                         step.state() == fms1::STEP_STATE_COMPLETED &&
                         held != traffic_routes_.end() &&
                         held->second.key ==
-                            mission.id + "/" + step_id;
+                            mission.id + "/" + std::to_string(journal_attempt(mission.id)) + "/" + step_id;
 
                     if (step.node_id() == step_id &&
                         step.has_move() &&
@@ -413,6 +460,10 @@ void MissionRunner::apply(Mission& mission, const fms1::MissionStatus& status) {
         plans_.erase(plan);
     }
     waiting_plans_.erase(mission.id);
+    command_journal_.forget(mission.id);
+    journal_attempts_.erase(mission.id);
+    add_rpc_started_.erase(mission.id);
+    local_adds_.erase(mission.id);
     missions_.changed(mission);   // завершённая уходит из памяти: mission дальше не трогаем
     release_next(robot_id, completed, end_node);
 }
@@ -443,6 +494,10 @@ void MissionRunner::finish(Mission& mission, const std::string& state, std::opti
     const std::string robot_id = mission.robot_id;
     plans_.erase(mission.id);
     waiting_plans_.erase(mission.id);
+    command_journal_.forget(mission.id);
+    journal_attempts_.erase(mission.id);
+    add_rpc_started_.erase(mission.id);
+    local_adds_.erase(mission.id);
     missions_.changed(mission, why);   // завершённая уходит из памяти: mission дальше не трогаем
     release_next(robot_id, false, "");
 }
@@ -843,8 +898,7 @@ asio::awaitable<void> MissionRunner::restore(std::string mission_id) {
 
 // ==================================================================== отмена
 
-asio::awaitable<grpc::Status>
-MissionRunner::cancel(const std::string& mission_id) {
+asio::awaitable<grpc::Status> MissionRunner::cancel(const std::string& mission_id) {
     // Следующая миссия ещё не отправлялась — её можно отменить сразу.
     for (auto it = next_.begin(); it != next_.end(); ++it) {
         if (it->second.mission_id == mission_id) {
@@ -860,25 +914,7 @@ MissionRunner::cancel(const std::string& mission_id) {
         }
     }
 
-    Mission* mission = missions_.find(mission_id);
-    if (!mission || mission->finished()) {
-        co_return grpc::Status::OK;
-    }
-
-    if (mission->state != "CANCELING") {
-        mission->state = "CANCELING";
-        missions_.changed(*mission, "canceled by operator");
-    }
-
-    // Намерение уже принято control. Доставку повторит uncertain_loop.
-    dpv1::CancelMissionRequest request;
-    request.set_mission_id(mission_id);
-
-    dpv1::CancelMissionResponse response;
-    co_await services_.call<&Dispatch::PrepareAsyncCancelMission>(
-        *services_.dispatch, request, response);
-
-    co_return grpc::Status::OK;
+    co_return co_await journaled_cancel(mission_id);
 }
 
 // ==================================================================== c2: маршруты для UI
@@ -1082,12 +1118,7 @@ asio::awaitable<void> MissionRunner::uncertain_loop() {
             continue;
         }
 
-        dpv1::CancelMissionRequest cancel;
-        cancel.set_mission_id(id);
-        dpv1::CancelMissionResponse cancelled;
-
-        co_await services_.call<&Dispatch::PrepareAsyncCancelMission>(
-            *services_.dispatch, cancel, cancelled);
+        co_await journaled_cancel(id);
 
         // OK означает начало отмены, NOT_FOUND — неизвестный результат.
         // Терминальный статус получаем по стриму, включая COMPLETED.
@@ -1272,6 +1303,26 @@ asio::awaitable<void> MissionRunner::extension_loop() {
 
         // Копия переживает await; сохранённую команду не изменяем.
         const auto request = entry->second.request();
+        ControlCommandJournal::Handle saved_command;
+        try {
+            saved_command = stage_command(id,
+                fms::database::v1::CONTROL_COMMAND_KIND_EXTEND_MISSION,
+                request.SerializeAsString(), request.move_node_id(), request.revision());
+        } catch (const std::exception& error) {
+            entry->second.block(error.what());
+            spdlog::error("[journal] cannot stage extension {}: {}", id, error.what());
+            continue;
+        }
+        const auto saved = co_await command_journal_.persist(saved_command);
+        if (stopped_) co_return;
+        if (!saved.ok()) continue;
+        entry = extensions_.find(id);
+        mission = missions_.find(id);
+        if (!traffic_ready() || entry == extensions_.end() || !mission ||
+            mission->state != "RUNNING" ||
+            entry->second.state() != ExtensionCommand::State::DispatchPending ||
+            entry->second.request().move_node_id() != request.move_node_id() ||
+            entry->second.request().revision() != request.revision()) continue;
         dpv1::ExtendMissionResponse response;
 
         const auto sent =
@@ -1324,7 +1375,7 @@ void MissionRunner::configure_traffic(AvailabilityTracker& availability) {
 
 bool MissionRunner::traffic_ready() const {
 
-    if (traffic_fault_ ||
+    if (!journal_loaded_ || traffic_fault_ ||
         !traffic_availability_ ||
         !traffic_snapshot_ ||
         !maps_.loaded() ||
@@ -1404,7 +1455,7 @@ void MissionRunner::track_traffic(
 
     traffic::ProtectedRoute next;
     next.robot = mission.robot_id;
-    next.key = mission.id + "/s" + std::to_string(step);
+    next.key = mission.id + "/" + std::to_string(journal_attempt(mission.id)) + "/s" + std::to_string(step);
     next.map = mission.map_id;
     next.version = graph->version;
     next.reached = progress.last_node_index();
@@ -1696,5 +1747,192 @@ asio::awaitable<void> MissionRunner::traffic_loop() {
                     traffic_error_);
             }
         }
+    }
+}
+std::uint32_t MissionRunner::journal_attempt(const std::string& id) const {
+    auto found = journal_attempts_.find(id);
+    return found == journal_attempts_.end() ? 0 : found->second;
+}
+
+ControlCommandJournal::Handle MissionRunner::stage_command(
+    const std::string& id, fms::database::v1::ControlCommandKind kind,
+    const std::string& payload, const std::string& move_id, std::uint32_t revision) {
+    Mission* mission = missions_.find(id);
+    auto plan = plans_.find(id);
+    if (!mission || plan == plans_.end()) {
+        throw std::runtime_error("journal requires mission and restored route");
+    }
+    const int step = mission->current_step.value_or(0);
+    if (step < 0 || static_cast<std::size_t>(step) >= plan->second.progress.size()) {
+        throw std::runtime_error("invalid step for journal snapshot");
+    }
+    const auto* graph = maps_.find(mission->map_id);
+    if (!graph || graph->version != plan->second.traffic_version) {
+        throw std::runtime_error("journal map version mismatch");
+    }
+    // AddMission ещё не ушёл: защищаем его старт и фиксируем поколение.
+    track_traffic(*mission, plan->second, static_cast<std::size_t>(step));
+    const auto& held = traffic_routes_.at(mission->robot_id);
+    json progress = json::array();
+    for (const auto& item : plan->second.progress) {
+        std::string encoded;
+        const auto status = google::protobuf::util::MessageToJsonString(item, &encoded);
+        if (!status.ok()) throw std::runtime_error("cannot serialize move progress");
+        progress.push_back(json::parse(encoded));
+    }
+    const auto attempt = journal_attempt(id);
+    const bool cancelled_before_add = kind == fms::database::v1::CONTROL_COMMAND_KIND_CANCEL_MISSION &&
+        local_adds_.contains(id) && !add_rpc_started_.contains(id);
+    json snapshot = {
+        {"version", 1}, {"attempt", attempt}, {"mission", mission_json(*mission)},
+        {"mapVersion", graph->version}, {"routes", plan->second.routes},
+        {"edges", plan->second.edges}, {"stepProgress", std::move(progress)},
+        {"cancelBeforeAdd", cancelled_before_add},
+        {"protectedBase", {
+            {"robot", held.robot}, {"key", held.key}, {"map", held.map},
+            {"version", held.version}, {"nodes", held.nodes},
+            {"edges", held.edges}, {"reached", held.reached}}}
+    };
+    fms::database::v1::ControlCommandRecord record;
+    // JSON tuple исключает неоднозначность разделителей в пользовательских id.
+    record.set_command_id(json::array({id, attempt, static_cast<int>(kind), move_id, revision}).dump());
+    record.set_robot_id(mission->robot_id);
+    record.set_mission_id(id);
+    record.set_map_id(mission->map_id);
+    record.set_map_version(graph->version);
+    record.set_kind(kind);
+    record.set_move_node_id(move_id);
+    record.set_revision(revision);
+    record.set_attempt(attempt);
+    record.set_request_proto(payload);
+    record.set_recovery_version(1);
+    record.set_recovery_json(snapshot.dump());
+    return command_journal_.stage(std::move(record));
+}
+
+asio::awaitable<grpc::Status> MissionRunner::journaled_cancel(std::string id) {
+    auto* mission = missions_.find(id);
+    if (!mission || mission->finished()) co_return grpc::Status::OK;
+    if (mission->state != "CANCELING") {
+        mission->state = "CANCELING";
+        missions_.changed(*mission, "canceled by operator");
+    }
+    if (!journal_loaded_) {
+        co_return grpc::Status{grpc::StatusCode::UNAVAILABLE, "command journal is loading"};
+    }
+    dpv1::CancelMissionRequest request;
+    request.set_mission_id(id);
+    ControlCommandJournal::Handle entry;
+    try {
+        entry = stage_command(id, fms::database::v1::CONTROL_COMMAND_KIND_CANCEL_MISSION,
+                              request.SerializeAsString());
+    } catch (const std::exception& error) {
+        co_return grpc::Status{grpc::StatusCode::UNAVAILABLE, error.what()};
+    }
+    const auto saved = co_await command_journal_.persist(entry);
+    if (!saved.ok()) co_return saved;
+    if (stopped_) co_return grpc::Status{grpc::StatusCode::CANCELLED, "control stopping"};
+    mission = missions_.find(id);
+    if (!mission || mission->finished()) co_return grpc::Status::OK;
+    const auto snapshot = json::parse(entry->record.recovery_json());
+    if (snapshot.value("cancelBeforeAdd", false)) {
+        if (add_rpc_started_.contains(id)) {
+            traffic_fault_ = true;
+            co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
+                                  "AddMission started despite cancellation"};
+        }
+        // Намерение отмены уже надёжно записано. AddMission не вызывался.
+        finish(*mission, "CANCELED", std::nullopt, "canceled before dispatch send");
+        co_return grpc::Status::OK;
+    }
+    dpv1::CancelMissionResponse response;
+    co_await services_.call<&Dispatch::PrepareAsyncCancelMission>(
+        *services_.dispatch, request, response);
+    // Результат исполнения отмены по-прежнему приходит из dispatch.
+    co_return grpc::Status::OK;
+}
+
+asio::awaitable<void> MissionRunner::journal_startup() {
+    using Storage = fms::database::v1::ControlStorage::Stub;
+    while (!stopped_) {
+        if (!(missions_.loaded() && maps_.loaded())) {
+            journal_timer_.expires_after(std::chrono::milliseconds(100));
+            co_await journal_timer_.async_wait(asio::as_tuple(asio::use_awaitable));
+            continue;
+        }
+        fms::database::v1::ListControlCommandsRequest request;
+        fms::database::v1::ListControlCommandsResponse response;
+        auto status = co_await services_.call<&Storage::PrepareAsyncListControlCommands>(
+            *services_.control, request, response);
+        bool retry = !status.ok();
+        bool unresolved = false;
+        if (status.ok()) {
+            std::map<std::string, std::vector<fms::database::v1::ControlCommandRecord>> groups;
+            for (const auto& item : response.commands()) {
+                groups[item.command().mission_id()].push_back(item.command());
+                auto& attempt = journal_attempts_[item.command().mission_id()];
+                attempt = std::max(attempt, item.command().attempt());
+            }
+            for (auto& [id, commands] : groups) {
+                fms::database::v1::GetMissionRequest get;
+                get.set_mission_id(id);
+                fms::database::v1::GetMissionResponse got;
+                status = co_await services_.call<&Storage::PrepareAsyncGetMission>(
+                    *services_.control, get, got);
+                if (!status.ok() && status.error_code() != grpc::StatusCode::NOT_FOUND) {
+                    retry = true;
+                    break;
+                }
+                bool cleared = status.ok() && got.mission().state() == "COMPLETED";
+                std::string proof_id;
+                // Для отмены доказательство должно относиться к последней попытке.
+                if (status.ok() && got.mission().state() == "CANCELED") {
+                    for (const auto& command : commands) {
+                        if (command.attempt() != journal_attempt(id) ||
+                            command.kind() != fms::database::v1::CONTROL_COMMAND_KIND_CANCEL_MISSION) continue;
+                        const auto snapshot = json::parse(command.recovery_json(), nullptr, false);
+                        if (command.recovery_version() != 1 || !snapshot.is_object()) continue;
+                        if (snapshot.contains("cancelBeforeAdd") && snapshot["cancelBeforeAdd"] == true) cleared = true;
+                        const auto base = snapshot.find("protectedBase");
+                        if (base != snapshot.end() && base->is_object() &&
+                            base->contains("nodes") && (*base)["nodes"].is_array() &&
+                            !(*base)["nodes"].empty() && base->contains("reached") &&
+                            (*base)["reached"].is_number_unsigned() &&
+                            (*base)["reached"].get<std::uint64_t>() == (*base)["nodes"].size() - 1) {
+                            cleared = true;
+                        }
+                        if (cleared) { proof_id = command.command_id(); break; }
+                    }
+                }
+                if (!cleared) {
+                    unresolved = true;
+                    spdlog::error("[journal] mission {} has unresolved commands; recovery required", id);
+                    continue;
+                }
+                // Cancel с доказательством закрываем последним, чтобы обрыв
+                // между Resolve не уничтожил доказательство для остальных записей.
+                std::stable_partition(commands.begin(), commands.end(), [&](const auto& cmd) {
+                    return cmd.command_id() != proof_id;
+                });
+                for (const auto& command : commands) {
+                    fms::database::v1::ResolveControlCommandRequest resolve;
+                    resolve.set_command_id(command.command_id());
+                    fms::database::v1::ResolveControlCommandResponse resolved;
+                    status = co_await services_.call<&Storage::PrepareAsyncResolveControlCommand>(
+                        *services_.control, resolve, resolved);
+                    if (!status.ok()) { retry = true; break; }
+                }
+                if (retry) break;
+                journal_attempts_.erase(id);
+            }
+        }
+        if (stopped_) co_return;
+        if (!retry) {
+            journal_loaded_ = true;
+            if (unresolved) traffic_fault_ = true;
+            co_return;
+        }
+        journal_timer_.expires_after(std::chrono::seconds(2));
+        co_await journal_timer_.async_wait(asio::as_tuple(asio::use_awaitable));
     }
 }

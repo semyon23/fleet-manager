@@ -262,9 +262,7 @@ asio::awaitable<HttpResponse> MissionApi::cancel_mission(const HttpRequest& req,
                                  "mission " + mission_id + " is already " + existing->state);
     }
 
-    if (mission->state == "CANCELING") {
-        co_return json_response(req, http::status::accepted, mission_json(*mission).dump());   // уже отменяется
-    }
+
     if (mission->state != "QUEUED") {
         // ASSIGNED, RUNNING, PAUSED — через dispatch. После co_await указатель mission уже нельзя трогать
         grpc::Status status = co_await runner_.cancel(mission_id);

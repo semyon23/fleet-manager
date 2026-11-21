@@ -193,8 +193,6 @@ class Maps:
         body.setdefault("id", f"test-ctl-map-{uuid.uuid4().hex[:8]}")
         if body["id"] is None:
             del body["id"]
-        elif isinstance(body["id"], str):
-            self.ids.append(body["id"])
         code, created = http("POST", f"{CONTROL}/api/fms/maps" + ("?force=true" if force else ""), body)
         if code == 201 and created["id"] not in self.ids:
             self.ids.append(created["id"])
@@ -341,15 +339,24 @@ def missions_cleanup():
     ids = [i for i in Missions.CREATED if all(c.isalnum() or c in "-_" for c in i)]
     if not ids:
         return
-    sql = "DELETE FROM missions WHERE mission_id IN (" + ",".join(f"'{i}'" for i in ids) + ")"
+    selected = ",".join(f"'{i}'" for i in ids)
+    # Завершённые миссии больше не защищают проезд. Незавершённый журнал
+    # отменённых/упавших миссий не стираем: сохраняем и документ для сверки.
+    sql = (
+        "BEGIN; DELETE FROM control_commands c USING missions m "
+        "WHERE c.mission_id=m.mission_id AND m.state='COMPLETED' "
+        "AND m.mission_id IN (" + selected + "); "
+        "DELETE FROM missions m WHERE m.mission_id IN (" + selected + ") "
+        "AND NOT EXISTS (SELECT 1 FROM control_commands c "
+        "WHERE c.mission_id=m.mission_id AND NOT c.resolved); COMMIT;"
+    )
     try:
         result = subprocess.run(["psql", DATABASE_URL, "-c", sql], capture_output=True, text=True, timeout=10)
         failed = result.returncode != 0 and result.stderr
     except (OSError, subprocess.TimeoutExpired) as e:
         failed = str(e)
     if failed:
-        warnings.warn(f"test missions are left in the database ({failed.strip()}): "
-                      "DELETE FROM missions WHERE mission_id LIKE 'test-ctl-m-%'")
+        warnings.warn(f"test mission cleanup failed: {failed.strip()}")
 
 
 @pytest.fixture
