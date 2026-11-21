@@ -358,3 +358,102 @@ def test_protobuf_bytes_with_unknown_fields_are_preserved(
             entries(control, robot)[0].command.request_proto
             == record.request_proto
     )
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        db.CONTROL_COMMAND_KIND_ADD_MISSION,
+        db.CONTROL_COMMAND_KIND_EXTEND_MISSION,
+        db.CONTROL_COMMAND_KIND_CANCEL_MISSION,
+    ],
+)
+def test_distinct_assignment_attempts_do_not_conflict(
+        journal, kind
+):
+    control, robot, make = journal
+
+    first = make(kind)
+    put(control, first)
+
+    second = make(kind)
+    second.attempt = 1
+    put(control, second)
+
+    got = entries(control, robot)
+
+    assert [
+               item.command.attempt for item in got
+           ] == [0, 1]
+
+    assert got[0].command == first
+    assert got[1].command == second
+
+
+def test_attempt_cannot_change_under_same_command_id(journal):
+    control, robot, make = journal
+
+    first = make()
+    put(control, first)
+
+    changed = db.ControlCommandRecord()
+    changed.CopyFrom(first)
+    changed.attempt = 1
+
+    with pytest.raises(grpc.RpcError) as error:
+        put(control, changed)
+
+    assert (
+            error.value.code()
+            == grpc.StatusCode.ALREADY_EXISTS
+    )
+    assert entries(control, robot)[0].command == first
+
+
+def test_same_revision_in_same_nonzero_attempt_is_still_unique(
+        journal,
+):
+    control, robot, make = journal
+
+    first = make()
+    first.attempt = 7
+    put(control, first)
+
+    duplicate = make()
+    duplicate.attempt = 7
+
+    with pytest.raises(grpc.RpcError) as error:
+        put(control, duplicate)
+
+    assert (
+            error.value.code()
+            == grpc.StatusCode.ALREADY_EXISTS
+    )
+    assert len(entries(control, robot)) == 1
+
+
+def test_resolved_old_attempt_does_not_hide_new_attempt(journal):
+    control, robot, make = journal
+
+    old = make(db.CONTROL_COMMAND_KIND_ADD_MISSION)
+    put(control, old)
+
+    control.ResolveControlCommand(
+        db.ResolveControlCommandRequest(
+            command_id=old.command_id
+        ),
+        timeout=5,
+    )
+
+    new = make(db.CONTROL_COMMAND_KIND_ADD_MISSION)
+    new.attempt = 1
+    put(control, new)
+
+    pending = entries(control, robot)
+
+    assert len(pending) == 1
+    assert pending[0].command == new
+
+    # Повтор старой команды не возобновляет старую попытку.
+    assert put(control, old).resolved
+    assert len(entries(control, robot, True)) == 2

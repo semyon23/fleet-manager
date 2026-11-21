@@ -135,8 +135,8 @@ bool put_control_command(
     tx.exec(
         "INSERT INTO control_commands "
         "(command_id, robot_id, mission_id, map_id, map_version, "
-        "kind, move_node_id, revision, payload) "
-        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,decode($9,'hex')) "
+        "kind, move_node_id, revision, payload, attempt) "
+        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,decode($9,'hex'),$10) "
         "ON CONFLICT DO NOTHING",
         pqxx::params{
             c.command_id(),
@@ -147,7 +147,8 @@ bool put_control_command(
             static_cast<int>(c.kind()),
             c.move_node_id(),
             static_cast<long long>(c.revision()),
-            bytes
+            bytes,
+            static_cast<long long>(c.attempt())
         });
 
     const auto rows = tx.exec(
@@ -158,8 +159,9 @@ bool put_control_command(
     if (rows.empty() ||
         rows[0][0].as<std::string>() != bytes) {
         throw ControlCommandConflict(
-            "command id or logical revision already has other data");
-    }
+            "command id or logical attempt/revision "
+            "already has other data");
+        }
 
     return rows[0][1].as<bool>();
 }
