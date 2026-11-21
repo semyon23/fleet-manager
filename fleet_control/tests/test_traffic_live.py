@@ -1,6 +1,6 @@
 """Первое реальное пересечение.
 
-Control должен быть запущен с FMS_TRAFFIC_ENABLED=1.
+Traffic включён постоянно.
 Тест создаёт собственную map_1; существующую карту не меняет.
 Симулятор: amr101 и amr102, initial_state.map_id=map_1.
 """
@@ -18,7 +18,7 @@ from test_mission_run import two_robots
 def run_map(maps):
     if os.environ.get("RUN_TRAFFIC_LIVE") != "1":
         pytest.skip(
-            "requires control with FMS_TRAFFIC_ENABLED=1; "
+            "dedicated traffic stand; "
             "set RUN_TRAFFIC_LIVE=1"
         )
 
@@ -156,10 +156,7 @@ def test_two_robots_cross_without_shared_permission(
             ), (code, body)
 
         if states == ["COMPLETED", "COMPLETED"]:
-            assert saw_waiting, (
-                "traffic was not observed: "
-                "check FMS_TRAFFIC_ENABLED"
-            )
+            assert saw_waiting, "traffic waiting was not observed"
             assert saw_active
             return
 

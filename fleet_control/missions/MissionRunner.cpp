@@ -241,9 +241,7 @@ std::optional<fms1::Mission> MissionRunner::build(const Mission& mission, const 
             edge_ids.push_back(edge.id);
         }
 
-        if (traffic_enabled_) {
-            move->set_released_nodes(1);
-        }
+        move->set_released_nodes(1);
 
         plan.routes.push_back(std::move(ids));
         plan.edges.push_back(std::move(edge_ids));
@@ -254,7 +252,7 @@ std::optional<fms1::Mission> MissionRunner::build(const Mission& mission, const 
         fms1::MoveProgress progress;
         progress.set_last_node_id(move->nodes(0).node_id());
         progress.set_last_node_index(0);
-        progress.set_released_nodes(traffic_enabled_ ? 1 : static_cast<std::uint32_t>(move->nodes_size()));
+        progress.set_released_nodes(1);
         progress.set_total_nodes(static_cast<std::uint32_t>(move->nodes_size()));
 
         plan.progress.push_back(std::move(progress));
@@ -314,7 +312,7 @@ void MissionRunner::apply(Mission& mission, const fms1::MissionStatus& status) {
         waiting_plans_[mission.id] = status;
     }
 
-    if (traffic_enabled_ && plan != plans_.end()) {
+    if (plan != plans_.end()) {
         try {
             for (std::size_t i = 0;
                  i < plan->second.progress.size(); ++i) {
@@ -452,72 +450,72 @@ void MissionRunner::finish(Mission& mission, const std::string& state, std::opti
 // ==================================================================== c1b: следующая миссия
 
 std::vector<MissionRunner::SoonFree> MissionRunner::soon_free() {
-    std::vector<SoonFree> result;
-    if (traffic_enabled_) {
-        return result;
-    }
-
-    for (Mission* mission : missions_.active()) {
-        if (mission->state != "RUNNING" || !mission->current_step || next_.contains(mission->robot_id)) {
-            continue;
-        }
-        auto plan = plans_.find(mission->id);
-        if (plan == plans_.end()) {
-            continue;   // маршрута нет (control перезапускался) — не знаем, сколько ему ехать
-        }
-        const size_t current = static_cast<size_t>(*mission->current_step);
-        if (current >= mission->steps.size()) {
-            continue;
-        }
-
-        if (current >= plan->second.progress.size()) {
-            continue;
-        }
-
-        const auto& progress = plan->second.progress[current];
-
-        // Пока нет оценки ожидания трафика, такого робота
-        // не считаем предсказуемо "скоро свободным".
-        if (progress.waiting_for_release() ||
-            !progress.update_rejected().empty() ||
-            progress.confirmed_revision() != progress.revision() ||
-            progress.released_nodes() != progress.total_nodes()) {
-            continue;
-            }
-
-        // Дальше только езда: ни у текущего шага, ни у следующих нет действий
-        bool driving_only = true;
-        for (size_t i = current; i < mission->steps.size(); ++i) {
-            if (!mission->steps[i].actions.empty()) {
-                driving_only = false;
-            }
-        }
-        if (!driving_only) {
-            continue;
-        }
-
-        // Осталось: от того, где робот сейчас, до конца текущего шага + все следующие шаги целиком
-        const Graph* graph = maps_.find(mission->map_id);
-        if (!graph) {
-            continue;
-        }
-        const auto& route = plan->second.routes[current];
-        auto from = graph->find_node(plan->second.last_node);
-        auto to = graph->find_node(route.back());
-        if (!from || !to) {
-            continue;
-        }
-        std::vector<uint32_t> targets = {*to};
-        auto rest = maps_.router(mission->map_id)->route(*from, targets);
-        if (!rest) {
-            continue;
-        }
-        double remaining = rest->seconds;
-        for (size_t i = current + 1; i < plan->second.seconds.size(); ++i) {
-            remaining += plan->second.seconds[i];
-        }
-        result.push_back({mission->robot_id, mission->map_id, plan->second.routes.back().back(), remaining});
-    }
+    std::vector<SoonFree> result{};
+    // if (traffic_enabled_) {
+    //     return result;
+    // }
+    //
+    // for (Mission* mission : missions_.active()) {
+    //     if (mission->state != "RUNNING" || !mission->current_step || next_.contains(mission->robot_id)) {
+    //         continue;
+    //     }
+    //     auto plan = plans_.find(mission->id);
+    //     if (plan == plans_.end()) {
+    //         continue;   // маршрута нет (control перезапускался) — не знаем, сколько ему ехать
+    //     }
+    //     const size_t current = static_cast<size_t>(*mission->current_step);
+    //     if (current >= mission->steps.size()) {
+    //         continue;
+    //     }
+    //
+    //     if (current >= plan->second.progress.size()) {
+    //         continue;
+    //     }
+    //
+    //     const auto& progress = plan->second.progress[current];
+    //
+    //     // Пока нет оценки ожидания трафика, такого робота
+    //     // не считаем предсказуемо "скоро свободным".
+    //     if (progress.waiting_for_release() ||
+    //         !progress.update_rejected().empty() ||
+    //         progress.confirmed_revision() != progress.revision() ||
+    //         progress.released_nodes() != progress.total_nodes()) {
+    //         continue;
+    //         }
+    //
+    //     // Дальше только езда: ни у текущего шага, ни у следующих нет действий
+    //     bool driving_only = true;
+    //     for (size_t i = current; i < mission->steps.size(); ++i) {
+    //         if (!mission->steps[i].actions.empty()) {
+    //             driving_only = false;
+    //         }
+    //     }
+    //     if (!driving_only) {
+    //         continue;
+    //     }
+    //
+    //     // Осталось: от того, где робот сейчас, до конца текущего шага + все следующие шаги целиком
+    //     const Graph* graph = maps_.find(mission->map_id);
+    //     if (!graph) {
+    //         continue;
+    //     }
+    //     const auto& route = plan->second.routes[current];
+    //     auto from = graph->find_node(plan->second.last_node);
+    //     auto to = graph->find_node(route.back());
+    //     if (!from || !to) {
+    //         continue;
+    //     }
+    //     std::vector<uint32_t> targets = {*to};
+    //     auto rest = maps_.router(mission->map_id)->route(*from, targets);
+    //     if (!rest) {
+    //         continue;
+    //     }
+    //     double remaining = rest->seconds;
+    //     for (size_t i = current + 1; i < plan->second.seconds.size(); ++i) {
+    //         remaining += plan->second.seconds[i];
+    //     }
+    //     result.push_back({mission->robot_id, mission->map_id, plan->second.routes.back().back(), remaining});
+    // }
     return result;
 }
 
@@ -614,25 +612,25 @@ void MissionRunner::on_update(const dpv1::MissionStatusUpdate& update) {
     }
 }
 
-void MissionRunner::reconcile(const dpv1::MissionSnapshot& snapshot) {
+void MissionRunner::reconcile(
+    const dpv1::MissionSnapshot& snapshot) {
+
     traffic_snapshot_ = true;
 
-    if (traffic_enabled_) {
-        for (Mission* mission : missions_.active()) {
-            if (mission->state != "QUEUED" &&
-                !is_next(mission->id) &&
-                !sending_.contains(mission->id) &&
-                !plans_.contains(mission->id)) {
-                // Нет долговременной записи неподтверждённых разрешений.
-                // GetMission не исключает ещё летящую команду.
-                traffic_fault_ = true;
+    for (Mission* mission : missions_.active()) {
+        if (mission->state != "QUEUED" &&
+            !is_next(mission->id) &&
+            !sending_.contains(mission->id) &&
+            !plans_.contains(mission->id)) {
+            // Нет долговременной записи неподтверждённых разрешений.
+            // GetMission не исключает ещё летящую команду.
+            traffic_fault_ = true;
 
-                spdlog::error(
-                    "[traffic] restart with active mission {}: "
-                    "grants require reconciliation",
-                    mission->id);
-                }
-        }
+            spdlog::error(
+                "[traffic] restart with active mission {}: "
+                "grants require reconciliation",
+                mission->id);
+            }
     }
 
     std::set<std::string> in_dispatch;
@@ -668,7 +666,6 @@ void MissionRunner::reconcile(const dpv1::MissionSnapshot& snapshot) {
         "[runner] connected to dispatch: {} missions there, {} unresolved",
         snapshot.missions_size(), uncertain);
 }
-
 // Маршруты — ровно те, что ушли роботу: из миссии в dispatch, а не построенные заново (карта могла измениться).
 // Время шагов — по графу от начала до конца маршрута: нужно только для оценки «скоро свободен» (c1b)
 asio::awaitable<void> MissionRunner::restore(std::string mission_id) {
@@ -731,7 +728,7 @@ asio::awaitable<void> MissionRunner::restore(std::string mission_id) {
 
     Plan plan;
 
-    if (traffic_enabled_ && !graph) {
+    if (!graph) {
         co_return;
     }
 
@@ -774,21 +771,19 @@ asio::awaitable<void> MissionRunner::restore(std::string mission_id) {
         }
 
         std::vector<std::string> ids;
+
         for (const auto& route_node : move.nodes()) {
+            const auto at = graph->find_node(route_node.node_id());
 
-            if (traffic_enabled_) {
-                const auto at = graph->find_node(route_node.node_id());
-
-                if (!at ||
-                    route_node.map_id() != graph->map_id ||
-                    route_node.x() != graph->nodes[*at].x ||
-                    route_node.y() != graph->nodes[*at].y) {
-                    spdlog::error(
-                        "[traffic] cannot restore route on changed map: {}",
-                        mission_id);
-                    co_return;
-                    }
-            }
+            if (!at ||
+                route_node.map_id() != graph->map_id ||
+                route_node.x() != graph->nodes[*at].x ||
+                route_node.y() != graph->nodes[*at].y) {
+                spdlog::error(
+                    "[traffic] cannot restore route on changed map: {}",
+                    mission_id);
+                co_return;
+                }
 
             ids.push_back(route_node.node_id());
         }
@@ -1192,7 +1187,7 @@ asio::awaitable<void> MissionRunner::extension_loop() {
         if (stopped_) co_return;
         if (extensions_.empty()) continue;
 
-        if (traffic_enabled_ && !traffic_ready()) continue;
+        if (!traffic_ready()) continue;
 
         auto entry = extensions_.upper_bound(cursor);
         if (entry == extensions_.end()) {
@@ -1245,8 +1240,7 @@ asio::awaitable<void> MissionRunner::extension_loop() {
             continue;
         }
 
-        if (!checked.ok() ||
-            (traffic_enabled_ && !traffic_ready())) {
+        if (!checked.ok() || !traffic_ready()) {
             continue;
         }
 
@@ -1323,14 +1317,12 @@ asio::awaitable<void> MissionRunner::extension_loop() {
     }
 }
 
-void MissionRunner::configure_traffic(AvailabilityTracker& availability, bool enabled) {
+void MissionRunner::configure_traffic(AvailabilityTracker& availability) {
 
     traffic_availability_ = &availability;
-    traffic_enabled_ = enabled;
 }
 
 bool MissionRunner::traffic_ready() const {
-    if (!traffic_enabled_) return true;
 
     if (traffic_fault_ ||
         !traffic_availability_ ||
@@ -1354,7 +1346,6 @@ bool MissionRunner::traffic_ready() const {
 }
 
 bool MissionRunner::try_map_edit(const std::string& map) {
-    if (!traffic_enabled_) return true;
     if (!traffic_ready()) return false;
 
     for (Mission* mission : missions_.active()) {
@@ -1510,7 +1501,7 @@ asio::awaitable<void> MissionRunner::traffic_loop() {
             asio::as_tuple(asio::use_awaitable));
 
         if (stopped_) co_return;
-        if (!traffic_enabled_ || !traffic_ready()) continue;
+        if (!traffic_ready()) continue;
 
         try {
             const auto active = missions_.active();

@@ -66,15 +66,11 @@ int main() {
         availability.on_keep_only = [&](const std::set<std::string>& robot_ids) { alarm_engine.keep_only(robot_ids); };
         availability.on_dispatch = [&](bool connected) { alarm_engine.set_dispatch_connected(connected); };
 
-
-
         MissionRunner runner{io_context, services, missions, maps};
-        runner.configure_traffic(availability,env_or("FMS_TRAFFIC_ENABLED", "0") == "1");
+        runner.configure_traffic(availability);
 
 
         MissionAssigner assigner{io_context, missions, availability, maps, runner};
-
-
         missions.on_queue_change = [&] { assigner.wake(); };
         availability.on_idle = [&] { assigner.wake(); };
         maps.on_change = [&] {

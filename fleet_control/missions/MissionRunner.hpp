@@ -34,7 +34,7 @@ public:
     void start();   // стрим статусов миссий из dispatch и проверка затянувшихся
     void stop();
 
-    void configure_traffic(AvailabilityTracker& availability,bool enabled);
+    void configure_traffic(AvailabilityTracker& availability);
 
     bool traffic_ready() const;
 
@@ -167,7 +167,6 @@ private:
     asio::awaitable<void> traffic_loop();
 
     AvailabilityTracker* traffic_availability_ = nullptr;
-    bool traffic_enabled_ = false;
     bool traffic_snapshot_ = false;
     bool traffic_fault_ = false;
 
