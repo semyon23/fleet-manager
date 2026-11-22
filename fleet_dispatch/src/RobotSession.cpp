@@ -10,6 +10,7 @@
 #include "../include/OrderBuilder.hpp"
 #include <google/protobuf/util/message_differencer.h>
 #include <google/protobuf/util/time_util.h>
+#include <limits>
 using google::protobuf::util::TimeUtil;
 
 std::string action_error(const vda5050::State& state, const vda5050::ActionState& action_state) {
@@ -123,12 +124,29 @@ bool RobotSession::request_probe(const std::string& id) {
     return true;
 }
 
+
+bool RobotSession::attach_move(ActiveMission mission, std::uint64_t checkpoint_version) {
+    if (stopped_ || mission_ || !awaiting_live_state_ ||
+        checkpoint_version == 0 ||
+        checkpoint_version >= static_cast<std::uint64_t>(
+            std::numeric_limits<std::int64_t>::max()) ||
+        mission.mission_id() != status_.mission_id() ||
+        mission.mission().robot_id() != robot_id_) {
+        return false;
+        }
+
+    mission_ = std::make_unique<ActiveMission>(std::move(mission));
+    checkpoint_version_ = checkpoint_version;
+    return true;
+}
+
 void RobotSession::lost_probe_state() {
-    if (observer_) {
-        awaiting_live_state_ = true;
-        probe_state_at_.reset();
-        observer_(nullptr);
-    }
+    if (!observer_ || awaiting_live_state_ || (mission_ && mission_->done())) return;
+
+    awaiting_live_state_ = true;
+    recovery_header_.reset();
+    probe_state_at_.reset();
+    observer_(nullptr);
 }
 
 void RobotSession::stop() {
@@ -199,13 +217,31 @@ void RobotSession::handle(const VdaMessage& message) {
 
         if (message.topic == state_topic_) {
             auto state = json.get<vda5050::State>();
+            bool attached_now = false;
 
-            if (awaiting_live_state_ && !observer_) return;
-            if (observer_) {
-                if (!observer_(&state)) return;
+            if (observer_ || awaiting_live_state_) {
+                if (state.header.manufacturer != manufacturer_ ||
+                    state.header.serial_number != serial_number_) {
+                    return;
+                    }
+
+                if (awaiting_live_state_) {
+                    const bool already_attached = static_cast<bool>(mission_);
+                    if (!observer_ || !observer_(&state)) return;
+
+                    attached_now = !already_attached && static_cast<bool>(mission_);
+                    recovery_header_.reset();
+                }
+
+                if (recovery_header_ && state.header.header_id <= *recovery_header_) {
+                    return;
+                }
+                recovery_header_ = state.header.header_id;
 
                 if (status_.mission_id().empty()) {
                     observer_ = {};
+                    recovery_header_.reset();
+                    probe_state_at_.reset();
                 } else {
                     probe_state_at_ = std::chrono::steady_clock::now();
                 }
@@ -214,9 +250,10 @@ void RobotSession::handle(const VdaMessage& message) {
             fill_status(state, status_);
             awaiting_live_state_ = false;
             check_instant_actions(state);
-
-            if (!checkpoint_pending_ && !cancel_preparing_ && mission_ &&
-                mission_->on_state(state)) {
+            if (attached_now) {
+                on_mission_changed();
+            } else if (!checkpoint_pending_ && !cancel_preparing_ && mission_ &&
+                       mission_->on_state(state)) {
                 if (mission_->status().state() == fms::v1::MISSION_STATE_CANCELED &&
                     !state.driving) {
                     for (const auto &action: state.instant_action_states) {
@@ -457,6 +494,25 @@ asio::awaitable<bool> RobotSession::start_mission(
 void RobotSession::on_mission_changed() {
     if (checkpoint_pending_ || cancel_preparing_) return;
 
+    using Hold = ActiveMission::RecoveryHold;
+    const auto hold = mission_->recovery_hold();
+
+    if (hold != Hold::None) {
+        const char* reason = "unknown";
+        switch (hold) {
+            case Hold::Deadline:         reason = "deadline"; break;
+            case Hold::NextStep:         reason = "next step"; break;
+            case Hold::FailedOrder:      reason = "failed order"; break;
+            case Hold::ConflictingState: reason = "conflicting state"; break;
+            case Hold::None:             break;
+        }
+
+        spdlog::warn("[recovery] robot={} mission={} held: {}",
+                     robot_id_, mission_->mission_id(), reason);
+        publish_mission_change();
+        return;
+    }
+
     if (mission_->done() || (mission_->current_step().has_wait() &&
                              stored_wait_ != mission_->current_step().id())) {
         checkpoint_pending_ = true;
@@ -514,6 +570,9 @@ void RobotSession::publish_mission_change() {
 
     mission_hub_.publish(status);
     if (mission_->done()) {
+        observer_ = {};
+        recovery_header_.reset();
+        probe_state_at_.reset();
         mission_.reset();
         status_.clear_mission_id();
         if (!stopped_) publish_status();

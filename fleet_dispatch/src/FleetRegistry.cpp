@@ -1,6 +1,7 @@
 #include "../include/FleetRegistry.hpp"
 #include "spdlog/spdlog.h"
 #include "../include/VdaTopics.hpp"
+#include <google/protobuf/util/time_util.h>
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid_io.hpp>
 
@@ -122,81 +123,61 @@ bool FleetRegistry::observe(const std::string& id, const vda5050::State* state) 
 
     if (p.decision && p.decision->decision == D::Conflict) return false;
 
-    auto renew = [&] {
+    auto retry = [&] {
         p.reset();
         queue_.retry(id, now);
         pump_probes();
     };
 
     if (!state) {
-        if (!p.token.empty()) renew();
-        return false;
-    }
-    if (state->header.manufacturer != p.robot->manufacturer() ||
-        state->header.serial_number != p.robot->serial_number()) {
+        retry();
         return false;
     }
 
-    if (!p.head && p.decision) return true;
-
-    if (p.candidate) {
-        if (now - p.received >= std::chrono::seconds(60) ||
-            !p.acknowledged(*state) ||
-            state->header.header_id < p.candidate->header.header_id) {
-            renew();
-            return false;
-        }
-        if (state->header.header_id == p.candidate->header.header_id) return false;
-
-        // Обычное обновление телеметрии без изменения маршрута и действий.
-        if (*state == *p.candidate) {
-            p.candidate = *state;
-            p.received = now;
-            return true;
-        }
-    } else if (!queue_.live(id, now) || !p.acknowledged(*state)) {
-        return false;
-    }
-
+    if (!queue_.live(id, now) || !p.acknowledged(*state)) return false;
     queue_.remove(id);
 
     if (!p.head) {
         if (!inventory_->occupied.contains(id) &&
             (state->driving || !vda5050::is_idle(*state))) {
-            renew();
+            retry();
             return false;
         }
-        p.decision = move_recovery::Result{D::Wait, "live state only", {}};
         return true;
     }
 
-    auto r = move_recovery::reconcile(*p.robot, *p.head, *p.grant, p.token, state);
-    if (r.decision == D::Attach && state->last_node_sequence_id < p.furthest) {
-        r = {D::Conflict, "progress regressed", {}};
+    auto* session = find(id);
+    if (!session) return false;
+
+    // После потери связи новый stateRequest подтверждает свежесть.
+    // Существующий экземпляр миссии сам проверит маршрут и текущий прогресс.
+    if (session->mission()) return true;
+
+    auto restored = ActiveMission::restore_move(
+        *p.robot, *p.head, *p.grant, p.token, *state, now,
+        google::protobuf::util::TimeUtil::GetCurrentTime());
+
+    if (restored && session->attach_move(std::move(*restored),
+                                         p.head->checkpoint_version())) {
+        spdlog::info("[recovery] robot={} mission={} result=Attach reason=matched",
+                     id, p.head->mission().mission_id());
+        return true;
     }
 
-    const bool changed = !p.decision || p.decision->decision != r.decision ||
-                         p.decision->last_node_index != r.last_node_index;
-    if (changed) {
-        spdlog::info("[recovery] robot={} mission={} result={} reason={}", id,
-                     p.head->mission().mission_id(),
-                     r.decision == D::Attach ? "Attach" :
-                     r.decision == D::Wait ? "Wait" : "Conflict", r.reason);
+    // На успешном пути сверка выполняется один раз, внутри restore_move().
+    // Здесь различаем отстающий update и постоянное противоречие.
+    auto result = move_recovery::reconcile(*p.robot, *p.head, *p.grant, p.token, state);
+    if (result.decision == D::Wait) {
+        retry();
+        return false;
     }
-
-    if (r.decision == D::Wait) {
-        renew();
-    } else {
-        p.decision = r;
-        if (r.decision == D::Attach) {
-            p.furthest = state->last_node_sequence_id;
-            p.candidate = *state;
-            p.received = now;
-        } else {
-            p.candidate.reset();
-        }
+    if (result.decision == D::Attach) {
+        result = {D::Conflict, "cannot restore execution or its deadline", {}};
     }
-    return r.decision == D::Attach;
+    p.decision = result;
+    spdlog::warn("[recovery] robot={} mission={} result=Conflict reason={}",
+                 id, p.head->mission().mission_id(), result.reason);
+    return false;
 }
 
 bool FleetRegistry::remove(const std::string& robot_id) {

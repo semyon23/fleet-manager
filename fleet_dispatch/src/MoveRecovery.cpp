@@ -239,4 +239,50 @@ Result reconcile(const fms::database::v1::RobotSpec& robot, const Execution& hea
     return {Decision::Attach, "matched", index};
 }
 
+    bool matches_attached_move(const vda5050::Order& full,
+                           const fms::v1::StepStatus& step,
+                           const vda5050::State& state) {
+    const auto& progress = step.move();
+    if (state.order_id != full.order_id ||
+        state.order_update_id != full.order_update_id ||
+        state.last_node_sequence_id % 2 != 0) {
+        return false;
+        }
+
+    const auto index = state.last_node_sequence_id / 2;
+    if (index >= full.nodes.size() ||
+        index >= progress.released_nodes() ||
+        index < progress.last_node_index() ||
+        full.nodes[index].node_id != state.last_node_id ||
+        (state.driving && index + 1 >= progress.released_nodes())) {
+        return false;
+        }
+
+    const auto remaining = full.nodes.size() - index - 1;
+    if (state.node_states.size() != remaining ||
+        state.edge_states.size() != remaining) {
+        return false;
+        }
+
+    for (std::size_t j = 0; j < remaining; ++j) {
+        const auto& node = state.node_states[j];
+        const auto& edge = state.edge_states[j];
+        const auto& expected_node = full.nodes[index + j + 1];
+        const auto& expected_edge = full.edges[index + j];
+
+        if (node.node_id != expected_node.node_id ||
+            node.sequence_id != expected_node.sequence_id ||
+            node.released != expected_node.released ||
+            edge.edge_id != expected_edge.edge_id ||
+            edge.sequence_id != expected_edge.sequence_id ||
+            edge.released != expected_edge.released) {
+            return false;
+            }
+    }
+
+    // Состав действий полного order уже проверен при restore_move().
+    if (step.actions_size() == 0) return state.action_states.empty();
+    return actions_match(full, step, state);
+}
+
 }  // namespace move_recovery

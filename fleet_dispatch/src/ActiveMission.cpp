@@ -179,6 +179,7 @@ std::optional<ActiveMission> ActiveMission::restore_move(
 
     restored.last_update_id_ = issued.order_update_id();
     restored.tracker_.emplace(full, now);
+    restored.recovered_order_.emplace(std::move(full));
     restored.tracker_->on_state(state);
 
     // Именно этот state мог первым сообщить о прибытии на последний узел.
@@ -258,24 +259,33 @@ void ActiveMission::update_sent(const vda5050::Order& update) {
 // ------------------------------------------------------------------ события
 
 bool ActiveMission::on_state(const vda5050::State& state) {
-    if (done()) {
-        return false;
-    }
-    auto before = status_;
+    if (done() || recovery_hold_ != RecoveryHold::None) return false;
+
+    const auto before = status_;
+    const auto previous_hold = recovery_hold_;
+
     if (canceling()) {
         check_cancel(state);
     } else if (tracker_) {
+        if (recovered_order_ &&
+            !move_recovery::matches_attached_move(*recovered_order_, step_status(), state)) {
+            recovery_hold_ = RecoveryHold::ConflictingState;
+            return true;
+            }
+
         tracker_->on_state(state);
         check_step(Clock::now());
     }
-    return changed_since(before);
+
+    return changed_since(before) || previous_hold != recovery_hold_;
 }
 
 bool ActiveMission::on_tick(Clock::time_point now) {
-    if (done()) {
+    if (done() || recovery_hold_ != RecoveryHold::None){
         return false;
     }
     auto before = status_;
+    const auto previous_hold = recovery_hold_;
     if (canceling()) {
         if (now - cancel_sent_at_ > kCancelTimeout) {
             fail(fms::v1::MISSION_ERROR_CODE_TIMEOUT, "robot did not confirm cancelOrder in 10 s");
@@ -286,7 +296,7 @@ bool ActiveMission::on_tick(Clock::time_point now) {
         }
         check_step(now);   // ожидание и таймауты идут и без state'ов
     }
-    return changed_since(before);
+    return changed_since(before) || previous_hold != recovery_hold_;
 }
 
 // ------------------------------------------------------------------ шаги

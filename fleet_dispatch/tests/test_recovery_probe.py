@@ -72,13 +72,44 @@ def state(token, order, seq):
         instantActionStates=[dict(actionId=token, actionType="stateRequest", actionStatus="FINISHED")]))
 
 
-@pytest.mark.parametrize("order,result", [("m-s", "Attach"), ("foreign", "Conflict")])
-def test_restart_requires_current_probe(tmp_path, order, result):
+class FinalStorage(Storage):
+    def __init__(self, snapshot):
+        super().__init__(snapshot)
+        self.records = []
+        self.called = threading.Event()
+        self.release = threading.Event()
+
+    def SaveMissionExecution(self, request, context):
+        self.records.append(request.execution.SerializeToString(deterministic=True))
+        self.called.set()
+        if len(self.records) == 1:
+            context.abort(grpc.StatusCode.UNAVAILABLE, "lost checkpoint reply")
+        if not self.release.wait(4):
+            context.abort(grpc.StatusCode.UNAVAILABLE, "waiting for test")
+        return db.SaveMissionExecutionResponse()
+
+
+@pytest.mark.parametrize("order,result,later", [
+    ("m-s", "Attach", False), ("foreign", "Conflict", False), ("m-s", "Attach", True),
+])
+def test_restart_requires_current_probe(tmp_path, order, result, later):
     port = free_port()
     cfg = tmp_path / "mosquitto.conf"
     cfg.write_text(f"listener {port} 127.0.0.1\nallow_anonymous true\npersistence false\n")
     with process(["mosquitto", "-c", str(cfg)], tmp_path / "mqtt.log") as broker, ThreadPoolExecutor(4) as pool:
-        store = Storage(checkpoint())
+        snapshot = checkpoint()
+        head = snapshot.active_missions[0]
+        if later:
+            head.mission.nodes[0].move.nodes[0].actions.add(
+                action_id="scan", action_type="scan", blocking_type=fms.BLOCKING_TYPE_HARD)
+            head.status.steps[0].actions.add(action_id="scan", action_type="scan")
+            payload = json.loads(head.order.sent_order_json)
+            payload["nodes"][0]["actions"] = [dict(actionId="scan", actionType="scan", blockingType="HARD")]
+            head.order.sent_order_json = json.dumps(payload)
+        snapshot.last_grants[0].CopyFrom(head)
+        head.ClearField("order")
+        head.checkpoint_version = 8
+        store = FinalStorage(snapshot)
         store.available.set()
         server = grpc.server(pool)
         db_port = server.add_insecure_port("127.0.0.1:0")
@@ -130,13 +161,46 @@ def test_restart_requires_current_probe(tmp_path, order, result):
                 retry = token()
                 assert retry not in (old, current)
                 api = dp_rpc.FleetDispatchStub(channel)
-                client.publish(TOPIC + "state", state(retry, order, 2), qos=1).wait_for_publish(3)
+                reply = json.loads(state(retry, order, 2))
+                if later:
+                    reply["actionStates"] = [dict(actionId="scan", actionType="scan", actionStatus="RUNNING")]
+                def publish():
+                    client.publish(TOPIC + "state", json.dumps(reply), qos=1).wait_for_publish(3)
+                publish()
                 until = time.monotonic() + 4
                 while time.monotonic() < until and f"result={result} " not in log.read_text():
                     time.sleep(.05)
                 assert f"result={result} " in log.read_text(), log.read_text()
                 assert f"result={'Conflict' if result == 'Attach' else 'Attach'} " not in log.read_text()
                 rejected(first, api.StreamMissionStatus, dp.StreamMissionStatusRequest())
+                def owner():
+                    update = first(api.StreamRobotStatus, dp.StreamRobotStatusRequest())
+                    robot, = update.snapshot.robots
+                    return robot.mission_id
+
+                assert owner() == "m"
+                if later:
+                    assert not store.called.is_set()
+                    reply["instantActionStates"] = []
+                    reply["actionStates"][0]["actionStatus"] = "FINISHED"
+                    reply["headerId"] += 1
+                    publish()
+                if result == "Attach":
+                    assert store.called.wait(4), log.read_text()
+                    publish()
+                    assert owner() == "m"
+                    store.release.set()
+                    until = time.monotonic() + 8
+                    while owner() and time.monotonic() < until:
+                        time.sleep(.05)
+                    assert owner() == "", log.read_text()
+                    assert len(store.records) == 2 and store.records[0] == store.records[1]
+                    saved = db.MissionExecution.FromString(store.records[0])
+                    assert saved.checkpoint_version == 9
+                    assert saved.status.state == fms.MISSION_STATE_COMPLETED
+                    assert saved.status.mission_id == "m" and not saved.HasField("order")
+                else:
+                    assert not store.called.is_set()
                 with pytest.raises(queue.Empty):
                     orders.get(timeout=.5)
         finally:

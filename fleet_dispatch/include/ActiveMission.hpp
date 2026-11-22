@@ -23,7 +23,8 @@ public:
         None,
         Deadline,
         NextStep,
-        FailedOrder
+        FailedOrder,
+        ConflictingState
     };
 
     // Вызывающий передаёт актуальный state с токеном текущей попытки опроса.
@@ -74,6 +75,7 @@ private:
                   Clock::time_point mission_start, Clock::time_point step_start);
 
     bool recovering_move_ = false;
+    std::optional<vda5050::Order> recovered_order_;
     RecoveryHold recovery_hold_ = RecoveryHold::None;
     void start_step(Clock::time_point now);
     void check_step(Clock::time_point now);   // шаг закончился? таймауты?

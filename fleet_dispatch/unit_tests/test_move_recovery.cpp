@@ -387,4 +387,64 @@ TEST_CASE("Restore an accepted move without issuing another order", "[restore-mo
         x.state.instant_action_states.front().action_id = "previous-probe";
         CHECK_FALSE(restore().has_value());
     }
+
+
+        SECTION("ordinary telemetry advances the attached move without another probe") {
+        auto m = restore();
+        REQUIRE(m.has_value());
+
+        x.state.instant_action_states.clear();
+        x.state.node_states.erase(x.state.node_states.begin());
+        x.state.edge_states.erase(x.state.edge_states.begin());
+        x.state.last_node_id = "A";
+        x.state.last_node_sequence_id = 4;
+        x.state.driving = false;
+
+        CHECK(m->on_state(x.state));
+        CHECK(m->recovery_hold() == Hold::None);
+        CHECK(m->status().steps(0).move().last_node_index() == 2);
+        CHECK(m->status().steps(0).move().waiting_for_release());
+        CHECK_FALSE(m->order_needed());
+        CHECK_FALSE(m->done());
+    }
+
+    SECTION("empty remaining route in the middle cannot finish the mission") {
+        auto m = restore();
+        REQUIRE(m.has_value());
+
+        x.state.instant_action_states.clear();
+        x.state.node_states.clear();
+        x.state.edge_states.clear();
+        x.state.driving = false;
+        x.state.action_states.front().action_status = vda5050::ActionStatus::Finished;
+
+        CHECK(m->on_state(x.state));
+        CHECK(m->recovery_hold() == Hold::ConflictingState);
+        CHECK_FALSE(m->done());
+        CHECK_FALSE(m->order_needed());
+        CHECK_FALSE(m->on_state(x.state));
+    }
+
+    SECTION("out of range progress is held before indexing the route") {
+        auto m = restore();
+        REQUIRE(m.has_value());
+
+        x.state.last_node_sequence_id = 400;
+        CHECK(m->on_state(x.state));
+        CHECK(m->recovery_hold() == Hold::ConflictingState);
+        CHECK(m->status().steps(0).move().last_node_index() == 1);
+    }
+
+    SECTION("deadline hold is reported once even when protobuf status stays running") {
+        x.head.mutable_mission()->mutable_timeout()->set_seconds(10);
+        x.head.mutable_status()->mutable_started_at()->set_seconds(991);
+        save();
+
+        auto m = restore();
+        REQUIRE(m.has_value());
+        CHECK(m->on_tick(now + 2s));
+        CHECK(m->recovery_hold() == Hold::Deadline);
+        CHECK(m->status().state() == fms::v1::MISSION_STATE_RUNNING);
+        CHECK_FALSE(m->on_tick(now + 3s));
+    }
 }

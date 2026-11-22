@@ -35,6 +35,8 @@ public:
 
     bool request_probe(const std::string& id);
 
+    bool attach_move(ActiveMission mission, std::uint64_t checkpoint_version);
+
     bool awaiting_live_state() const { return awaiting_live_state_; }
 
     void stop();
@@ -68,6 +70,7 @@ public:
 private:
     Observer observer_;
     std::optional<std::chrono::steady_clock::time_point> probe_state_at_;
+    std::optional<std::uint32_t> recovery_header_;
     void lost_probe_state();
     void start_loops();
     bool awaiting_live_state_ = false;

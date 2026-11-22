@@ -25,6 +25,9 @@ namespace move_recovery {
                      std::string_view request_id,
                      const vda5050::State* state);
 
+    bool matches_attached_move(const vda5050::Order& full,
+                           const fms::v1::StepStatus& step,
+                           const vda5050::State& state);
 }  // namespace move_recovery
 
 
