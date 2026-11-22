@@ -34,7 +34,7 @@ int main(){
 
         FleetRegistry registry{io_context, outbox, status_hub, mission_hub, database};
         RobotMessageRouter message_router{io_context, mqtt, registry, outbox};
-        DispatchService dispatch_service{grpc_context, registry, status_hub, mission_hub};
+        DispatchService dispatch_service{grpc_context, registry, status_hub, mission_hub, database};
         grpc_server.add_service(dispatch_service.grpc_service());
 
 

@@ -138,6 +138,7 @@ asio::awaitable<void> MissionRunner::send(std::string mission_id, std::string st
 
     dpv1::AddMissionRequest request;
     *request.mutable_mission() = std::move(*built);
+    request.set_attempt(journal_attempt(mission_id));
     ControlCommandJournal::Handle saved_command;
     try {
         saved_command = stage_command(mission_id,

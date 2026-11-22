@@ -8,6 +8,8 @@
 #include "spdlog/spdlog.h"
 #include <google/protobuf/util/time_util.h>
 #include <nlohmann/json.hpp>
+#include <boost/algorithm/hex.hpp>
+#include <iterator>
 using Registry = dbv1::RobotRegistry::AsyncService;
 using Storage = dbv1::DispatchStorage::AsyncService;
 
@@ -22,6 +24,7 @@ using LoadDispatchSnapshotRPC = agrpc::ServerRPC<&Storage::RequestLoadDispatchSn
 using SaveRobotStatusRPC      = agrpc::ServerRPC<&Storage::RequestSaveRobotStatus>;
 using SaveFactsheetRPC        = agrpc::ServerRPC<&Storage::RequestSaveFactsheet>;
 using SaveMissionExecutionRPC = agrpc::ServerRPC<&Storage::RequestSaveMissionExecution>;
+using DispatchAddReceiptRPC = agrpc::ServerRPC<&Storage::RequestDispatchAddReceipt>;
 using ReserveHeaderIdsRPC     = agrpc::ServerRPC<&Storage::RequestReserveHeaderIds>;
 using SaveRobotAvailabilityRPC = agrpc::ServerRPC<&Registry::RequestSaveRobotAvailability>;
 
@@ -228,6 +231,16 @@ void DatabaseService::start() {
         [this](SaveMissionExecutionRPC& rpc, SaveMissionExecutionRPC::Request& request) -> asio::awaitable<void> {
             SaveMissionExecutionRPC::Response response;
             grpc::Status status = co_await save_mission_execution(request, response);
+            co_await rpc.finish(response, status);
+        },
+        on_handler_done);
+
+    agrpc::register_awaitable_rpc_handler<DispatchAddReceiptRPC>(
+        grpc_context_, storage_,
+        [this](DispatchAddReceiptRPC &rpc, DispatchAddReceiptRPC::Request &request)
+    -> asio::awaitable<void> {
+            DispatchAddReceiptRPC::Response response;
+            const auto status = co_await dispatch_add_receipt(request, response);
             co_await rpc.finish(response, status);
         },
         on_handler_done);
@@ -899,4 +912,97 @@ DatabaseService::resolve_control_command(
     }
 
     co_return grpc::Status::OK;
+}
+
+asio::awaitable<grpc::Status> DatabaseService::dispatch_add_receipt(const dbv1::DispatchAddReceiptRequest& request, dbv1::DispatchAddReceiptResponse& response) {
+    using Request = dbv1::DispatchAddReceiptRequest;
+    using Response = dbv1::DispatchAddReceiptResponse;
+
+    const auto operation = request.operation();
+    if ((operation != Request::LOOKUP && operation != Request::CLAIM &&
+         operation != Request::SAVE_REPLY) ||
+        request.mission_id().empty() || request.request_bytes().empty() ||
+        ((operation == Request::SAVE_REPLY) != !request.reply_bytes().empty())) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT,
+                               "invalid dispatch receipt request"};
+    }
+
+    auto hex = [](const std::string& bytes) {
+        std::string encoded;
+        encoded.reserve(bytes.size() * 2);
+        boost::algorithm::hex(bytes.begin(), bytes.end(), std::back_inserter(encoded));
+        return encoded;
+    };
+
+    const auto request_hex = hex(request.request_bytes());
+    const auto reply_hex = hex(request.reply_bytes());
+    const auto attempt = static_cast<long long>(request.attempt());
+    grpc::Status result;
+
+    try {
+        co_await database_.run([&](pqxx::work& tx) {
+            if (operation == Request::CLAIM) {
+                const auto inserted = tx.exec(
+                    "INSERT INTO dispatch_add_receipts "
+                    "(mission_id,attempt,request_bytes) VALUES ($1,$2,decode($3,'hex')) "
+                    "ON CONFLICT (mission_id) DO NOTHING RETURNING mission_id",
+                    pqxx::params{request.mission_id(), attempt, request_hex});
+
+                if (!inserted.empty()) {
+                    response.set_state(Response::CLAIMED_NOW);
+                    return;
+                }
+            }
+
+            const auto rows = tx.exec(
+                "SELECT attempt=$2 AND request_bytes=decode($3,'hex'), "
+                "encode(reply_bytes,'hex') FROM dispatch_add_receipts "
+                "WHERE mission_id=$1 FOR UPDATE",
+                pqxx::params{request.mission_id(), attempt, request_hex});
+
+            if (rows.empty()) {
+                if (operation == Request::SAVE_REPLY) {
+                    result = grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
+                                          "dispatch receipt does not exist"};
+                } else {
+                    response.set_state(Response::MISSING);
+                }
+                return;
+            }
+
+            if (!rows[0][0].as<bool>()) {
+                result = grpc::Status{grpc::StatusCode::ALREADY_EXISTS,
+                                      "mission was accepted with another attempt or payload"};
+                return;
+            }
+
+            if (!rows[0][1].is_null()) {
+                const auto encoded = rows[0][1].as<std::string>();
+                std::string saved;
+                boost::algorithm::unhex(encoded.begin(), encoded.end(),
+                                        std::back_inserter(saved));
+                if (operation == Request::SAVE_REPLY && saved != request.reply_bytes()) {
+                    result = grpc::Status{grpc::StatusCode::ALREADY_EXISTS,
+                                          "dispatch receipt already has a different reply"};
+                    return;
+                }
+                response.set_state(Response::HAS_REPLY);
+                response.set_reply_bytes(std::move(saved));
+                return;
+            }
+
+            if (operation == Request::SAVE_REPLY) {
+                tx.exec("UPDATE dispatch_add_receipts SET reply_bytes=decode($2,'hex') "
+                        "WHERE mission_id=$1",
+                        pqxx::params{request.mission_id(), reply_hex});
+                response.set_state(Response::HAS_REPLY);
+                response.set_reply_bytes(request.reply_bytes());
+            } else {
+                response.set_state(Response::PENDING);
+            }
+        });
+    } catch (const std::exception& error) {
+        co_return database_error(error);
+    }
+    co_return result;
 }

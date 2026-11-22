@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+
 import grpc
 import pytest
 
@@ -297,3 +300,48 @@ def test_route_chain_is_checked(robot):
     ])
     error = expect_error(grpc.StatusCode.FAILED_PRECONDITION, robot.add_mission, mission)
     assert "jump" in error.details()
+
+
+def test_add_replays_initial_response_after_completion(robot):
+    updates = robot.mission_updates()
+    mid = new_id("receipt-repeat")
+    mission = action_mission(mid, robot.robot_id, [sim_action(1.0)])
+    accepted = robot.add_mission(mission)
+    assert wait_final(robot, updates, mid).state == fms.MISSION_STATE_COMPLETED
+
+    assert robot.add_mission(mission) == accepted
+    changed = action_mission(mid, robot.robot_id, [sim_action(4.0)])
+    expect_error(grpc.StatusCode.ALREADY_EXISTS, robot.add_mission, changed)
+
+
+@pytest.mark.skipif(not os.getenv("DISPATCH_RESTART"),
+                    reason="requires a command to restart fleet_dispatch alone")
+def test_lost_reply_replays_after_dispatch_restart(robot):
+    import fleet_dispatch_pb2_grpc as rpc
+
+    class LoseReply(grpc.UnaryUnaryClientInterceptor):
+        def intercept_unary_unary(self, continuation, details, request):
+            self.accepted = continuation(details, request).result()
+            raise TimeoutError("injected lost AddMission reply")
+
+    updates = robot.mission_updates()
+    mid = new_id("receipt-restart")
+    mission = action_mission(mid, robot.robot_id, [sim_action(1.0)])
+    request = dpb.AddMissionRequest(mission=mission, attempt=2)
+    lost = LoseReply()
+    robot.missions.append(mid)
+    with grpc.insecure_channel(robot.settings.dispatch_address) as channel:
+        stub = rpc.FleetDispatchStub(grpc.intercept_channel(channel, lost))
+        with pytest.raises(TimeoutError, match="injected lost"):
+            stub.AddMission(request, timeout=8)
+        assert wait_final(robot, updates, mid).state == fms.MISSION_STATE_COMPLETED
+
+    subprocess.run(os.environ["DISPATCH_RESTART"], shell=True, check=True, timeout=30)
+    with grpc.insecure_channel(robot.settings.dispatch_address) as channel:
+        grpc.channel_ready_future(channel).result(timeout=15)
+        stub = rpc.FleetDispatchStub(channel)
+        assert stub.AddMission(request, timeout=8) == lost.accepted
+        request.attempt = 3
+        with pytest.raises(grpc.RpcError) as error:
+            stub.AddMission(request, timeout=8)
+        assert error.value.code() == grpc.StatusCode.ALREADY_EXISTS

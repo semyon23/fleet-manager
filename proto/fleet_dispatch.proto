@@ -112,6 +112,7 @@ message RemoveRobotResponse {}
 
 message AddMissionRequest {
   fms.v1.Mission mission = 1;
+  uint32 attempt = 2; // 0 — первая попытка, в том числе для старых клиентов
 }
 message AddMissionResponse {
   fms.v1.MissionStatus status = 1;  // начальный статус: RUNNING, первый шаг RUNNING, остальные PENDING;

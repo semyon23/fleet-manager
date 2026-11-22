@@ -125,3 +125,15 @@ void DatabaseWriter::report(const std::string& robot_id, const grpc::Status& res
                       static_cast<int>(result.error_code()), result.error_message());
     }
 }
+
+asio::awaitable<grpc::Status> DatabaseWriter::dispatch_add_receipt(
+    const dbv1::DispatchAddReceiptRequest& request,
+    dbv1::DispatchAddReceiptResponse& response) {
+    using RPC = agrpc::ClientRPC<
+        &dbv1::DispatchStorage::Stub::PrepareAsyncDispatchAddReceipt>;
+
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + kTimeout);
+    co_return co_await RPC::request(grpc_context_, *stub_, context,
+                                    request, response, asio::use_awaitable);
+}

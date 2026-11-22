@@ -6,6 +6,8 @@
 #include <boost/asio/experimental/awaitable_operators.hpp>
 #include "../include/OrderBuilder.hpp"
 #include <set>
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 
 struct NotifyWhenDoneTraits : agrpc::DefaultServerRPCTraits {
     static constexpr bool NOTIFY_WHEN_DONE = true;
@@ -38,8 +40,8 @@ grpc::Status unimplemented(const char* name) {
     return {grpc::StatusCode::UNIMPLEMENTED, std::string(name) + ": not implemented yet"};
 }
 
-DispatchService::DispatchService(agrpc::GrpcContext& grpc_context, FleetRegistry& registry,  RobotStatusHub& status_hub, MissionStatusHub& mission_hub)
-    : grpc_context_(grpc_context), fleet_registry_(registry), status_hub_(status_hub), mission_hub_(mission_hub) {}
+DispatchService::DispatchService(agrpc::GrpcContext& grpc_context, FleetRegistry& registry,  RobotStatusHub& status_hub, MissionStatusHub& mission_hub, DatabaseWriter& database)
+    : database_(database), grpc_context_(grpc_context), fleet_registry_(registry), status_hub_(status_hub), mission_hub_(mission_hub) {}
 
 grpc::Service& DispatchService::grpc_service(){
      return service_;
@@ -216,36 +218,99 @@ asio::awaitable<grpc::Status> DispatchService::remove_robot(const dv1::RemoveRob
     co_return grpc::Status::OK;
 }
 
-asio::awaitable<grpc::Status> DispatchService::add_mission(const dv1::AddMissionRequest& request, dv1::AddMissionResponse& response) {
-    // 5c: миссия из одного шага (Move или Action). Ответ — начальный статус.
+asio::awaitable<grpc::Status> DispatchService::add_mission(
+    const dv1::AddMissionRequest& request, dv1::AddMissionResponse& response) {
+    using Receipt = fms::database::v1::DispatchAddReceiptRequest;
+    using Answer = fms::database::v1::DispatchAddReceiptResponse;
     const auto& mission = request.mission();
     if (mission.mission_id().empty() || mission.robot_id().empty()) {
         co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "mission_id and robot_id are required"};
     }
 
+    Receipt receipt;
+    receipt.set_mission_id(mission.mission_id());
+    receipt.set_attempt(request.attempt());
+    {
+        google::protobuf::io::StringOutputStream sink(receipt.mutable_request_bytes());
+        google::protobuf::io::CodedOutputStream output(&sink);
+        output.SetSerializationDeterministic(true);
+        if (!request.SerializeToCodedStream(&output) || output.HadError()) {
+            co_return grpc::Status{grpc::StatusCode::INTERNAL, "cannot serialize AddMission"};
+        }
+    }
+
+    auto replay = [&](const Answer& answer) -> grpc::Status {
+        if (answer.state() == Answer::HAS_REPLY &&
+            response.ParseFromString(answer.reply_bytes()) && response.has_status() &&
+            response.status().mission_id() == mission.mission_id() &&
+            response.status().robot_id() == mission.robot_id()) {
+            return grpc::Status::OK;
+        }
+        return grpc::Status{grpc::StatusCode::UNAVAILABLE, "dispatch receipt requires reconciliation"};
+    };
+    auto storage_failure = [](const grpc::Status& error) -> grpc::Status {
+        if (error.error_code() == grpc::StatusCode::ALREADY_EXISTS) return error;
+        return grpc::Status{grpc::StatusCode::UNAVAILABLE, "dispatch receipt: " + error.error_message()};
+    };
+
+    Answer answer;
+    receipt.set_operation(Receipt::LOOKUP);
+    auto status = co_await database_.dispatch_add_receipt(receipt, answer);
+    if (!status.ok()) co_return storage_failure(status);
+    if (answer.state() != Answer::MISSING) co_return replay(answer);
+
+    RobotSession* session = nullptr;
+    status = validate_add(mission, session);
+    if (!status.ok()) co_return status;
+
+    receipt.set_operation(Receipt::CLAIM);
+    answer.Clear();
+    status = co_await database_.dispatch_add_receipt(receipt, answer);
+    if (!status.ok()) co_return storage_failure(status);
+    if (answer.state() != Answer::CLAIMED_NOW) co_return replay(answer);
+
+    // Пока ждали запись, сессия могла исчезнуть или робот мог сменить позицию.
+    session = nullptr;
+    status = validate_add(mission, session);
+    if (!status.ok()) {
+        co_return grpc::Status{grpc::StatusCode::UNAVAILABLE,
+                               "robot changed after dispatch claim: " + status.error_message()};
+    }
+    if (!session->start_mission(mission)) {
+        co_return grpc::Status{grpc::StatusCode::UNAVAILABLE, "dispatch claim exists, order was not queued"};
+    }
+
+    *response.mutable_status() = session->mission()->status();
+    receipt.set_operation(Receipt::SAVE_REPLY);
+    receipt.set_reply_bytes(response.SerializeAsString());
+    answer.Clear();
+    status = co_await database_.dispatch_add_receipt(receipt, answer);
+    if (!status.ok()) co_return storage_failure(status);
+    co_return replay(answer);
+}
+
+grpc::Status DispatchService::validate_add(const fms::v1::Mission& mission, RobotSession*& session) {
     grpc::Status status;
-    RobotSession* session = find_online_robot(mission.robot_id(), status);
+    session = find_online_robot(mission.robot_id(), status);
     if (!session) {
-        co_return status;
+        return status;
     }
 
     if (RobotSession* other = fleet_registry_.find_by_mission(mission.mission_id()); other && other != session) {
-        co_return grpc::Status{grpc::StatusCode::ALREADY_EXISTS,
+        return grpc::Status{grpc::StatusCode::ALREADY_EXISTS,
                                "mission " + mission.mission_id() + " is already running on robot " + other->robot_id()};
     }
 
-    // У робота уже есть миссия: та же — повтор запроса, отвечаем её статусом
     if (const ActiveMission* active = session->mission()) {
         if (active->mission_id() == mission.mission_id()) {
-            *response.mutable_status() = active->status();
-            co_return grpc::Status::OK;
+            return grpc::Status{grpc::StatusCode::UNAVAILABLE, "active mission has no confirmed receipt reply"};
         }
-        co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
+        return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
                                "robot " + mission.robot_id() + " is busy with mission " + active->mission_id()};
     }
 
-        if (mission.nodes().empty()) {
-        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "mission has no steps"};
+    if (mission.nodes().empty()) {
+        return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "mission has no steps"};
     }
 
     // 7: все шаги по порядку; robot_at — где робот окажется перед очередным шагом
@@ -254,44 +319,40 @@ asio::awaitable<grpc::Status> DispatchService::add_mission(const dv1::AddMission
     for (const auto& node : mission.nodes()) {
         const std::string step = "step '" + node.id() + "': ";
         if (node.id().empty() || !step_ids.insert(node.id()).second) {
-            co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "step ids must be non-empty and unique"};
+            return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "step ids must be non-empty and unique"};
         }
         if (!node.parent_id().empty()) {
-            co_return grpc::Status{grpc::StatusCode::UNIMPLEMENTED, step + "nested steps are not supported yet"};
+            return grpc::Status{grpc::StatusCode::UNIMPLEMENTED, step + "nested steps are not supported yet"};
         }
 
         if (node.has_move()) {
             if (auto error = validate_move_step(node.move()); !error.empty()) {
-                co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, step + error};
+                return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, step + error};
             }
             const auto& start = node.move().nodes(0).node_id();
             if (start != robot_at) {
-                co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
+                return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
                                        step + "robot will be at '" + robot_at + "', route starts at '" + start + "'"};
             }
             robot_at = node.move().nodes(node.move().nodes_size() - 1).node_id();
         } else if (node.has_action()) {
             if (auto error = validate_action_step(node.action()); !error.empty()) {
-                co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, step + error};
+                return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, step + error};
             }
             if (robot_at.empty()) {
-                co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
+                return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
                                        step + "robot is not on the graph, call InitializePosition first"};
             }
         } else if (node.has_wait()) {
             if (!node.wait().has_duration()) {
-                co_return grpc::Status{grpc::StatusCode::UNIMPLEMENTED, step + "waiting for a signal is not supported yet"};
+                return grpc::Status{grpc::StatusCode::UNIMPLEMENTED, step + "waiting for a signal is not supported yet"};
             }
         } else {
-            co_return grpc::Status{grpc::StatusCode::UNIMPLEMENTED, step + "notify steps are not supported yet"};
+            return grpc::Status{grpc::StatusCode::UNIMPLEMENTED, step + "notify steps are not supported yet"};
         }
     }
 
-    if (!session->start_mission(mission)) {
-        co_return grpc::Status{grpc::StatusCode::UNAVAILABLE, "mqtt queue is full, try again"};
-    }
-    *response.mutable_status() = session->mission()->status();
-    co_return grpc::Status::OK;
+    return grpc::Status::OK;
 }
 
 asio::awaitable<grpc::Status> DispatchService::cancel_mission(const dv1::CancelMissionRequest& request, dv1::CancelMissionResponse&) {

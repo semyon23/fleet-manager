@@ -159,6 +159,33 @@ message DispatchSnapshot {
   repeated MissionExecution active_missions = 2; // status.state не финальный
 }
 
+message DispatchAddReceiptRequest {
+  enum Operation {
+    LOOKUP = 0;
+    CLAIM = 1;
+    SAVE_REPLY = 2;
+  }
+
+  Operation operation = 1;
+  string mission_id = 2;
+  uint32 attempt = 3;
+  bytes request_bytes = 4;
+  bytes reply_bytes = 5;
+}
+
+message DispatchAddReceiptResponse {
+  enum State {
+    MISSING = 0;
+    CLAIMED_NOW = 1;
+    PENDING = 2;
+    HAS_REPLY = 3;
+  }
+
+  State state = 1;
+  bytes reply_bytes = 2;
+}
+
+
 service DispatchStorage {
   // При старте dispatch: роботы, их последний статус и незавершённые миссии.
   rpc LoadDispatchSnapshot(LoadDispatchSnapshotRequest) returns (LoadDispatchSnapshotResponse);
@@ -178,6 +205,9 @@ service DispatchStorage {
   // Dispatch берёт блок (например, 1000) и расходует в памяти; после перезапуска берёт новый блок —
   // номера идут только вперёд, пропуски допустимы. Так не нужно писать в базу на каждое сообщение.
   rpc ReserveHeaderIds(ReserveHeaderIdsRequest) returns (ReserveHeaderIdsResponse);
+
+  rpc DispatchAddReceipt(DispatchAddReceiptRequest)
+      returns (DispatchAddReceiptResponse);
 }
 
 message LoadDispatchSnapshotRequest {}

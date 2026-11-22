@@ -35,6 +35,7 @@ private:
     asio::awaitable<grpc::Status> save_robot_status(const dbv1::SaveRobotStatusRequest& request, dbv1::SaveRobotStatusResponse& response);
     asio::awaitable<grpc::Status> save_factsheet(const dbv1::SaveFactsheetRequest& request, dbv1::SaveFactsheetResponse& response);
     asio::awaitable<grpc::Status> save_mission_execution(const dbv1::SaveMissionExecutionRequest& request, dbv1::SaveMissionExecutionResponse& response);
+    asio::awaitable<grpc::Status> dispatch_add_receipt(const dbv1::DispatchAddReceiptRequest& request,dbv1::DispatchAddReceiptResponse& response);
     asio::awaitable<grpc::Status> reserve_header_ids(const dbv1::ReserveHeaderIdsRequest& request, dbv1::ReserveHeaderIdsResponse& response);
 
     asio::awaitable<grpc::Status> save_robot_availability(const dbv1::SaveRobotAvailabilityRequest& request,dbv1::SaveRobotAvailabilityResponse& response);

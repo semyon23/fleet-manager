@@ -31,7 +31,7 @@ public:
 
     // Записать factsheet сейчас. false — не записан (причина уже в логе).
     asio::awaitable<bool> save_factsheet(const std::string& robot_id, const std::string& json, const google::protobuf::Timestamp& received_at);
-
+    asio::awaitable<grpc::Status> dispatch_add_receipt(const fms::database::v1::DispatchAddReceiptRequest& request, fms::database::v1::DispatchAddReceiptResponse& response);
 private:
     asio::awaitable<void> run();
     asio::awaitable<grpc::Status> send_status(const fms::v1::RobotStatus& status);

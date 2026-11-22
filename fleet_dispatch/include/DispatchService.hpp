@@ -1,13 +1,10 @@
-//
-// Created by ubuntu on 10/17/26.
-//
-
 #ifndef DISPATCHSERVICE_HPP
 #define DISPATCHSERVICE_HPP
 #pragma once
 
 #include <agrpc/asio_grpc.hpp>
 #include <boost/asio/awaitable.hpp>
+#include "DatabaseWriter.hpp"
 #include "FleetRegistry.hpp"
 #include "fleet_dispatch.grpc.pb.h"
 
@@ -16,7 +13,7 @@ namespace dv1 = fms::dispatch::v1;
 
 class DispatchService {
 public:
-    explicit DispatchService(agrpc::GrpcContext& grpc_context, FleetRegistry& registry, RobotStatusHub& status_hub, MissionStatusHub& mission_hub);
+    explicit DispatchService(agrpc::GrpcContext& grpc_context, FleetRegistry& registry, RobotStatusHub& status_hub, MissionStatusHub& mission_hub, DatabaseWriter& database);
     grpc::Service& grpc_service();
     void start();
 
@@ -33,6 +30,9 @@ private:
 
     RobotSession* find_online_robot(const std::string& robot_id, grpc::Status& status);
 
+    grpc::Status validate_add(const fms::v1::Mission& mission, RobotSession*& session);
+
+    DatabaseWriter& database_;
     agrpc::GrpcContext& grpc_context_;
     FleetRegistry& fleet_registry_;
     RobotStatusHub& status_hub_;

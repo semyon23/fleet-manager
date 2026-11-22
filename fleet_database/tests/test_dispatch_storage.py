@@ -186,3 +186,26 @@ def test_deleting_robot_deletes_its_status_and_factsheet(robots, storage):
     assert not get_record(robots, spec.robot_id).HasField("status")
     assert error_code(robots.registry.GetFactsheet, db.GetFactsheetRequest(robot_id=spec.robot_id)) \
         == grpc.StatusCode.NOT_FOUND
+
+
+def test_add_receipt_only_first_claim_can_start(storage):
+    import uuid
+
+    request_type = db.DispatchAddReceiptRequest
+    response_type = db.DispatchAddReceiptResponse
+    mid = "test-receipt-" + uuid.uuid4().hex
+
+    def call(operation, reply=b""):
+        return storage.DispatchAddReceipt(request_type(
+            operation=operation, mission_id=mid, attempt=0,
+            request_bytes=b"immutable-request", reply_bytes=reply,
+        ), timeout=5)
+
+    assert call(request_type.LOOKUP).state == response_type.MISSING
+    assert call(request_type.CLAIM).state == response_type.CLAIMED_NOW
+    assert call(request_type.CLAIM).state == response_type.PENDING
+    assert call(request_type.LOOKUP).state == response_type.PENDING
+    assert call(request_type.SAVE_REPLY, b"first-reply").state == response_type.HAS_REPLY
+    replay = call(request_type.CLAIM)
+    assert replay.state == response_type.HAS_REPLY
+    assert replay.reply_bytes == b"first-reply"
