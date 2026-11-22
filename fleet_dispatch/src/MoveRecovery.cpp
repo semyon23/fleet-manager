@@ -171,8 +171,7 @@ Result reconcile(const fms::database::v1::RobotSpec& robot, const Execution& hea
     const auto index = state->last_node_sequence_id / 2;
     if (state->last_node_sequence_id % 2 || index >= released ||
         move.nodes(index).node_id() != state->last_node_id ||
-        index < step.move().last_node_index() || index < previous.move().last_node_index() ||
-        (state->driving && index + 1 >= released)) {
+        index < step.move().last_node_index() || index < previous.move().last_node_index()) {
         return conflict("position");
     }
 
@@ -211,8 +210,7 @@ Result reconcile(const fms::database::v1::RobotSpec& robot, const Execution& hea
             }
             if (observed_base > first + 1 ||
                 (state->order_update_id + 1ULL == saved.order_update_id() &&
-                 observed_base != first + 1) ||
-                (state->driving && index + 1 >= observed_base)) return conflict("old base");
+                 observed_base != first + 1)) return conflict("old base");
         }
     } catch (const nlohmann::json::exception&) {
         return conflict("invalid order JSON");
@@ -253,10 +251,9 @@ Result reconcile(const fms::database::v1::RobotSpec& robot, const Execution& hea
     if (index >= full.nodes.size() ||
         index >= progress.released_nodes() ||
         index < progress.last_node_index() ||
-        full.nodes[index].node_id != state.last_node_id ||
-        (state.driving && index + 1 >= progress.released_nodes())) {
+        full.nodes[index].node_id != state.last_node_id) {
         return false;
-        }
+    }
 
     const auto remaining = full.nodes.size() - index - 1;
     if (state.node_states.size() != remaining ||

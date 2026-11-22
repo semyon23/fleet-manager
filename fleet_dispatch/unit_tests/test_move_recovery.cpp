@@ -148,11 +148,14 @@ TEST_CASE("Move recovery reconciles one fresh state", "[move-recovery]") {
         x.state.instant_action_states[0].action_id = "previous-run";
         CHECK(x.check().decision == Decision::Wait);
     }
-    SECTION("previous update while stopped at stitch") {
+    SECTION("previous update at the stitch stays pending through standstill") {
         x.state.order_update_id = 0;
-        x.state.driving = false;
         x.state.node_states[0].released = false;
         x.state.edge_states[0].released = false;
+
+        x.state.driving = true;
+        CHECK(x.check().decision == Decision::Wait);
+        x.state.driving = false;
         CHECK(x.check().decision == Decision::Wait);
     }
     SECTION("foreign order") {
@@ -272,6 +275,40 @@ TEST_CASE("Restore an accepted move without issuing another order", "[restore-mo
         CHECK(progress.waiting_for_release());
         CHECK_FALSE(m->done());
         CHECK_FALSE(m->order_needed());
+    }
+
+    SECTION("arrival and standstill may be reported in separate states") {
+        const auto approach = x.state;
+        arrive(vda5050::ActionStatus::Finished);
+        auto at_goal = x.state;
+        at_goal.driving = true;
+
+        SECTION("dispatch is attached before reaching the final node") {
+            x.state = approach;
+            x.state.order_update_id = at_goal.order_update_id;
+            x.state.node_states.back().released = true;
+            x.state.edge_states.back().released = true;
+        }
+
+        SECTION("the fresh recovery reply already names the final node") {
+            x.state = at_goal;
+        }
+
+        auto m = restore();
+        REQUIRE(m.has_value());
+        at_goal.instant_action_states.clear();
+        ++at_goal.header.header_id;
+        m->on_state(at_goal);
+        REQUIRE(m->recovery_hold() == Hold::None);
+        CHECK(m->status().state() == f::MISSION_STATE_RUNNING);
+        CHECK(m->status().steps(0).move().last_node_index() == 3);
+        CHECK_FALSE(m->order_needed());
+
+        ++at_goal.header.header_id;
+        at_goal.driving = false;
+        REQUIRE(m->on_state(at_goal));
+        CHECK(m->status().state() == f::MISSION_STATE_COMPLETED);
+        CHECK_FALSE(m->on_state(at_goal));
     }
 
     SECTION("arrival in the first reply finishes the last step once") {
@@ -398,8 +435,15 @@ TEST_CASE("Restore an accepted move without issuing another order", "[restore-mo
         x.state.edge_states.erase(x.state.edge_states.begin());
         x.state.last_node_id = "A";
         x.state.last_node_sequence_id = 4;
-        x.state.driving = false;
+        x.state.driving = true;
+        REQUIRE(m->on_state(x.state));
+        REQUIRE(m->recovery_hold() == Hold::None);
+        CHECK_FALSE(m->status().steps(0).move().waiting_for_release());
+        CHECK_FALSE(m->done());
+        CHECK_FALSE(m->order_needed());
 
+        ++x.state.header.header_id;
+        x.state.driving = false;
         CHECK(m->on_state(x.state));
         CHECK(m->recovery_hold() == Hold::None);
         CHECK(m->status().steps(0).move().last_node_index() == 2);
