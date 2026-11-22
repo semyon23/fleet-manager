@@ -1,5 +1,5 @@
 #include "../include/ActiveMission.hpp"
-
+#include "../include/OrderBuilder.hpp"
 #include <algorithm>
 #include <google/protobuf/util/message_differencer.h>
 #include <google/protobuf/util/time_util.h>
@@ -35,6 +35,49 @@ std::chrono::milliseconds to_chrono(const google::protobuf::Duration& duration) 
     return std::chrono::milliseconds(TimeUtil::DurationToMilliseconds(duration));
 }
 
+    using Timestamp = google::protobuf::Timestamp;
+    using MissionClock = ActiveMission::Clock;
+
+    bool valid_timestamp(const Timestamp& value) {
+        // Диапазон google.protobuf.Timestamp: от 0001 до 9999 года включительно.
+        return value.seconds() >= -62135596800LL &&
+               value.seconds() <= 253402300799LL &&
+               value.nanos() >= 0 && value.nanos() < 1'000'000'000;
+    }
+
+    bool before(const Timestamp& lhs, const Timestamp& rhs) {
+        return lhs.seconds() < rhs.seconds() ||
+               (lhs.seconds() == rhs.seconds() && lhs.nanos() < rhs.nanos());
+    }
+
+    // Переводим возраст записи в шкалу steady_clock один раз при восстановлении.
+    // После этого таймаут снова работает по монотонным часам.
+    std::optional<MissionClock::time_point> restore_start(
+        const Timestamp& start, const Timestamp& wall_now, MissionClock::time_point now) {
+        using namespace std::chrono;
+
+        if (!valid_timestamp(start) || !valid_timestamp(wall_now) || before(wall_now, start)) {
+            return std::nullopt;
+        }
+
+        auto seconds_elapsed = wall_now.seconds() - start.seconds();
+        auto nanos_elapsed = wall_now.nanos() - start.nanos();
+        if (nanos_elapsed < 0) {
+            --seconds_elapsed;
+            nanos_elapsed += 1'000'000'000;
+        }
+
+        // Проверяем диапазон до перевода в более мелкие единицы steady_clock.
+        const auto max_seconds = duration_cast<seconds>(MissionClock::duration::max());
+        if (seconds_elapsed >= max_seconds.count()) return std::nullopt;
+
+        const auto elapsed = duration_cast<MissionClock::duration>(
+            seconds(seconds_elapsed) + nanoseconds(nanos_elapsed));
+        if (now < MissionClock::time_point::min() + elapsed) return std::nullopt;
+
+        return now - elapsed;
+    }
+
 }  // namespace
 
 ActiveMission::ActiveMission(fms::v1::Mission mission, Clock::time_point now)
@@ -52,6 +95,97 @@ ActiveMission::ActiveMission(fms::v1::Mission mission, Clock::time_point now)
         step->set_state(fms::v1::STEP_STATE_PENDING);
     }
     start_step(now);
+}
+
+ActiveMission::ActiveMission(const fms::database::v1::MissionExecution& head,
+                             int current, Clock::time_point mission_start,
+                             Clock::time_point step_start)
+    : recovering_move_(true),
+      mission_(head.mission()),
+      status_(head.status()),
+      current_(current),
+      mission_started_at_(mission_start),
+      step_started_at_(step_start) {}
+
+std::optional<ActiveMission> ActiveMission::restore_move(
+    const fms::database::v1::RobotSpec& robot,
+    const fms::database::v1::MissionExecution& head,
+    const fms::database::v1::MissionExecution& grant,
+    std::string_view request_id,
+    const vda5050::State& state,
+    Clock::time_point now,
+    const google::protobuf::Timestamp& wall_now) {
+
+    const auto match = move_recovery::reconcile(robot, head, grant, request_id, &state);
+    if (match.decision != move_recovery::Decision::Attach) return std::nullopt;
+
+    const auto& mission = head.mission();
+    const auto& status = head.status();
+
+    // У сохранённой последовательной миссии ровно один текущий шаг.
+    // Проверяем также историю: предыдущие шаги завершены, следующие ещё ждут.
+    int current = -1;
+    for (int i = 0; i < mission.nodes_size(); ++i) {
+        const auto& node = mission.nodes(i);
+        const auto& step = status.steps(i);
+        if (node.id() != step.node_id()) return std::nullopt;
+
+        if (node.id() == status.current_node_id()) {
+            if (current >= 0 || !node.has_move() ||
+                step.state() != fms::v1::STEP_STATE_RUNNING) {
+                return std::nullopt;
+            }
+            current = i;
+        } else if (current < 0) {
+            if (step.state() != fms::v1::STEP_STATE_COMPLETED &&
+                step.state() != fms::v1::STEP_STATE_SKIPPED) {
+                return std::nullopt;
+            }
+        } else if (step.state() != fms::v1::STEP_STATE_PENDING) {
+            return std::nullopt;
+        }
+    }
+    if (current < 0) return std::nullopt;
+
+    const auto& node = mission.nodes(current);
+    const auto& step = status.steps(current);
+
+    auto mission_start = now;
+    if (mission.has_timeout()) {
+        if (!status.has_started_at()) return std::nullopt;
+        const auto restored = restore_start(status.started_at(), wall_now, now);
+        if (!restored) return std::nullopt;
+        mission_start = *restored;
+    }
+
+    auto step_start = now;
+    if (node.has_timeout()) {
+        // При RETRY текущий код обновляет step_started_at_ только в памяти.
+        // Сохранённый StepStatus.started_at относится к первой попытке.
+        if (step.attempts() != 1 || !step.has_started_at()) return std::nullopt;
+        if (status.has_started_at() && before(step.started_at(), status.started_at())) {
+            return std::nullopt;
+        }
+        const auto restored = restore_start(step.started_at(), wall_now, now);
+        if (!restored) return std::nullopt;
+        step_start = *restored;
+    }
+
+    ActiveMission restored(head, current, mission_start, step_start);
+
+    const auto& issued = grant.order();
+    auto full = build_move_order(issued.order_id(), node.move());
+    full.order_update_id = issued.order_update_id();
+
+    restored.last_update_id_ = issued.order_update_id();
+    restored.tracker_.emplace(full, now);
+    restored.tracker_->on_state(state);
+
+    // Именно этот state мог первым сообщить о прибытии на последний узел.
+    // Применяем его здесь один раз, включая обычное обновление updated_at.
+    restored.check_step(now);
+    restored.changed_since(status);
+    return restored;
 }
 
 // ------------------------------------------------------------------ order шага
@@ -169,6 +303,39 @@ void ActiveMission::start_step(Clock::time_point now) {
 
 void ActiveMission::check_step(Clock::time_point now) {
     const auto& node = current_step();
+
+    if (recovering_move_) {
+        if (recovery_hold_ != RecoveryHold::None) return;
+
+        update_progress();
+
+        const bool mission_expired =
+            mission_.has_timeout() &&
+            now - mission_started_at_ > to_chrono(mission_.timeout());
+        const bool step_expired =
+            node.has_timeout() &&
+            now - step_started_at_ > to_chrono(node.timeout());
+
+        if (mission_expired || step_expired) {
+            recovery_hold_ = RecoveryHold::Deadline;
+            return;
+        }
+
+        if (!tracker_->done()) return;
+
+        if (tracker_->phase() != OrderTracker::Phase::Finished) {
+            recovery_hold_ = RecoveryHold::FailedOrder;
+            return;
+        }
+
+        if (current_ + 1 < mission_.nodes_size()) {
+            recovery_hold_ = RecoveryHold::NextStep;
+            return;
+        }
+
+        step_succeeded(now);
+        return;
+    }
 
     // Таймауты: вся миссия и текущий шаг (у шага — на каждую попытку)
     if (mission_.has_timeout() && now - mission_started_at_ > to_chrono(mission_.timeout())) {

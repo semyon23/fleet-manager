@@ -44,10 +44,12 @@ if(FMS_BUILD_TESTS)
 
     add_executable(fleet_dispatch_unit
             unit_tests/test_move_recovery.cpp
-            src/MoveRecovery.cpp
-            src/OrderBuilder.cpp
             unit_tests/test_startup_inventory.cpp
             unit_tests/test_probe_queue.cpp
+            src/MoveRecovery.cpp
+            src/OrderBuilder.cpp
+            src/ActiveMission.cpp
+            src/OrderTracker.cpp
     )
     target_link_libraries(fleet_dispatch_unit PRIVATE
             Catch2::Catch2WithMain

@@ -7,6 +7,7 @@
 #include <string>
 
 #include "OrderTracker.hpp"
+#include "MoveRecovery.hpp"
 #include "fms_types.pb.h"
 
 // Миссия, которую сейчас выполняет робот. Принадлежит RobotSession.
@@ -17,6 +18,26 @@ public:
     using Clock = OrderTracker::Clock;
 
     ActiveMission(fms::v1::Mission mission, Clock::time_point now);
+
+    enum class RecoveryHold {
+        None,
+        Deadline,
+        NextStep,
+        FailedOrder
+    };
+
+    // Вызывающий передаёт актуальный state с токеном текущей попытки опроса.
+    // Пустой результат — присоединение по этим данным запрещено.
+    static std::optional<ActiveMission> restore_move(
+        const fms::database::v1::RobotSpec& robot,
+        const fms::database::v1::MissionExecution& head,
+        const fms::database::v1::MissionExecution& grant,
+        std::string_view request_id,
+        const vda5050::State& state,
+        Clock::time_point now,
+        const google::protobuf::Timestamp& wall_now);
+
+    RecoveryHold recovery_hold() const { return recovery_hold_; }
 
     // Текущему шагу (Move / Action) нужен order, а он ещё не отправлен — первый раз или повтор
     bool order_needed() const;
@@ -47,6 +68,13 @@ public:
     const fms::v1::MissionStatus& status() const { return status_; }
     const fms::v1::Mission& mission() const { return mission_; }   // с правками ExtendMission
 private:
+
+    // Отдельный вход для сохранённой миссии. Обычный конструктор запускает шаг 0.
+    ActiveMission(const fms::database::v1::MissionExecution& head, int current,
+                  Clock::time_point mission_start, Clock::time_point step_start);
+
+    bool recovering_move_ = false;
+    RecoveryHold recovery_hold_ = RecoveryHold::None;
     void start_step(Clock::time_point now);
     void check_step(Clock::time_point now);   // шаг закончился? таймауты?
     void step_succeeded(Clock::time_point now);
