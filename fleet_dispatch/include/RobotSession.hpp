@@ -23,6 +23,12 @@ public:
                  DatabaseWriter& database, std::string robot_id, std::string manufacturer, std::string serial_number);
 
     void start();
+
+    asio::awaitable<void> start_restored(
+    const fms::database::v1::RobotRecord& record, std::string mission);
+
+    bool awaiting_live_state() const { return awaiting_live_state_; }
+
     void stop();
 
     bool pause();
@@ -52,6 +58,8 @@ public:
     const fms::v1::RobotStatus& status() const { return status_; }
 
 private:
+    void start_loops();
+    bool awaiting_live_state_ = false;
     asio::awaitable<void> run();
     asio::awaitable<void> watchdog();
 

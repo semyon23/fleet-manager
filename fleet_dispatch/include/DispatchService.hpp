@@ -30,6 +30,8 @@ private:
 
     RobotSession* find_online_robot(const std::string& robot_id, grpc::Status& status);
 
+    grpc::Status startup_gate(bool needs_clear, const std::string& motion_robot = {}) const;
+
     grpc::Status validate_add(const fms::v1::Mission& mission, RobotSession*& session);
 
     DatabaseWriter& database_;

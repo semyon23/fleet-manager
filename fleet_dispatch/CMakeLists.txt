@@ -46,6 +46,7 @@ if(FMS_BUILD_TESTS)
             unit_tests/test_move_recovery.cpp
             src/MoveRecovery.cpp
             src/OrderBuilder.cpp
+            unit_tests/test_startup_inventory.cpp
     )
     target_link_libraries(fleet_dispatch_unit PRIVATE
             Catch2::Catch2WithMain

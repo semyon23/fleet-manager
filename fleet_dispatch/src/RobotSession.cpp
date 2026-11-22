@@ -78,6 +78,27 @@ void RobotSession::start() {
 
     send_instant_action(vda5050::action_type::kStateRequest);
     publish_status();
+    start_loops();
+}
+
+asio::awaitable<void> RobotSession::start_restored(
+    const fms::database::v1::RobotRecord& record, std::string mission) {
+    if (record.has_status()) status_ = record.status();
+    status_.set_connection(fms::v1::CONNECTION_STATE_UNKNOWN);
+    status_.set_mission_id(std::move(mission));
+    awaiting_live_state_ = true;
+    status_hub_.publish(status_);
+    start_loops();
+    for (const auto* topic : {&state_topic_, &connection_topic_, &factsheet_topic_}) {
+        MqttRequest sub{MqttAction::Subscribe, *topic, {}};
+        auto [ec] = co_await outbox_.async_send(boost::system::error_code{}, std::move(sub),
+                                                asio::as_tuple(asio::use_awaitable));
+        if (stopped_) co_return;
+        if (ec) throw boost::system::system_error(ec);
+    }
+}
+
+void RobotSession::start_loops() {
     auto log_if_failed = [id = robot_id_](std::exception_ptr error) {
         if (!error) return;
         try {
@@ -153,6 +174,7 @@ void RobotSession::handle(const VdaMessage& message) {
         if (message.topic == state_topic_) {
             auto state = json.get<vda5050::State>();
             fill_status(state, status_);
+            awaiting_live_state_ = false;
             check_instant_actions(state);
 
             if (!checkpoint_pending_ && !cancel_preparing_ && mission_ &&
@@ -196,6 +218,7 @@ void RobotSession::handle(const VdaMessage& message) {
 // DB-4: в стрим — всегда; в базу — сразу, если изменилось важное, иначе не чаще раза в 5 с
 void RobotSession::publish_status() {
     status_hub_.publish(status_);
+    if (awaiting_live_state_) return;
 
     auto now = std::chrono::steady_clock::now();
     if (important_change(saved_status_, status_) || now - saved_at_ >= std::chrono::seconds(5)) {

@@ -1,6 +1,9 @@
 #include <agrpc/asio_grpc.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/signal_set.hpp>
+#include <boost/asio/as_tuple.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/use_awaitable.hpp>
 
 #include "include/DispatchService.hpp"
 #include "GrpcServer.hpp"
@@ -25,7 +28,7 @@ int main(){
         RobotStatusHub status_hub{io_context};
         MissionStatusHub mission_hub{io_context};
 
-        GrpcServer grpc_server{"0.0.0.0:5001"};
+        GrpcServer grpc_server{env_or("DISPATCH_LISTEN_ADDRESS", "0.0.0.0:5001")};
         agrpc::GrpcContext grpc_context{grpc_server.add_completion_queue()};
 
         const char* database_address = std::getenv("DATABASE_ADDRESS");
@@ -43,13 +46,47 @@ int main(){
         database.start();
         grpc_server.start();
         dispatch_service.start();
-        grpc_server.set_serving(true);
+        bool stopping = false;
+        asio::steady_timer retry(io_context);
+        asio::co_spawn(io_context, [&]() -> asio::awaitable<void> {
+            while (!stopping) {
+                fms::database::v1::LoadDispatchSnapshotResponse response;
+                auto status = co_await database.load_snapshot(response);
+                if (stopping) co_return;
+                if (status.ok() && response.has_snapshot()) {
+                    std::optional<StartupInventory> inventory;
+                    try {
+                        inventory.emplace(std::move(*response.mutable_snapshot()));
+                    } catch (const std::invalid_argument& error) {
+                        spdlog::error("[startup] {}", error.what());
+                    }
+                    if (inventory) {
+                        co_await registry.restore(std::move(*inventory));
+                        if (stopping) co_return;
+                        const auto& reason = registry.inventory()->reason;
+                        grpc_server.set_serving(reason.empty());
+                        spdlog::info("[startup] inventory loaded: {}", reason.empty() ? "ready" : reason);
+                        co_return;
+                    }
+                } else {
+                    spdlog::warn("[startup] snapshot unavailable: {}", status.error_message());
+                }
+                retry.expires_after(std::chrono::seconds(2));
+                co_await retry.async_wait(asio::as_tuple(asio::use_awaitable));
+            }
+        }, [&](std::exception_ptr error) {
+            if (!error || stopping) return;
+            try { std::rethrow_exception(error); }
+            catch (const std::exception& e) { spdlog::critical("[startup] {}", e.what()); }
+        });
 
 
         asio::signal_set signals{io_context, SIGINT, SIGTERM};
         signals.async_wait([&](const boost::system::error_code&, int signal)
         {
             spdlog::info("signal {} received, stopping", signal);
+            stopping = true;
+            retry.cancel();
             grpc_server.shutdown();
             status_hub.close_all();
             mission_hub.close_all();

@@ -10,7 +10,8 @@
 
 #include "RobotMessages.hpp"
 #include "RobotSession.hpp"
-//#include "MissionStatusHub.hpp"
+#include "StartupInventory.hpp"
+#include <optional>
 enum class AddResult {
     Added,
     AlreadyExists,
@@ -23,6 +24,11 @@ public:
                   DatabaseWriter& database);
 
     AddResult add(const std::string& robot_id, const std::string& manufacturer, const std::string& serial_number);
+    asio::awaitable<void> restore(StartupInventory inventory);
+
+    const StartupInventory* inventory() const {
+        return inventory_ ? &*inventory_ : nullptr;
+    }
     bool remove(const std::string& robot_id);
     void stop_all();
 
@@ -39,6 +45,8 @@ private:
     MissionStatusHub& mission_hub_;
     std::unordered_map<std::string, std::shared_ptr<RobotSession>> sessions_;
     DatabaseWriter& database_;
+    std::optional<StartupInventory> inventory_;
+    bool stopping_ = false;
 };
 
 

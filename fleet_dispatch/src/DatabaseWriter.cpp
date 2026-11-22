@@ -19,10 +19,18 @@ bool is_unavailable(const grpc::Status& result) {
            result.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED;
 }
 
+static std::shared_ptr<grpc::Channel> storage_channel(const std::string& address) {
+    grpc::ChannelArguments args;
+    args.SetMaxReceiveMessageSize(32 * 1024 * 1024);
+    return grpc::CreateCustomChannel(address, grpc::InsecureChannelCredentials(), args);
+}
+
+
 DatabaseWriter::DatabaseWriter(agrpc::GrpcContext& grpc_context, asio::io_context& io_context, const std::string& address)
     : grpc_context_(grpc_context),
       io_context_(io_context),
-      stub_(dbv1::DispatchStorage::NewStub(grpc::CreateChannel(address, grpc::InsecureChannelCredentials()))),
+      //stub_(dbv1::DispatchStorage::NewStub(grpc::CreateChannel(address, grpc::InsecureChannelCredentials()))),
+      stub_(dbv1::DispatchStorage::NewStub(storage_channel(address))),
       wakeup_(io_context, 1),
       retry_timer_(io_context) {}
 
@@ -147,4 +155,17 @@ asio::awaitable<grpc::Status> DatabaseWriter::save_execution(
     dbv1::SaveMissionExecutionResponse response;
     co_return co_await RPC::request(grpc_context_, *stub_, context, request, response,
                                     asio::use_awaitable);
+}
+
+asio::awaitable<grpc::Status> DatabaseWriter::load_snapshot(
+    dbv1::LoadDispatchSnapshotResponse& response) {
+    using RPC = agrpc::ClientRPC<
+        &dbv1::DispatchStorage::Stub::PrepareAsyncLoadDispatchSnapshot>;
+
+    dbv1::LoadDispatchSnapshotRequest request;
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + kTimeout);
+
+    co_return co_await RPC::request(grpc_context_, *stub_, context,
+                                    request, response, asio::use_awaitable);
 }

@@ -47,6 +47,20 @@ grpc::Service& DispatchService::grpc_service(){
      return service_;
 }
 
+grpc::Status DispatchService::startup_gate(bool needs_clear, const std::string& motion_robot) const {
+    const auto* inv = fleet_registry_.inventory();
+    if (!inv) return {grpc::StatusCode::UNAVAILABLE, "dispatch inventory loading"};
+    if (needs_clear && !inv->reason.empty()) return {grpc::StatusCode::UNAVAILABLE, inv->reason};
+    if (!motion_robot.empty()) {
+        if (inv->deleting.contains(motion_robot))
+            return {grpc::StatusCode::FAILED_PRECONDITION, "robot pending deletion"};
+        auto* robot = fleet_registry_.find(motion_robot);
+        if (robot && robot->awaiting_live_state())
+            return {grpc::StatusCode::UNAVAILABLE, "waiting for robot state"};
+    }
+    return grpc::Status::OK;
+}
+
 void DispatchService::start() {
 
     agrpc::register_awaitable_rpc_handler<AddRobotRPC>(
@@ -125,7 +139,11 @@ void DispatchService::start() {
     agrpc::register_awaitable_rpc_handler<StreamRobotStatusRPC>(
        grpc_context_, service_,
        [this](StreamRobotStatusRPC& rpc, StreamRobotStatusRPC::Request& request) -> asio::awaitable<void> {
-           using namespace asio::experimental::awaitable_operators;
+           if (auto g = startup_gate(false); !g.ok()) {
+                co_await rpc.finish(g);
+                co_return;
+            }
+            using namespace asio::experimental::awaitable_operators;
 
            std::vector<std::string> robot_ids(request.robot_ids().begin(), request.robot_ids().end());
            auto subscriber = status_hub_.subscribe(std::move(robot_ids));
@@ -155,6 +173,10 @@ void DispatchService::start() {
     agrpc::register_awaitable_rpc_handler<StreamMissionStatusRPC>(
         grpc_context_, service_,
         [this](StreamMissionStatusRPC& rpc, StreamMissionStatusRPC::Request& request) -> asio::awaitable<void> {
+            if (auto g = startup_gate(true); !g.ok()) {
+                co_await rpc.finish(g);
+                co_return;
+            }
             using namespace asio::experimental::awaitable_operators;
 
             std::vector<std::string> robot_ids(request.robot_ids().begin(), request.robot_ids().end());
@@ -194,6 +216,7 @@ void DispatchService::start() {
 
 asio::awaitable<grpc::Status> DispatchService::add_robot(const dv1::AddRobotRequest& request,
                                                          dv1::AddRobotResponse& response) {
+    if (auto g = startup_gate(!fleet_registry_.find(request.robot_id())); !g.ok()) co_return g;
     if (request.robot_id().empty() || request.manufacturer().empty() || request.serial_number().empty()) {
         co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT,
                                "robot_id, manufacturer and serial_number are required"};
@@ -212,6 +235,7 @@ asio::awaitable<grpc::Status> DispatchService::add_robot(const dv1::AddRobotRequ
 
 asio::awaitable<grpc::Status> DispatchService::remove_robot(const dv1::RemoveRobotRequest& request,
                                                             dv1::RemoveRobotResponse&) {
+    if (auto g = startup_gate(true); !g.ok()) co_return g;
     if (!fleet_registry_.remove(request.robot_id())) {
         co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "robot " + request.robot_id() + " not found"};
     }
@@ -220,6 +244,7 @@ asio::awaitable<grpc::Status> DispatchService::remove_robot(const dv1::RemoveRob
 
 asio::awaitable<grpc::Status> DispatchService::add_mission(
     const dv1::AddMissionRequest& request, dv1::AddMissionResponse& response) {
+    if (auto g = startup_gate(false); !g.ok()) co_return g;
     using Receipt = fms::database::v1::DispatchAddReceiptRequest;
     using Answer = fms::database::v1::DispatchAddReceiptResponse;
     const auto& mission = request.mission();
@@ -292,6 +317,7 @@ asio::awaitable<grpc::Status> DispatchService::add_mission(
 }
 
 grpc::Status DispatchService::validate_add(const fms::v1::Mission& mission, RobotSession*& session) {
+    if (auto g = startup_gate(true, mission.robot_id()); !g.ok()) return g;
     grpc::Status status;
     session = find_online_robot(mission.robot_id(), status);
     if (!session) {
@@ -362,6 +388,7 @@ grpc::Status DispatchService::validate_add(const fms::v1::Mission& mission, Robo
 }
 
 asio::awaitable<grpc::Status> DispatchService::cancel_mission(const dv1::CancelMissionRequest& request, dv1::CancelMissionResponse&) {
+    if (auto g = startup_gate(true); !g.ok()) co_return g;
     RobotSession* session = fleet_registry_.find_by_mission(request.mission_id());
     if (!session) {
         co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "mission " + request.mission_id() + " is not running"};
@@ -384,6 +411,7 @@ asio::awaitable<grpc::Status> DispatchService::cancel_mission(const dv1::CancelM
 
 asio::awaitable<grpc::Status> DispatchService::extend_mission(const dv1::ExtendMissionRequest& request,
                                                               dv1::ExtendMissionResponse& response) {
+    if (auto g = startup_gate(true); !g.ok()) co_return g;
     if (request.has_replace_tail()) {
         co_return grpc::Status{grpc::StatusCode::UNIMPLEMENTED, "replace_tail is not supported yet"};
     }
@@ -451,6 +479,7 @@ asio::awaitable<grpc::Status> DispatchService::extend_mission(const dv1::ExtendM
 }
 
 asio::awaitable<grpc::Status> DispatchService::pause_robot(const dv1::PauseRobotRequest& request, dv1::PauseRobotResponse&) {
+    if (auto g = startup_gate(false); !g.ok()) co_return g;
     grpc::Status status;
     RobotSession* session = find_online_robot(request.robot_id(), status);
     if (!session) {
@@ -463,6 +492,7 @@ asio::awaitable<grpc::Status> DispatchService::pause_robot(const dv1::PauseRobot
 }
 
 asio::awaitable<grpc::Status> DispatchService::resume_robot(const dv1::ResumeRobotRequest& request, dv1::ResumeRobotResponse&) {
+    if (auto g = startup_gate(true, request.robot_id()); !g.ok()) co_return g;
     grpc::Status status;
     RobotSession* session = find_online_robot(request.robot_id(), status);
     if (!session) {
@@ -475,6 +505,7 @@ asio::awaitable<grpc::Status> DispatchService::resume_robot(const dv1::ResumeRob
 }
 
 asio::awaitable<grpc::Status> DispatchService::initialize_position(const dv1::InitializePositionRequest& request, dv1::InitializePositionResponse&) {
+    if (auto g = startup_gate(true, request.robot_id()); !g.ok()) co_return g;
     if (request.pose().map_id().empty() || request.last_node_id().empty()) {
         co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "pose.map_id and last_node_id are required"};
     }
@@ -508,6 +539,7 @@ RobotSession* DispatchService::find_online_robot(const std::string& robot_id, gr
 
 asio::awaitable<grpc::Status> DispatchService::get_mission(const dv1::GetMissionRequest& request,
                                                            dv1::GetMissionResponse& response) {
+    if (auto g = startup_gate(true); !g.ok()) co_return g;
     RobotSession* session = fleet_registry_.find_by_mission(request.mission_id());
     if (!session) {
         co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "mission " + request.mission_id() + " is not running"};

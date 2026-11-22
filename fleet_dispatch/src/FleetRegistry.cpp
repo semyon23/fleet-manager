@@ -24,6 +24,27 @@ AddResult FleetRegistry::add(const std::string& robot_id, const std::string& man
     return AddResult::Added;
 }
 
+asio::awaitable<void> FleetRegistry::restore(StartupInventory inventory) {
+    for (const auto& record : inventory.snapshot.robots()) {
+        if (stopping_) co_return;
+
+        const auto& s = record.spec();
+        auto session = std::make_shared<RobotSession>(
+            io_context_, outbox_, status_hub_, mission_hub_, database_,
+            s.robot_id(), s.manufacturer(), s.serial_number());
+
+        sessions_.emplace(s.robot_id(), session);
+
+        std::string mission;
+        auto it = inventory.occupied.find(s.robot_id());
+        if (it != inventory.occupied.end()) mission = it->second;
+
+        co_await session->start_restored(record, std::move(mission));
+    }
+
+    if (!stopping_) inventory_.emplace(std::move(inventory));
+}
+
 bool FleetRegistry::remove(const std::string& robot_id) {
     auto it = sessions_.find(robot_id);
     if (it == sessions_.end()) {
@@ -32,12 +53,16 @@ bool FleetRegistry::remove(const std::string& robot_id) {
     it->second->abort_mission("robot " + robot_id + " was removed");   // 6
     it->second->stop();
     sessions_.erase(it);
+
+    if (inventory_) inventory_->deleting.erase(robot_id);
+
     status_hub_.remove(robot_id);
     spdlog::info("[registry] robot {} removed, total {}", robot_id, sessions_.size());
     return true;
 }
 
 void FleetRegistry::stop_all() {
+    stopping_ = true;
     for (auto& [id, session] : sessions_) {
         session->stop();
     }
