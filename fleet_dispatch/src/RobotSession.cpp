@@ -132,7 +132,9 @@ asio::awaitable<void> RobotSession::watchdog() {
             spdlog::warn("[{}] no state for 60 s, robot is STALE", robot_id_);
             publish_status();   // DB-4
         }
-        if (mission_ && mission_->on_tick(std::chrono::steady_clock::now())) {
+
+        if (!checkpoint_pending_ && !cancel_preparing_ && mission_ &&
+            mission_->on_tick(std::chrono::steady_clock::now())) {
             on_mission_changed();
         }
     }
@@ -153,7 +155,17 @@ void RobotSession::handle(const VdaMessage& message) {
             fill_status(state, status_);
             check_instant_actions(state);
 
-            if (mission_ && mission_->on_state(state)) {
+            if (!checkpoint_pending_ && !cancel_preparing_ && mission_ &&
+                mission_->on_state(state)) {
+                if (mission_->status().state() == fms::v1::MISSION_STATE_CANCELED &&
+                    !state.driving) {
+                    for (const auto &action: state.instant_action_states) {
+                        if (action.action_id == cancel_id_ &&
+                            action.action_status == vda5050::ActionStatus::Finished) {
+                            stopped_after_cancel_ = true;
+                        }
+                    }
+                }
                 on_mission_changed();
             }
 
@@ -262,7 +274,7 @@ bool RobotSession::initialize_position(const fms::v1::Pose& pose, const std::str
     }).empty();
 }
 
-std::string RobotSession::send_instant_action(const std::string& action_type, std::vector<vda5050::ActionParameter> parameters){
+std::string RobotSession::send_instant_action(const std::string& action_type,std::vector<vda5050::ActionParameter> parameters, std::string id) {
     vda5050::InstantActions message;
 
     message.header.header_id = ++instant_actions_header_id_;
@@ -272,7 +284,9 @@ std::string RobotSession::send_instant_action(const std::string& action_type, st
 
     vda5050::Action action;
     action.action_type = action_type;
-    action.action_id = robot_id_ + "-" + action_type + "-" + std::to_string(next_action_number());
+    action.action_id = id.empty()
+     ? robot_id_ + "-" + action_type + "-" + std::to_string(next_action_number())
+     : std::move(id);
     action.blocking_type = vda5050::BlockingType::None;
     if (!parameters.empty()) {
         action.action_parameters = std::move(parameters);
@@ -304,20 +318,67 @@ void RobotSession::check_instant_actions(const vda5050::State& state) {
     }
 }
 
-asio::awaitable<bool> RobotSession::start_mission(const fms::v1::Mission& mission,
-                                                  fms::v1::MissionStatus& initial_status) {
+fms::database::v1::SaveMissionExecutionRequest RobotSession::checkpoint(
+    const ActiveMission& source) {
+    fms::database::v1::SaveMissionExecutionRequest request;
+    auto* e = request.mutable_execution();
+    *e->mutable_mission() = source.mission();
+    *e->mutable_status() = source.status();
+    e->set_checkpoint_version(++checkpoint_version_);
+    e->set_cancel_action_id(cancel_id_);
+    e->set_stopped_after_cancel(stopped_after_cancel_);
+    return request;
+}
+
+asio::awaitable<bool> RobotSession::persist(
+    fms::database::v1::SaveMissionExecutionRequest request) {
+    asio::steady_timer retry(io_context_);
+    for (;;) {
+        auto result = co_await database_.save_execution(request);
+        if (result.ok()) co_return true;
+
+        if (result.error_code() != grpc::StatusCode::UNAVAILABLE &&
+            result.error_code() != grpc::StatusCode::DEADLINE_EXCEEDED) {
+            spdlog::error("[{}] checkpoint {} rejected: {}", robot_id_,
+                          request.execution().checkpoint_version(), result.error_message());
+            co_return false;
+            }
+
+        retry.expires_after(std::chrono::seconds(1));
+        co_await retry.async_wait(asio::use_awaitable);
+    }
+}
+
+asio::awaitable<bool> RobotSession::start_mission(
+    const fms::v1::Mission& mission, fms::v1::MissionStatus& initial_status) {
+    checkpoint_version_ = 0;
+    cancel_id_.clear();
+    stopped_after_cancel_ = false;
+    stored_wait_.clear();
     mission_ = std::make_unique<ActiveMission>(mission, std::chrono::steady_clock::now());
-    bool sent = true;
+
+    bool sent;
     if (mission_->order_needed()) {
         saving_order_ = true;
         sent = co_await send_step_order();
         saving_order_ = false;
+    } else {
+        stored_wait_ = mission_->current_step().id();
+        checkpoint_pending_ = true;
+        sent = co_await persist(checkpoint(*mission_));
+        checkpoint_pending_ = false;
+        if (stopped_ || !mission_ || mission_->done()) {
+            if (mission_ && mission_->done()) on_mission_changed();
+            co_return false;
+        }
     }
+
     if (!sent) {
-        if (mission_ && mission_->mission_id() == mission.mission_id() && !mission_->canceling()) {
+        if (mission_ && mission_->mission_id() == mission.mission_id() &&
+            !mission_->canceling() && !cancel_preparing_ && !mission_->done()) {
             mission_->abort(fms::v1::MISSION_ERROR_CODE_INTERNAL, "order not published");
             on_mission_changed();
-        }
+            }
         co_return false;
     }
 
@@ -325,26 +386,56 @@ asio::awaitable<bool> RobotSession::start_mission(const fms::v1::Mission& missio
     status_.set_mission_id(mission.mission_id());
     publish_status();
     mission_hub_.publish(mission_->status());
-    spdlog::info("[{}] mission {} started, {} steps", robot_id_, mission.mission_id(),
-                 mission.nodes_size());
+    spdlog::info("[{}] mission {} started, {} steps", robot_id_,
+                 mission.mission_id(), mission.nodes_size());
     co_return true;
 }
 
 void RobotSession::on_mission_changed() {
+    if (checkpoint_pending_ || cancel_preparing_) return;
+
+    if (mission_->done() || (mission_->current_step().has_wait() &&
+                             stored_wait_ != mission_->current_step().id())) {
+        checkpoint_pending_ = true;
+        auto record = checkpoint(*mission_);
+        const bool final = mission_->done();
+
+        if (final && mission_->status().error().code() == fms::v1::MISSION_ERROR_CODE_TIMEOUT) {
+            send_instant_action(vda5050::action_type::kCancelOrder);
+        }
+        if (!final) stored_wait_ = mission_->current_step().id();
+
+        asio::co_spawn(io_context_,
+            [self = shared_from_this(), record = std::move(record), final]()
+                -> asio::awaitable<void> {
+                if (!(co_await self->persist(record))) co_return;
+                self->checkpoint_pending_ = false;
+                if (final) self->publish_mission_change();
+                else self->on_mission_changed();
+            }, asio::detached);
+        return;
+    }
+
     if (mission_->order_needed()) {
         if (saving_order_) return;
         saving_order_ = true;
+
         asio::co_spawn(io_context_, [self = shared_from_this()]() -> asio::awaitable<void> {
             const bool sent = co_await self->send_step_order();
             self->saving_order_ = false;
             if (!self->mission_ || self->stopped_) co_return;
-            if (!sent && self->mission_->order_needed())
+            if (!sent && !self->cancel_preparing_ && self->mission_->order_needed()) {
                 self->mission_->abort(fms::v1::MISSION_ERROR_CODE_INTERNAL, "order not published");
+            }
             self->on_mission_changed();
         }, asio::detached);
         return;
     }
 
+    publish_mission_change();
+}
+
+void RobotSession::publish_mission_change() {
     const auto& status = mission_->status();
     const auto& step = status.steps(mission_->current_index());
 
@@ -354,29 +445,43 @@ void RobotSession::on_mission_changed() {
                    std::to_string(step.move().total_nodes());
     }
     spdlog::info("[{}] mission {} {}, step {} {}{}{}", robot_id_, status.mission_id(),
-                 fms::v1::MissionState_Name(status.state()), step.node_id(), fms::v1::StepState_Name(step.state()),
-                 progress, status.has_error() ? " — " + status.error().message() : "");
+                 fms::v1::MissionState_Name(status.state()), step.node_id(),
+                 fms::v1::StepState_Name(step.state()), progress,
+                 status.has_error() ? " — " + status.error().message() : "");
 
     mission_hub_.publish(status);
-
     if (mission_->done()) {
-        if (status.has_error() && status.error().code() == fms::v1::MISSION_ERROR_CODE_TIMEOUT) {
-            send_instant_action(vda5050::action_type::kCancelOrder);
-        }
         mission_.reset();
         status_.clear_mission_id();
-        publish_status();   // DB-4
+        if (!stopped_) publish_status();
     }
 }
 
-bool RobotSession::cancel_mission() {
-    std::string action_id = send_instant_action(vda5050::action_type::kCancelOrder);
-    if (action_id.empty()) {
-        return false;
+asio::awaitable<bool> RobotSession::cancel_mission() {
+    if (cancel_preparing_ || checkpoint_pending_ || mission_->done()) co_return false;
+
+    cancel_preparing_ = true;
+    cancel_id_ = robot_id_ + "-cancelOrder-" + std::to_string(next_action_number());
+
+    auto proposed = *mission_;
+    proposed.cancel(cancel_id_, std::chrono::steady_clock::now());
+    if (!(co_await persist(checkpoint(proposed)))) co_return false;
+
+    asio::steady_timer retry(io_context_);
+    while (!stopped_ && mission_ && !mission_->done()) {
+        if (!send_instant_action(vda5050::action_type::kCancelOrder, {}, cancel_id_).empty()) {
+            mission_->cancel(cancel_id_, std::chrono::steady_clock::now());
+            cancel_preparing_ = false;
+            on_mission_changed();
+            co_return true;
+        }
+        retry.expires_after(std::chrono::seconds(1));
+        co_await retry.async_wait(asio::use_awaitable);
     }
-    mission_->cancel(action_id, std::chrono::steady_clock::now());
-    on_mission_changed();
-    return true;
+
+    cancel_preparing_ = false;
+    if (mission_ && mission_->done()) on_mission_changed();
+    co_return false;
 }
 
 void RobotSession::abort_mission(const std::string &message) {
@@ -390,7 +495,7 @@ void RobotSession::abort_mission(const std::string &message) {
 }
 
 asio::awaitable<bool> RobotSession::send_step_order() {
-    if (!mission_ || !mission_->order_needed()) co_return false;
+    if (cancel_preparing_ || !mission_ || !mission_->order_needed()) co_return false;
 
     const auto& node = mission_->current_step();
     const auto id = mission_->current_order_id();
@@ -407,16 +512,16 @@ asio::awaitable<bool> RobotSession::send_step_order() {
     co_return true;
 }
 
-asio::awaitable<bool> RobotSession::save_and_send(vda5050::Order order,
-                                                  const ActiveMission& proposed) {
+asio::awaitable<bool> RobotSession::save_and_send(vda5050::Order order, const ActiveMission& proposed) {
     order.header.header_id = ++order_header_id_;
     order.header.timestamp = vda5050::make_timestamp();
     order.header.manufacturer = manufacturer_;
     order.header.serial_number = serial_number_;
     const auto payload = nlohmann::json(order).dump();
 
-    fms::database::v1::SaveMissionExecutionRequest request;
+    auto request = checkpoint(proposed);
     auto* execution = request.mutable_execution();
+
     *execution->mutable_mission() = proposed.mission();
     *execution->mutable_status() = proposed.status();
     auto* saved = execution->mutable_order();
@@ -427,7 +532,7 @@ asio::awaitable<bool> RobotSession::save_and_send(vda5050::Order order,
 
     const auto id = proposed.mission_id();
     const auto valid = [&] {
-        return !stopped_ && mission_ && mission_->mission_id() == id &&
+        return !stopped_ && !cancel_preparing_ && mission_ && mission_->mission_id() == id &&
                !mission_->done() && !mission_->canceling() &&
                mission_->current_order_id() == order.order_id &&
                (order.order_update_id != 0 || order.nodes.front().node_id == status_.last_node_id()) &&
@@ -466,10 +571,8 @@ asio::awaitable<bool> RobotSession::save_and_send(vda5050::Order order,
 
 // Order шага уже у робота — order update; ещё нет — новая base уйдёт сразу в order.
 // Сначала отправка, потом правка: не ушло — control повторит ту же правку, и она не потеряется
-asio::awaitable<bool> RobotSession::extend_mission(std::uint32_t revision,
-                                                   std::uint32_t released_nodes,
-                                                   fms::v1::MoveProgress& progress) {
-    if (saving_order_ || !mission_->tracker()) co_return false;
+asio::awaitable<bool> RobotSession::extend_mission(std::uint32_t revision, std::uint32_t released_nodes, fms::v1::MoveProgress& progress) {
+    if (saving_order() || mission_->done() || !mission_->tracker()) co_return false;
 
     const OrderTracker* tracker = mission_->tracker();
     const std::uint32_t old_released = mission_->released_nodes();
@@ -495,6 +598,18 @@ asio::awaitable<bool> RobotSession::extend_mission(std::uint32_t revision,
                      robot_id_, mission_->mission_id(), mission_->current_step().id(),
                      update.order_id, update.order_update_id, released_nodes, move.nodes_size());
     } else {
+        auto proposed = *mission_;
+        proposed.extend(revision, released_nodes);
+
+        checkpoint_pending_ = true;
+        const bool ok = co_await persist(checkpoint(proposed));
+        checkpoint_pending_ = false;
+
+        if (mission_->done()) {
+            on_mission_changed();
+            co_return false;
+        }
+        if (!ok) co_return false;
         mission_->extend(revision, released_nodes);
     }
     progress = mission_->status().steps(mission_->current_index()).move();

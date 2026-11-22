@@ -35,7 +35,11 @@ if(FMS_BUILD_TESTS)
     find_package(nlohmann_json CONFIG REQUIRED)
     include(Catch)
 
-    add_executable(fleet_database_unit unit_tests/test_execution_order.cpp)
+    add_executable(fleet_database_unit
+            unit_tests/test_execution_order.cpp
+            unit_tests/test_execution_version.cpp
+    )
+
     target_include_directories(fleet_database_unit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_link_libraries(fleet_database_unit PRIVATE
             Catch2::Catch2WithMain

@@ -374,8 +374,10 @@ asio::awaitable<grpc::Status> DispatchService::cancel_mission(const dv1::CancelM
         co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
                                "robot " + session->robot_id() + " is " + fms::v1::ConnectionState_Name(connection)};
     }
-    if (!session->cancel_mission()) {
-        co_return grpc::Status{grpc::StatusCode::UNAVAILABLE, "mqtt queue is full, try again"};
+    auto owner = session->shared_from_this();
+    if (!(co_await owner->cancel_mission())) {
+        co_return grpc::Status{grpc::StatusCode::UNAVAILABLE,
+                               "cancellation not ready, try again"};
     }
     co_return grpc::Status::OK;
 }
@@ -396,6 +398,11 @@ asio::awaitable<grpc::Status> DispatchService::extend_mission(const dv1::ExtendM
     if (mission.canceling()) {
         co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION, "mission " + request.mission_id() + " is being canceled"};
     }
+
+    if (mission.done()) {
+        co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION, "mission has ended"};
+    }
+
     const auto& step = mission.current_step();
     if (step.id() != request.move_node_id() || !step.has_move()) {
         co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
@@ -505,6 +512,11 @@ asio::awaitable<grpc::Status> DispatchService::get_mission(const dv1::GetMission
     if (!session) {
         co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "mission " + request.mission_id() + " is not running"};
     }
+
+    if (session->checkpoint_pending()) {
+        co_return grpc::Status{grpc::StatusCode::UNAVAILABLE, "checkpoint pending"};
+    }
+
     *response.mutable_mission() = session->mission()->mission();
     *response.mutable_status() = session->mission()->status();
     co_return grpc::Status::OK;

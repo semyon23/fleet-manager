@@ -33,8 +33,14 @@ public:
 
     asio::awaitable<bool> extend_mission(std::uint32_t revision,std::uint32_t released_nodes,fms::v1::MoveProgress& progress);
 
-    bool saving_order() const { return saving_order_; }
-    bool cancel_mission();   // 5d: отправить cancelOrder; false — не ушло (очередь MQTT)
+    asio::awaitable<bool> cancel_mission();
+    bool checkpoint_pending() const {
+        return checkpoint_pending_ || cancel_preparing_;
+    }
+
+    bool saving_order() const {
+        return saving_order_ || checkpoint_pending_ || cancel_preparing_;
+    }
     void abort_mission(const std::string& message);
     // T1: ExtendMission — base текущего шага до released_nodes. false — update не ушёл (очередь MQTT),
     // правка не применена
@@ -58,9 +64,22 @@ private:
     bool send(const std::string& kind, std::string payload);
     bool request(MqttAction action, const std::string& topic, std::string payload = {});
     bool send_order(vda5050::Order& order);   // заполнить заголовок и отправить (order и order update)
-    std::string send_instant_action(const std::string& action_type, std::vector<vda5050::ActionParameter> parameters = {});
+    std::string send_instant_action(const std::string& action_type, std::vector<vda5050::ActionParameter> parameters = {}, std::string id = {});
     void check_instant_actions(const vda5050::State& state);
     void on_mission_changed();
+
+    void publish_mission_change();
+
+    fms::database::v1::SaveMissionExecutionRequest checkpoint(const ActiveMission& source);
+    asio::awaitable<bool> persist(fms::database::v1::SaveMissionExecutionRequest request);
+
+    bool checkpoint_pending_ = false;
+    bool cancel_preparing_ = false;
+    std::uint64_t checkpoint_version_ = 0;
+    std::string stored_wait_;
+    std::string cancel_id_;
+    bool stopped_after_cancel_ = false;
+
     asio::awaitable<bool> send_step_order();
     asio::awaitable<bool> save_and_send(vda5050::Order order, const ActiveMission& proposed);
     using Inbox = asio::experimental::channel<void(boost::system::error_code, VdaMessage)>;

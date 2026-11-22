@@ -151,12 +151,24 @@ message MissionExecution {
   fms.v1.Mission mission = 1;        // как пришла в AddMission — чтобы после перезапуска построить дерево заново
   fms.v1.MissionStatus status = 2;   // статусы шагов — какие шаги пропустить при восстановлении
   optional VdaOrderState order = 3;  // текущий order; нет — шаг без order'а (Wait/Notify) или миссия завершена
+  uint64 checkpoint_version = 4;
+  string cancel_action_id = 5;
+  bool stopped_after_cancel = 6;
+}
+
+message UnresolvedExecution {
+  string mission_id = 1;
+  string robot_id = 2;
+  bytes add_request = 3;
+  MissionExecution last_status = 4;
 }
 
 // Всё, что нужно dispatch после перезапуска.
 message DispatchSnapshot {
   repeated RobotRecord robots = 1;               // ACTIVE и PENDING_DELETE (удаление надо довести до конца)
   repeated MissionExecution active_missions = 2; // status.state не финальный
+  repeated UnresolvedExecution unresolved = 3;
+  repeated MissionExecution last_grants = 4;
 }
 
 message DispatchAddReceiptRequest {

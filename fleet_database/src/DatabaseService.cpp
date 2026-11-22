@@ -6,6 +6,7 @@
 #include "../include/AlarmTable.hpp"
 #include "../include/ControlCommandTable.hpp"
 #include "../include/ExecutionOrder.hpp"
+#include "ExecutionHead.hpp"
 #include "spdlog/spdlog.h"
 #include <google/protobuf/util/time_util.h>
 #include <nlohmann/json.hpp>
@@ -539,9 +540,15 @@ asio::awaitable<grpc::Status> DatabaseService::get_factsheet(const dbv1::GetFact
 }
 // ==================================================================== DispatchStorage (DB-3 и позже)
 
-asio::awaitable<grpc::Status> DatabaseService::load_dispatch_snapshot(const dbv1::LoadDispatchSnapshotRequest&,
-                                                                      dbv1::LoadDispatchSnapshotResponse&) {
-    co_return unimplemented("LoadDispatchSnapshot");
+asio::awaitable<grpc::Status> DatabaseService::load_dispatch_snapshot(const dbv1::LoadDispatchSnapshotRequest&,dbv1::LoadDispatchSnapshotResponse& response) {
+    try {
+        co_await database_.run([&](pqxx::work& tx) {
+            execution_head::load(tx, *response.mutable_snapshot());
+        });
+    } catch (const std::exception& error) {
+        co_return database_error(error);
+    }
+    co_return grpc::Status::OK;
 }
 
 asio::awaitable<grpc::Status> DatabaseService::save_robot_status(const dbv1::SaveRobotStatusRequest& request, dbv1::SaveRobotStatusResponse&) {
@@ -580,6 +587,41 @@ asio::awaitable<grpc::Status> DatabaseService::save_mission_execution(const dbv1
     const auto& mission = e.mission();
     const auto& status = e.status();
     const auto& order = e.order();
+
+    if (!e.has_order()) {
+        const auto state = status.state();
+        const bool closed = execution_head::terminal(state);
+
+        if (!e.checkpoint_version() || e.checkpoint_version() > INT64_MAX ||
+            !mission.nodes_size() || mission.mission_id().empty() || mission.robot_id().empty() ||
+            status.mission_id() != mission.mission_id() || status.robot_id() != mission.robot_id() ||
+            (!closed && state != fms::v1::MISSION_STATE_RUNNING &&
+             state != fms::v1::MISSION_STATE_CANCELING && state != fms::v1::MISSION_STATE_PAUSED) ||
+            (state == fms::v1::MISSION_STATE_CANCELING && e.cancel_action_id().empty()) ||
+            (closed != status.current_node_id().empty())) {
+            co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT,
+                                   "invalid dispatch checkpoint"};
+            }
+
+        const auto wire = e.SerializeAsString();
+        std::string hex;
+        boost::algorithm::hex(wire.begin(), wire.end(), std::back_inserter(hex));
+
+        try {
+            co_await database_.run([&](pqxx::work& tx) {
+                execution_head::save(tx, e, hex);
+            });
+        } catch (const grpc::Status& error) {
+            co_return error;
+        } catch (const std::exception& error) {
+            co_return database_error(error);
+        }
+        co_return grpc::Status::OK;
+    }
+
+    if (e.checkpoint_version() > INT64_MAX) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "version overflow"};
+    }
 
     if (!e.has_order() || mission.mission_id().empty() || mission.robot_id().empty() ||
         status.mission_id() != mission.mission_id() || status.robot_id() != mission.robot_id() ||
@@ -635,6 +677,7 @@ asio::awaitable<grpc::Status> DatabaseService::save_mission_execution(const dbv1
                              mission.robot_id(), static_cast<long long>(released), encoded,
                              order.sent_order_json()});
             if (!inserted.empty()) {
+                execution_head::save(tx, e, encoded);
                 matches = true;
                 return;
             }
@@ -652,6 +695,8 @@ asio::awaitable<grpc::Status> DatabaseService::save_mission_execution(const dbv1
                     google::protobuf::util::MessageDifferencer::Equals(existing, e);
             }
         });
+    } catch (const grpc::Status& error) {
+        co_return error;
     } catch (const std::exception& error) {
         co_return database_error(error);
     }

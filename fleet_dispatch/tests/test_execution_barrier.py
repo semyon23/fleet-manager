@@ -66,22 +66,35 @@ def block_writes(sql):
     with psycopg.connect(os.environ["DATABASE_URL"], connect_timeout=5) as holder:
         holder.execute("SET LOCAL lock_timeout = '5s'")
         holder.execute("SET LOCAL idle_in_transaction_session_timeout = '45s'")
-        holder.execute("LOCK TABLE dispatch_execution_orders IN ACCESS EXCLUSIVE MODE")
+        holder.execute("LOCK TABLE dispatch_execution_orders IN SHARE MODE")
         pid = holder.info.backend_pid
 
-        def wait_for_writer():
+        def wait_for_writer(call, mid):
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 blocked = sql.execute(
                     "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE NOT granted "
+                    "AND database = (SELECT oid FROM pg_database WHERE datname=current_database()) "
                     "AND relation = 'dispatch_execution_orders'::regclass "
                     "AND mode = 'RowExclusiveLock' AND %s = ANY(pg_blocking_pids(pid)))",
                     (pid,),
                 ).fetchone()[0]
                 if blocked:
                     return
+                if call.done() and call.code() != grpc.StatusCode.OK:
+                    pytest.fail(f"{mid}: dispatch returned {call.code()}: {call.details()}")
                 time.sleep(0.05)
-            pytest.fail("fleet_database did not attempt the execution write in this database")
+            database, claimed = sql.execute(
+                "SELECT current_database(), EXISTS(SELECT 1 FROM dispatch_add_receipts "
+                "WHERE mission_id=%s)", (mid,),
+            ).fetchone()
+            waiters = sql.execute(
+                "SELECT l.pid,l.mode,l.relation::regclass::text FROM pg_locks l "
+                "WHERE NOT l.granted AND %s=ANY(pg_blocking_pids(l.pid))", (pid,),
+            ).fetchall()
+            outcome = str(call.code()) if call.done() else "pending"
+            pytest.fail(f"{mid}: no blocked order write; db={database}, claim={claimed}, "
+                        f"dispatch={outcome}, blocked_by_test={waiters}")
 
         yield wait_for_writer
 
@@ -129,7 +142,7 @@ def test_execution_commits_before_mqtt(sql, orders, robot, case):
             ), timeout=30)
         else:
             call = robot.dispatch.AddMission.future(dispatch.AddMissionRequest(mission=mission), timeout=30)
-        wait_for_writer()
+        wait_for_writer(call, mid)
         # Longer than DatabaseWriter's three-second RPC deadline. The retry must
         # reuse the same snapshot even if the first transaction eventually commits.
         with pytest.raises(queue.Empty):
@@ -179,10 +192,63 @@ def test_cancel_during_write_suppresses_order(sql, orders, robot):
     robot.missions.append(mid)
     with block_writes(sql) as wait_for_writer:
         call = robot.dispatch.AddMission.future(dispatch.AddMissionRequest(mission=mission), timeout=25)
-        wait_for_writer()
-        robot.dispatch.CancelMission(dispatch.CancelMissionRequest(mission_id=mid), timeout=5)
+        wait_for_writer(call, mid)
+        cancel = robot.dispatch.CancelMission.future(dispatch.CancelMissionRequest(mission_id=mid), timeout=25)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                robot.dispatch.GetMission(dispatch.GetMissionRequest(mission_id=mid), timeout=1)
+            except grpc.RpcError as error:
+                if error.code() == grpc.StatusCode.UNAVAILABLE and error.details() == "checkpoint pending":
+                    break
+                raise
+            time.sleep(0.05)
+        else:
+            pytest.fail("dispatch did not start the cancellation checkpoint")
+    cancel.result(timeout=15)
     with pytest.raises(grpc.RpcError) as error:
         call.result(timeout=10)
     assert error.value.code() == grpc.StatusCode.UNAVAILABLE
     with pytest.raises(queue.Empty):
         observe(orders, mid + "-s1", 0, 3)
+
+
+def test_snapshot_tracks_wait_order_and_completion(sql, robot):
+    mid = new_id("head-live")
+    move = move_mission(mid, robot.robot_id, [node(ORIGIN, 0), node("a", 2)])
+    mission = mission_of(mid, robot.robot_id, [step_wait("wait", 4), move.nodes[0]])
+    stream = robot.mission_updates()
+    robot.add_mission(mission)
+    with grpc.insecure_channel(robot.settings.database_address) as channel:
+        storage = dbgrpc.DispatchStorageStub(channel)
+        def load():
+            return storage.LoadDispatchSnapshot(db.LoadDispatchSnapshotRequest(), timeout=5).snapshot
+        wait, = (e for e in load().active_missions if e.mission.mission_id == mid)
+        assert wait.status.current_node_id == "wait" and not wait.HasField("order")
+        result = stream.wait(mission_status(mid, is_final), 30, what="completed mission").status
+        assert result.state == fms.MISSION_STATE_COMPLETED
+        assert snapshot(sql, mid, mid + "-s1", 0).checkpoint_version > wait.checkpoint_version
+        snap = load()
+        assert all(e.mission.mission_id != mid for e in snap.active_missions)
+        assert all(e.mission_id != mid for e in snap.unresolved)
+
+
+def test_extension_becomes_current_grant(sql, robot):
+    mid = new_id("head-extend")
+    robot.add_mission(move_mission(mid, robot.robot_id, [
+        node(ORIGIN, 0), node("a", 2), node("b", 4), node("c", 6)
+    ], released_nodes=2))
+    robot.dispatch.ExtendMission(dispatch.ExtendMissionRequest(
+        mission_id=mid, move_node_id="s1", revision=1, released_nodes=3,
+    ), timeout=10)
+    previous = snapshot(sql, mid, mid + "-s1", 0)
+    with grpc.insecure_channel(robot.settings.database_address) as channel:
+        storage = dbgrpc.DispatchStorageStub(channel)
+        storage.SaveMissionExecution(db.SaveMissionExecutionRequest(execution=previous), timeout=5)
+        state = storage.LoadDispatchSnapshot(db.LoadDispatchSnapshotRequest(), timeout=5).snapshot
+        current, = (e for e in state.active_missions if e.mission.mission_id == mid)
+        grant, = (e for e in state.last_grants if e.mission.mission_id == mid)
+        assert current == grant
+        assert current.order.order_update_id == 1
+        assert current.status.steps[0].move.released_nodes == 3
+        assert current.checkpoint_version > previous.checkpoint_version
