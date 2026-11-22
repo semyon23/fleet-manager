@@ -1,165 +1,41 @@
 <p align="center">
-  <img src="docs/banner.svg" alt="fleet_control — brain of the fms: runs the fleet, assigns missions, plans routes" width="100%">
+  <img src="docs/banner.svg" alt="COMPASS Fleet Manager Server — Fleet control" width="100%">
 </p>
 
-# fleet_control
+# Fleet control · `fleet_control`
 
-**The brain of the fms: it runs the fleet.**
+Assigns missions to available robots and reserves the nodes and lanes they need. A robot waits when another robot holds the next section of its route. Operators use this service to create or cancel missions and see how far each robot is allowed to travel.
 
-fleet_control decides what every robot does. It keeps the fleet — which robots exist, which of them can work — takes missions from people and systems, picks a robot for each mission, plans its route on the map graph and keeps robots out of each other's way by reserving the nodes ahead of them. fleet_dispatch then turns these decisions into VDA 5050 orders for the robots.
+## Build
 
-It is also the entry point for actions: the web UI registers, changes, pauses and deletes robots through fleet_control, and later creates missions. fleet_control stores what must be kept in fleet_database and gives commands to fleet_dispatch; it never talks to robots or to PostgreSQL itself — only to the other services, over gRPC.
-
-| Responsibility | Status |
-|---|---|
-| Robots: register, change, delete, pause; whether a robot can work (`availability`) | in progress |
-| Missions: queue, priorities, status for the UI | planned |
-| Task allocation: which robot takes which mission | planned |
-| Routes on the map graph | planned |
-| Traffic: node reservations, no deadlocks | planned |
-
-> **Work in progress.** Health and robots work: register, change, delete, pause. The robots in fleet_dispatch follow the database, also after restarts, and every robot has its `availability`. Next: missions, task allocation, routes and traffic.
-
-## How it works
-
-```mermaid
-flowchart LR
-    ui[web UI] -->|"REST: actions"| api
-    ui -.->|"REST: GET, read-only"| database
-
-    subgraph control [fleet_control]
-        api[RobotApi · HealthApi<br/>REST handlers]
-        services[Services<br/>gRPC clients]
-        api --> services
-    end
-
-    services -- gRPC --> database[fleet_database]
-    services -- gRPC --> dispatch[fleet_dispatch]
-    dispatch -- MQTT --> robots[robots]
-```
-
-**Who answers what.** By the UI contract (`docs/API_CONTRACT.md` in the UI repository) a gateway in front of the fms routes `GET /api/fms/*` to fleet_database (read-only) and every action — `POST`, `PATCH`, `DELETE` — to fleet_control. So fleet_control has no `GET` for robots: the UI reads them from the database, where fleet_dispatch keeps their status up to date.
-
-| Part | Responsibility |
-|---|---|
-| `HttpServer`, `ApiRouter` | HTTP server and route table (shared with fleet_database, from `shared/`) |
-| `RobotApi` | robots: check the request, change them in fleet_database (`CreateRobot`, `UpdateRobot`, soft delete) and in fleet_dispatch (`AddRobot`, `RemoveRobot`, pause); answers in the contract format |
-| `AvailabilityTracker`, `availability_of` | whether each robot can work and why not: recomputed when its status (stream of dispatch), its lifecycle or the connection to dispatch changes; only changes are written to fleet_database |
-| `FleetSync` | keeps fleet_dispatch in line with the database: watches the robot status stream of dispatch, and right after connecting and then every 10 s adds robots dispatch does not know and finishes interrupted deletions |
-| `HealthApi` | `GET /api/health`: control itself and whether fleet_database and fleet_dispatch are serving |
-| `Services` | gRPC clients: one channel per service, stubs, `call<…>()` — one unary call with a 3 s deadline |
-
-Everything runs on **one thread**: `agrpc::run` drives the gRPC client context and the Asio context of the HTTP server, so there are no mutexes. fleet_control has no gRPC server of its own — nobody calls it over gRPC.
-
-**fleet_database is the source of truth.** A robot is registered as soon as it is in the database. If fleet_dispatch is down at that moment, the registration still succeeds (201) and `FleetSync` adds the robot to dispatch as soon as dispatch is back. Deletion works the same way: once the robot is marked `PENDING_DELETE` the deletion is accepted (202); if dispatch does not answer, the robot stays `PENDING_DELETE` until a repeated `DELETE` or `FleetSync` finishes it. After a restart of fleet_dispatch, `FleetSync` adds all robots of the database to it again — within seconds, nobody has to register them again. Robots that dispatch knows but the database does not (added to dispatch directly, e.g. by its tests) are left alone.
-
-## Availability
-
-Whether a robot can take work (UI contract, section 5.1). The first rule that matches sets the state:
-
-| # | Condition | `state` | `reasons` |
-|---|---|---|---|
-| 1 | the robot is being deleted | `DELETING` | |
-| 2 | fleet_control has no connection to fleet_dispatch | `OFFLINE` | `DISPATCH_UNAVAILABLE` |
-| 3 | no status yet, or `connection` is not `ONLINE` | `OFFLINE` | `NO_CONNECTION` |
-| 4 | an error of level `CRITICAL` / `FATAL`, or an emergency stop | `ERROR` | `FATAL_ERROR`, `EMERGENCY_STOP` |
-| 5 | paused | `PAUSED` | |
-| 6 | has a mission | `BUSY` | |
-| 7 | any of: no factsheet, starting up or not in automatic mode, not localized, not on a graph node, low battery and not charging | `NOT_READY` | all that apply: `NO_FACTSHEET`, `STARTUP`, `MODE_NOT_AUTOMATIC`, `NOT_LOCALIZED`, `NOT_ON_GRAPH`, `LOW_BATTERY` |
-| 8 | charging | `CHARGING` | |
-| 9 | otherwise | `IDLE` | |
-
-`SEMIAUTOMATIC` counts as automatic: in VDA 5050 the robot then still follows orders, only the speed is set by an operator. `NOT_ON_GRAPH` only checks that the robot has a last node; with maps it will check the graph itself. `UNKNOWN_MAP` and `MISSING_ACTIONS` come with maps.
-
-## REST API
-
-Format and errors — the UI contract: `camelCase`, enums without prefixes, time in ISO 8601 UTC with milliseconds; errors `{"code": "INVALID_INPUT", "message": "...", "details": {"field": "why"}}`.
-
-| Path | What it does | Status |
-|---|---|---|
-| `GET /api/health` | `{"status": "OK" \| "DEGRADED", "services": {"control", "database", "dispatch"}}` | ✅ |
-| `POST /api/fms/robots` | register: `{id, manufacturer, serialNumber, name?, labels?}` → 201 `Robot` | ✅ |
-| `PATCH /api/fms/robots/{id}` | change `name` and `labels`; `id`, `manufacturer`, `serialNumber` cannot change | ✅ |
-| `DELETE /api/fms/robots/{id}` | soft delete → 202; 409 `ROBOT_BUSY` while it has a mission, `?force=true` cancels it | ✅ |
-| `POST /api/fms/robots/{id}/pause`, `/resume` | VDA `startPause` / `stopPause` → 202 | ✅ |
-| missions, maps, alarms | | planned |
-
-| Error | When |
-|---|---|
-| 400 `INVALID_INPUT` | body is not a JSON object or fields are wrong; all wrong fields at once in `details` |
-| 404 `NOT_FOUND` | no such robot |
-| 409 `ALREADY_EXISTS` | `id` is taken, or the pair `manufacturer + serialNumber` is already registered |
-| 409 `ROBOT_BUSY` | `DELETE` while the robot has a mission (without `?force=true`) |
-| 503 `UNAVAILABLE` | fleet_database or fleet_dispatch does not answer — retry later |
-
-There is no authentication in the service: the gateway checks the JWT. Do not expose the HTTP port directly.
-
-## Configuration
-
-Environment variables, with defaults for development:
-
-| Variable | Default | What |
-|---|---|---|
-| `HTTP_ADDRESS` | `0.0.0.0:8003` | REST listen address |
-| `DATABASE_ADDRESS` | `127.0.0.1:5002` | gRPC of fleet_database |
-| `DISPATCH_ADDRESS` | `127.0.0.1:5001` | gRPC of fleet_dispatch |
-| `LOW_BATTERY_PERCENT` | `15` | below this, a robot that is not charging is `NOT_READY` (`LOW_BATTERY`) |
-
-fleet_control starts even when the other services are not running yet; gRPC connects to them on the first call and reconnects after they restart.
-
-## Building and running
-
-From the repository root (see the [main README](../README.md#building)):
+Run the commands from the repository root. For the first build, set `VCPKG_ROOT` to your vcpkg installation and configure the build directory:
 
 ```bash
-cmake --build build --target fleet_control -j
+cmake -S . -B cmake-build-debug -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
 ```
+
+Once configured, build the service:
 
 ```bash
-./build/fleet_control/fleet_control
+cmake --build cmake-build-debug --target fleet_control -j 4
 ```
 
-For real work start [fleet_database](../fleet_database/README.md) and [fleet_dispatch](../fleet_dispatch/README.md) too. Stop with Ctrl+C.
+## Run
 
-### Check it
+Start [fleet_database](../fleet_database/README.md) and [fleet_dispatch](../fleet_dispatch/README.md), then launch fleet_control in a separate terminal:
 
 ```bash
-curl -s -w '\n' http://localhost:8003/api/health
+DATABASE_ADDRESS=127.0.0.1:5002 DISPATCH_ADDRESS=127.0.0.1:5001 \
+  ./cmake-build-debug/fleet_control/fleet_control
 ```
 
-```json
-{"services":{"control":"OK","database":"OK","dispatch":"OK"},"status":"OK"}
-```
-
-Register a robot of the [simulator](../robot_simulation/README.md) and watch its status appear in the database:
+Check the connections from another terminal:
 
 ```bash
-curl -s -w '\n' -X POST http://localhost:8003/api/fms/robots -H "Content-Type: application/json" -d '{"id":"amr-01","manufacturer":"ktc","serialNumber":"amr1","name":"AMR 01"}'
+curl -sS http://127.0.0.1:8003/api/health
 ```
 
-```bash
-curl -s -w '\n' http://localhost:8002/api/fms/robots/amr-01
-```
+A healthy service returns `"status":"OK"`. If the status is `DEGRADED`, the `services` field shows which connection needs attention.
 
-Automated tests: [`tests/`](tests) (pytest, instead of the UI).
-
-## Layout
-
-The service is one process split into modules; each module is a folder, and an include names its module: `#include "fleet/FleetSync.hpp"`. Modules talk through narrow interfaces and run on one thread.
-
-```
-fleet_control/
-├── fc_main.cpp                configuration, start and shutdown order
-├── api/                       REST only: transport and input checks, no logic
-│   ├── HealthApi              GET /api/health
-│   └── RobotApi               robots: POST, PATCH, DELETE, pause, resume
-├── fleet/                     the robots of the fleet
-│   ├── FleetSync              robots in dispatch = robots in the database
-│   ├── AvailabilityTracker    availability of every robot, written on change
-│   └── Availability           availability_of(): status → state + reasons
-├── services/                  gRPC clients of fleet_database and fleet_dispatch
-├── docs/                      banner
-└── tests/                     pytest: REST of control, checked in the database and dispatch
-```
-
-Planned modules: `missions/`, `allocation/`, `routing/`, `traffic/`, `maps/`, `energy/` (charging, parking, hibernation).
+To run all four services together, see the [test stand guide](../deploy/README.md).

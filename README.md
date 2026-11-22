@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/banner.svg" alt="Fleet Manager — fleet management system for VDA 5050 v3 mobile robots" width="100%">
+  <img src="docs/banner.svg" alt="COMPASS Fleet Manager Server — AMR and AGV fleet control" width="100%">
 </p>
 
-# Fleet Manager
+# COMPASS Fleet Manager Server
 
 **fms: a fleet management system for mobile robots that speak [VDA 5050 v3](https://github.com/VDA5050/VDA5050).**
 
