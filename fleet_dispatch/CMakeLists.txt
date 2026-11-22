@@ -18,6 +18,7 @@ add_executable(fleet_dispatch fd_main.cpp
         src/ActiveMission.cpp
         src/MissionStatusHub.cpp
         src/DatabaseWriter.cpp
+        src/MoveRecovery.cpp
 )
 
 target_link_libraries(fleet_dispatch
@@ -36,3 +37,21 @@ target_link_libraries(fleet_dispatch
 
 target_include_directories(fleet_dispatch PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(fleet_dispatch PRIVATE Boost::headers)
+
+if(FMS_BUILD_TESTS)
+    find_package(Catch2 3 CONFIG REQUIRED)
+    include(Catch)
+
+    add_executable(fleet_dispatch_unit
+            unit_tests/test_move_recovery.cpp
+            src/MoveRecovery.cpp
+            src/OrderBuilder.cpp
+    )
+    target_link_libraries(fleet_dispatch_unit PRIVATE
+            Catch2::Catch2WithMain
+            proto_lib
+            vda5050
+            nlohmann_json::nlohmann_json
+    )
+    catch_discover_tests(fleet_dispatch_unit)
+endif()
