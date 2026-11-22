@@ -137,3 +137,14 @@ asio::awaitable<grpc::Status> DatabaseWriter::dispatch_add_receipt(
     co_return co_await RPC::request(grpc_context_, *stub_, context,
                                     request, response, asio::use_awaitable);
 }
+
+asio::awaitable<grpc::Status> DatabaseWriter::save_execution(
+    const dbv1::SaveMissionExecutionRequest& request) {
+    using RPC = agrpc::ClientRPC<&dbv1::DispatchStorage::Stub::PrepareAsyncSaveMissionExecution>;
+
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + kTimeout);
+    dbv1::SaveMissionExecutionResponse response;
+    co_return co_await RPC::request(grpc_context_, *stub_, context, request, response,
+                                    asio::use_awaitable);
+}

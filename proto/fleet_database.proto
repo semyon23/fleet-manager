@@ -137,9 +137,9 @@ message VdaOrderState {
   uint64 order_update_id = 2;
   string mission_node_id = 3;   // какой шаг миссии породил order (MissionNode.id)
   // Робот прислал в state этот order_id + order_update_id (принял). false — отправлен, но не подтверждён:
-  // после перезапуска dispatch отправит sent_order_json повторно.
+  // true только после подтверждения роботом. Запись до MQTT оставляет false.
   bool confirmed = 4;
-  // Последний отправленный order целиком (VDA JSON): для повторной отправки и разбора проблем.
+  // Точный подготовленный MQTT payload. Сама запись не доказывает отправку.
   string sent_order_json = 5;
   google.protobuf.Timestamp sent_at = 6;
 }

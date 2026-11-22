@@ -304,24 +304,45 @@ void RobotSession::check_instant_actions(const vda5050::State& state) {
     }
 }
 
-// 5c: построить order шага, отправить и начать следить
-bool RobotSession::start_mission(const fms::v1::Mission& mission) {
+asio::awaitable<bool> RobotSession::start_mission(const fms::v1::Mission& mission,
+                                                  fms::v1::MissionStatus& initial_status) {
     mission_ = std::make_unique<ActiveMission>(mission, std::chrono::steady_clock::now());
-    if (mission_->order_needed() && !send_step_order()) {
-        mission_.reset();   // order не ушёл — миссию не начинаем
-        return false;
+    bool sent = true;
+    if (mission_->order_needed()) {
+        saving_order_ = true;
+        sent = co_await send_step_order();
+        saving_order_ = false;
     }
+    if (!sent) {
+        if (mission_ && mission_->mission_id() == mission.mission_id() && !mission_->canceling()) {
+            mission_->abort(fms::v1::MISSION_ERROR_CODE_INTERNAL, "order not published");
+            on_mission_changed();
+        }
+        co_return false;
+    }
+
+    initial_status = mission_->status();
     status_.set_mission_id(mission.mission_id());
-    publish_status();   // DB-4
+    publish_status();
     mission_hub_.publish(mission_->status());
-    spdlog::info("[{}] mission {} started, {} steps", robot_id_, mission.mission_id(), mission.nodes_size());
-    return true;
+    spdlog::info("[{}] mission {} started, {} steps", robot_id_, mission.mission_id(),
+                 mission.nodes_size());
+    co_return true;
 }
 
 void RobotSession::on_mission_changed() {
-    // 7: следующий шаг или повтор ждёт order
-    if (mission_->order_needed() && !send_step_order()) {
-        mission_->abort(fms::v1::MISSION_ERROR_CODE_INTERNAL, "mqtt queue is full, order not sent");
+    if (mission_->order_needed()) {
+        if (saving_order_) return;
+        saving_order_ = true;
+        asio::co_spawn(io_context_, [self = shared_from_this()]() -> asio::awaitable<void> {
+            const bool sent = co_await self->send_step_order();
+            self->saving_order_ = false;
+            if (!self->mission_ || self->stopped_) co_return;
+            if (!sent && self->mission_->order_needed())
+                self->mission_->abort(fms::v1::MISSION_ERROR_CODE_INTERNAL, "order not published");
+            self->on_mission_changed();
+        }, asio::detached);
+        return;
     }
 
     const auto& status = mission_->status();
@@ -368,50 +389,115 @@ void RobotSession::abort_mission(const std::string &message) {
     on_mission_changed();
 }
 
-bool RobotSession::send_step_order() {
-    const auto& node = mission_->current_step();
-    std::string order_id = mission_->current_order_id();
+asio::awaitable<bool> RobotSession::send_step_order() {
+    if (!mission_ || !mission_->order_needed()) co_return false;
 
-    vda5050::Order order = node.has_move() ? build_move_order(order_id, node.move())
-                                           : build_action_order(order_id, node.action(), status_);
-    if (!send_order(order)) {
-        return false;
-    }
+    const auto& node = mission_->current_step();
+    const auto id = mission_->current_order_id();
+    auto order = node.has_move() ? build_move_order(id, node.move())
+                                 : build_action_order(id, node.action(), status_);
+
+    auto proposed = *mission_;
+    proposed.order_sent(order, std::chrono::steady_clock::now());
+    if (!(co_await save_and_send(order, proposed))) co_return false;
+
     mission_->order_sent(order, std::chrono::steady_clock::now());
-    spdlog::info("[{}] mission {}: step {} order {} sent, {} nodes", robot_id_, mission_->mission_id(), node.id(),
-                 order_id, order.nodes.size());
-    return true;
+    spdlog::info("[{}] mission {}: step {} order {} queued", robot_id_, mission_->mission_id(),
+                 mission_->current_step().id(), id);
+    co_return true;
 }
 
-bool RobotSession::send_order(vda5050::Order& order) {
+asio::awaitable<bool> RobotSession::save_and_send(vda5050::Order order,
+                                                  const ActiveMission& proposed) {
     order.header.header_id = ++order_header_id_;
     order.header.timestamp = vda5050::make_timestamp();
     order.header.manufacturer = manufacturer_;
     order.header.serial_number = serial_number_;
-    return send("order", nlohmann::json(order).dump());
+    const auto payload = nlohmann::json(order).dump();
+
+    fms::database::v1::SaveMissionExecutionRequest request;
+    auto* execution = request.mutable_execution();
+    *execution->mutable_mission() = proposed.mission();
+    *execution->mutable_status() = proposed.status();
+    auto* saved = execution->mutable_order();
+    saved->set_order_id(order.order_id);
+    saved->set_order_update_id(order.order_update_id);
+    saved->set_mission_node_id(proposed.current_step().id());
+    saved->set_sent_order_json(payload);
+
+    const auto id = proposed.mission_id();
+    const auto valid = [&] {
+        return !stopped_ && mission_ && mission_->mission_id() == id &&
+               !mission_->done() && !mission_->canceling() &&
+               mission_->current_order_id() == order.order_id &&
+               (order.order_update_id != 0 || order.nodes.front().node_id == status_.last_node_id()) &&
+               status_.connection() == fms::v1::CONNECTION_STATE_ONLINE;
+    };
+
+    try {
+        asio::steady_timer retry(io_context_);
+        while (valid()) {
+            auto result = co_await database_.save_execution(request);
+            if (!valid()) co_return false;
+
+            if (result.ok()) {
+                while (valid()) {
+                    if (send("order", payload)) co_return true;
+                    retry.expires_after(std::chrono::seconds(1));
+                    co_await retry.async_wait(asio::use_awaitable);
+                }
+                co_return false;
+            }
+
+            if (result.error_code() != grpc::StatusCode::UNAVAILABLE &&
+                result.error_code() != grpc::StatusCode::DEADLINE_EXCEEDED) {
+                spdlog::error("[{}] execution snapshot rejected: {}", robot_id_, result.error_message());
+                co_return false;
+            }
+
+            retry.expires_after(std::chrono::seconds(1));
+            co_await retry.async_wait(asio::as_tuple(asio::use_awaitable));
+        }
+    } catch (const std::exception& error) {
+        spdlog::error("[{}] execution write for {} failed: {}", robot_id_, order.order_id, error.what());
+    }
+    co_return false;
 }
 
 // Order шага уже у робота — order update; ещё нет — новая base уйдёт сразу в order.
 // Сначала отправка, потом правка: не ушло — control повторит ту же правку, и она не потеряется
-bool RobotSession::extend_mission(std::uint32_t revision, std::uint32_t released_nodes) {
+asio::awaitable<bool> RobotSession::extend_mission(std::uint32_t revision,
+                                                   std::uint32_t released_nodes,
+                                                   fms::v1::MoveProgress& progress) {
+    if (saving_order_ || !mission_->tracker()) co_return false;
+
     const OrderTracker* tracker = mission_->tracker();
     const std::uint32_t old_released = mission_->released_nodes();
-    if (tracker && released_nodes > old_released) {
+    if (released_nodes > old_released) {
         fms::v1::MoveStep move = mission_->current_step().move();
         move.set_released_nodes(released_nodes);
-        vda5050::Order update = build_move_update(tracker->order_id(), tracker->sent_update_id() + 1, move,
-                                                  static_cast<int>(old_released));
-        if (!send_order(update)) {
-            return false;
+        auto update = build_move_update(tracker->order_id(), tracker->sent_update_id() + 1,
+                                        move, static_cast<int>(old_released));
+
+        auto proposed = *mission_;
+        proposed.extend(revision, released_nodes);
+        saving_order_ = true;
+        const bool sent = co_await save_and_send(update, proposed);
+        saving_order_ = false;
+        if (!sent) {
+            if (mission_ && mission_->order_needed()) on_mission_changed();
+            co_return false;
         }
+
         mission_->extend(revision, released_nodes);
         mission_->update_sent(update);
-        spdlog::info("[{}] mission {}: step {} order {} update {} sent, released {}/{} nodes", robot_id_,
-                     mission_->mission_id(), mission_->current_step().id(), update.order_id, update.order_update_id,
-                     released_nodes, move.nodes_size());
+        spdlog::info("[{}] mission {}: step {} order {} update {} sent, released {}/{} nodes",
+                     robot_id_, mission_->mission_id(), mission_->current_step().id(),
+                     update.order_id, update.order_update_id, released_nodes, move.nodes_size());
     } else {
         mission_->extend(revision, released_nodes);
     }
+    progress = mission_->status().steps(mission_->current_index()).move();
     mission_hub_.publish(mission_->status());
-    return true;
+    co_return true;
 }

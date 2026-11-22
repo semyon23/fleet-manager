@@ -276,8 +276,10 @@ asio::awaitable<grpc::Status> DispatchService::add_mission(
         co_return grpc::Status{grpc::StatusCode::UNAVAILABLE,
                                "robot changed after dispatch claim: " + status.error_message()};
     }
-    if (!session->start_mission(mission)) {
-        co_return grpc::Status{grpc::StatusCode::UNAVAILABLE, "dispatch claim exists, order was not queued"};
+    auto owner = session->shared_from_this();
+    if (!(co_await owner->start_mission(mission, *response.mutable_status()))) {
+        co_return grpc::Status{grpc::StatusCode::UNAVAILABLE,
+                               "dispatch claim exists, order was not queued"};
     }
 
     *response.mutable_status() = session->mission()->status();
@@ -307,6 +309,10 @@ grpc::Status DispatchService::validate_add(const fms::v1::Mission& mission, Robo
         }
         return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
                                "robot " + mission.robot_id() + " is busy with mission " + active->mission_id()};
+    }
+
+    if (session->saving_order()) {
+        return grpc::Status{grpc::StatusCode::UNAVAILABLE, "previous order write still pending"};
     }
 
     if (mission.nodes().empty()) {
@@ -430,10 +436,10 @@ asio::awaitable<grpc::Status> DispatchService::extend_mission(const dv1::ExtendM
                                "robot " + session->robot_id() + " is " + fms::v1::ConnectionState_Name(connection)};
     }
 
-    if (!session->extend_mission(request.revision(), wanted)) {
-        co_return grpc::Status{grpc::StatusCode::UNAVAILABLE, "mqtt queue is full, try again"};
+    auto owner = session->shared_from_this();
+    if (!(co_await owner->extend_mission(request.revision(), wanted, *response.mutable_progress()))) {
+        co_return grpc::Status{grpc::StatusCode::UNAVAILABLE, "order update was not queued"};
     }
-    *response.mutable_progress() = session->mission()->status().steps(session->mission()->current_index()).move();
     co_return grpc::Status::OK;
 }
 

@@ -5,11 +5,15 @@
 #include "../include/EventTable.hpp"
 #include "../include/AlarmTable.hpp"
 #include "../include/ControlCommandTable.hpp"
+#include "../include/ExecutionOrder.hpp"
 #include "spdlog/spdlog.h"
 #include <google/protobuf/util/time_util.h>
 #include <nlohmann/json.hpp>
 #include <boost/algorithm/hex.hpp>
 #include <iterator>
+#include <algorithm>
+#include <cstdint>
+#include <google/protobuf/util/message_differencer.h>
 using Registry = dbv1::RobotRegistry::AsyncService;
 using Storage = dbv1::DispatchStorage::AsyncService;
 
@@ -571,9 +575,91 @@ asio::awaitable<grpc::Status> DatabaseService::save_factsheet(const dbv1::SaveFa
     co_return grpc::Status::OK;
 }
 
-asio::awaitable<grpc::Status> DatabaseService::save_mission_execution(const dbv1::SaveMissionExecutionRequest&,
-                                                                      dbv1::SaveMissionExecutionResponse&) {
-    co_return unimplemented("SaveMissionExecution");
+asio::awaitable<grpc::Status> DatabaseService::save_mission_execution(const dbv1::SaveMissionExecutionRequest& request, dbv1::SaveMissionExecutionResponse&) {
+    const auto& e = request.execution();
+    const auto& mission = e.mission();
+    const auto& status = e.status();
+    const auto& order = e.order();
+
+    if (!e.has_order() || mission.mission_id().empty() || mission.robot_id().empty() ||
+        status.mission_id() != mission.mission_id() || status.robot_id() != mission.robot_id() ||
+        order.mission_node_id().empty() || status.current_node_id() != order.mission_node_id() ||
+        order.order_id().empty() || order.order_update_id() > UINT32_MAX ||
+        order.confirmed() || order.has_sent_at()) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "invalid execution order identity"};
+    }
+
+    auto step = std::find_if(mission.nodes().begin(), mission.nodes().end(),
+        [&](const auto& n) { return n.id() == order.mission_node_id(); });
+    if (step == mission.nodes().end() || (!step->has_move() && !step->has_action())) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "unknown execution step"};
+    }
+
+    const auto released = step->has_move()
+        ? (step->move().has_released_nodes() ? step->move().released_nodes()
+                                             : static_cast<unsigned>(step->move().nodes_size()))
+        : 1u;
+
+    try {
+        const auto doc = nlohmann::json::parse(order.sent_order_json());
+        if (doc.at("orderId") != order.order_id() ||
+            doc.at("orderUpdateId") != order.order_update_id() ||
+            !execution_order::matches_route(doc, *step, released, order.order_update_id())) {
+            co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "inconsistent execution order"};
+        }
+        const auto index = static_cast<int>(step - mission.nodes().begin());
+        if (index >= status.steps_size() || status.steps(index).node_id() != step->id() ||
+            (step->has_move() &&
+             (status.steps(index).move().released_nodes() != released ||
+              status.steps(index).move().total_nodes() != static_cast<unsigned>(step->move().nodes_size())))) {
+            co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "inconsistent step progress"};
+        }
+    } catch (const nlohmann::json::exception& error) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, error.what()};
+    }
+
+    const auto bytes = e.SerializeAsString();
+    std::string encoded;
+    boost::algorithm::hex(bytes.begin(), bytes.end(), std::back_inserter(encoded));
+    bool matches = false;
+
+    try {
+        co_await database_.run([&](pqxx::work& tx) {
+            const auto key = static_cast<long long>(order.order_update_id());
+            const auto inserted = tx.exec(
+                "INSERT INTO dispatch_execution_orders "
+                "(mission_id,step_id,order_id,update_id,robot_id,released_nodes,execution,order_json) "
+                "VALUES ($1,$2,$3,$4,$5,$6,decode($7,'hex'),$8::jsonb) "
+                "ON CONFLICT DO NOTHING RETURNING 1",
+                pqxx::params{mission.mission_id(), order.mission_node_id(), order.order_id(), key,
+                             mission.robot_id(), static_cast<long long>(released), encoded,
+                             order.sent_order_json()});
+            if (!inserted.empty()) {
+                matches = true;
+                return;
+            }
+
+            const auto rows = tx.exec(
+                "SELECT encode(execution,'hex') FROM dispatch_execution_orders "
+                "WHERE mission_id=$1 AND step_id=$2 AND order_id=$3 AND update_id=$4",
+                pqxx::params{mission.mission_id(), order.mission_node_id(), order.order_id(), key});
+            if (!rows.empty()) {
+                const auto stored = rows[0][0].as<std::string>();
+                std::string wire;
+                boost::algorithm::unhex(stored.begin(), stored.end(), std::back_inserter(wire));
+                dbv1::MissionExecution existing;
+                matches = existing.ParseFromString(wire) &&
+                    google::protobuf::util::MessageDifferencer::Equals(existing, e);
+            }
+        });
+    } catch (const std::exception& error) {
+        co_return database_error(error);
+    }
+
+    if (!matches) {
+        co_return grpc::Status{grpc::StatusCode::ALREADY_EXISTS, "execution order conflict"};
+    }
+    co_return grpc::Status::OK;
 }
 
 asio::awaitable<grpc::Status> DatabaseService::reserve_header_ids(const dbv1::ReserveHeaderIdsRequest&,

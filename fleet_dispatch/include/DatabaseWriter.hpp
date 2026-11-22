@@ -21,7 +21,7 @@ namespace asio = boost::asio;
 class DatabaseWriter {
 public:
     DatabaseWriter(agrpc::GrpcContext& grpc_context, asio::io_context& io_context, const std::string& address);
-
+    asio::awaitable<grpc::Status> save_execution(const fms::database::v1::SaveMissionExecutionRequest& request);
     void start();
     void stop();
 
