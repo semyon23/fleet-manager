@@ -629,10 +629,11 @@ asio::awaitable<void> MissionRunner::overdue_loop() {
 asio::awaitable<void> MissionRunner::watch_dispatch() {
     // Сверка со снимком dispatch — только по миссиям и картам из базы: раньше времени она не найдёт своих
     // миссий — не заметит потерянных и не восстановит маршруты (T1.0b)
-    while (!stopped_ && !(missions_.loaded() && maps_.loaded())) {
+    while (!stopped_ &&
+       !(missions_.loaded() && maps_.loaded() && journal_loaded_)) {
         reconnect_timer_.expires_after(kLoadPoll);
         co_await reconnect_timer_.async_wait(asio::as_tuple(asio::use_awaitable));
-    }
+       }
 
     while (!stopped_) {
         StreamRPC rpc{services_.grpc_context};
@@ -676,7 +677,8 @@ void MissionRunner::reconcile(
         if (mission->state != "QUEUED" &&
             !is_next(mission->id) &&
             !sending_.contains(mission->id) &&
-            !plans_.contains(mission->id)) {
+            !plans_.contains(mission->id) &&
+            !recovery_commands_.contains(mission->id)) {
             // Нет долговременной записи неподтверждённых разрешений.
             // GetMission не исключает ещё летящую команду.
             traffic_fault_ = true;
@@ -883,6 +885,13 @@ asio::awaitable<void> MissionRunner::restore(std::string mission_id) {
 
     plan.last_node = plan.routes[current].front();
 
+    auto recovery = recovery_commands_.find(mission_id);
+    if (recovery != recovery_commands_.end()) {
+        if (!traffic_snapshot_ ||
+            !restore_journal_base(*mission, plan, latest->second, recovery->second)) {
+            co_return;
+            }
+    }
     // Используем последний статус, полученный control из стрима.
     // response.status() намеренно не применяем: пока RPC летел,
     // робот мог пройти ещё несколько узлов или сменить шаг.
@@ -894,6 +903,12 @@ asio::awaitable<void> MissionRunner::restore(std::string mission_id) {
 
     plans_[mission_id] = std::move(plan);
     waiting_plans_.erase(latest);
+
+    if (recovery != recovery_commands_.end()) {
+        // К этому моменту уже установлены и план, и защищённый участок.
+        recovery_commands_.erase(recovery);
+        spdlog::info("[journal] restored protected base for mission {}", mission_id);
+    }
 }
 
 // ==================================================================== отмена
@@ -1048,7 +1063,7 @@ asio::awaitable<void> MissionRunner::uncertain_loop() {
             asio::as_tuple(asio::use_awaitable));
 
         if (stopped_) co_return;
-        if (!(missions_.loaded() && maps_.loaded())) continue;
+        if (!(journal_loaded_ && missions_.loaded() && maps_.loaded())) continue;
 
         // Одна сверка одновременно, без неограниченного fan-out.
         std::set<std::string> pending = uncertain_;
@@ -1375,7 +1390,9 @@ void MissionRunner::configure_traffic(AvailabilityTracker& availability) {
 
 bool MissionRunner::traffic_ready() const {
 
-    if (!journal_loaded_ || traffic_fault_ ||
+    if (!journal_loaded_ ||
+        traffic_fault_ ||
+        !recovery_commands_.empty() ||
         !traffic_availability_ ||
         !traffic_snapshot_ ||
         !maps_.loaded() ||
@@ -1866,6 +1883,9 @@ asio::awaitable<void> MissionRunner::journal_startup() {
             *services_.control, request, response);
         bool retry = !status.ok();
         bool unresolved = false;
+
+        std::map<std::string, RecoveryCommands> recoverable;
+
         if (status.ok()) {
             std::map<std::string, std::vector<fms::database::v1::ControlCommandRecord>> groups;
             for (const auto& item : response.commands()) {
@@ -1905,6 +1925,12 @@ asio::awaitable<void> MissionRunner::journal_startup() {
                     }
                 }
                 if (!cleared) {
+                    const auto* mission = missions_.find(id);
+                    if (status.ok() && mission && !mission->finished() &&
+                        mission->state != "QUEUED") {
+                        recoverable.emplace(id, std::move(commands));
+                        continue;
+                        }
                     unresolved = true;
                     spdlog::error("[journal] mission {} has unresolved commands; recovery required", id);
                     continue;
@@ -1928,11 +1954,194 @@ asio::awaitable<void> MissionRunner::journal_startup() {
         }
         if (stopped_) co_return;
         if (!retry) {
+            recovery_commands_ = std::move(recoverable);
             journal_loaded_ = true;
             if (unresolved) traffic_fault_ = true;
             co_return;
         }
         journal_timer_.expires_after(std::chrono::seconds(2));
         co_await journal_timer_.async_wait(asio::as_tuple(asio::use_awaitable));
+    }
+}
+
+
+bool MissionRunner::restore_journal_base(
+    Mission& mission, Plan& plan, const fms1::MissionStatus& status,
+    const RecoveryCommands& commands) {
+    namespace db = fms::database::v1;
+
+    if (status.mission_id() != mission.id || status.robot_id() != mission.robot_id ||
+        (status.state() != fms1::MISSION_STATE_RUNNING &&
+         status.state() != fms1::MISSION_STATE_PAUSED) ||
+        mission.state == "CANCELING" || !mission.current_step) {
+        return false;
+    }
+
+    const int current_step = *mission.current_step;
+    if (current_step < 0 || static_cast<std::size_t>(current_step) >= plan.routes.size() ||
+        status.current_node_id() != std::format("s{}", current_step)) {
+        return false;
+    }
+
+    const auto* graph = maps_.find(mission.map_id);
+    if (!graph || graph->version != plan.traffic_version) return false;
+
+    const auto attempt = journal_attempt(mission.id);
+    const db::ControlCommandRecord* add = nullptr;
+    std::map<std::string, const db::ControlCommandRecord*> extensions;
+
+    for (const auto& command : commands) {
+        if (command.attempt() != attempt) continue;
+        if (command.recovery_version() != 1 || command.robot_id() != mission.robot_id ||
+            command.map_id() != mission.map_id || command.map_version() != graph->version) {
+            return false;
+        }
+
+        switch (command.kind()) {
+            case db::CONTROL_COMMAND_KIND_ADD_MISSION:
+                if (add) return false;
+                add = &command;
+                break;
+            case db::CONTROL_COMMAND_KIND_EXTEND_MISSION: {
+                auto& latest = extensions[command.move_node_id()];
+                if (!latest || latest->revision() < command.revision()) latest = &command;
+                break;
+            }
+            default:
+                // Включая отмену, исход которой надо сверять отдельно.
+                return false;
+        }
+    }
+
+    dpv1::AddMissionRequest original;
+    if (!add || !original.ParseFromString(add->request_proto()) ||
+        !original.has_mission()) {
+        return false;
+    }
+
+    const auto& saved_mission = original.mission();
+    if (saved_mission.mission_id() != mission.id ||
+        saved_mission.robot_id() != mission.robot_id ||
+        saved_mission.nodes_size() != static_cast<int>(plan.routes.size())) {
+        return false;
+    }
+
+    try {
+        const auto add_snapshot = json::parse(add->recovery_json());
+        if (add_snapshot.at("routes") != json(plan.routes) ||
+            add_snapshot.at("edges") != json(plan.edges)) {
+            return false;
+        }
+
+        const db::ControlCommandRecord* current_command = nullptr;
+        for (int i = 0; i < saved_mission.nodes_size(); ++i) {
+            const auto step_id = std::format("s{}", i);
+            const auto& saved_step = saved_mission.nodes(i);
+            if (saved_step.id() != step_id || !saved_step.has_move()) return false;
+
+            const auto& move = saved_step.move();
+            const auto& nodes = plan.routes[i];
+            const auto& edges = plan.edges[i];
+            if (move.nodes_size() != static_cast<int>(nodes.size()) ||
+                move.edges_size() != static_cast<int>(edges.size()) ||
+                !move.has_released_nodes() || move.released_nodes() != 1) {
+                return false;
+            }
+            for (int j = 0; j < move.nodes_size(); ++j) {
+                if (move.nodes(j).node_id() != nodes[j]) return false;
+            }
+            for (int j = 0; j < move.edges_size(); ++j) {
+                if (move.edges(j).edge_id() != edges[j]) return false;
+            }
+
+            auto extension = extensions.find(step_id);
+            if (i > current_step) {
+                if (extension != extensions.end()) return false;
+                continue;
+            }
+
+            auto step = std::find_if(status.steps().begin(), status.steps().end(),
+                [&](const auto& item) { return item.node_id() == step_id; });
+            if (step == status.steps().end() || !step->has_move()) return false;
+
+            const auto& progress = step->move();
+            std::uint32_t revision = 0;
+            std::uint32_t released = 1;
+            if (extension != extensions.end()) {
+                const auto& command = *extension->second;
+                dpv1::ExtendMissionRequest request;
+                if (!request.ParseFromString(command.request_proto()) ||
+                    request.mission_id() != mission.id || request.move_node_id() != step_id ||
+                    request.revision() == 0 || request.revision() != command.revision() ||
+                    request.has_replace_tail() || !request.has_released_nodes()) {
+                    return false;
+                }
+                revision = request.revision();
+                released = request.released_nodes();
+                if (i == current_step) current_command = &command;
+                extensions.erase(extension);
+            }
+
+            if (released == 0 || released > nodes.size() ||
+                progress.total_nodes() != nodes.size() ||
+                progress.released_nodes() != released ||
+                progress.revision() != revision || progress.confirmed_revision() != revision ||
+                !progress.update_rejected().empty() ||
+                progress.last_node_index() >= released ||
+                progress.last_node_id() != nodes[progress.last_node_index()]) {
+                return false;
+            }
+            if (i < current_step &&
+                (step->state() != fms1::STEP_STATE_COMPLETED ||
+                 progress.last_node_index() + 1 != nodes.size())) {
+                return false;
+            }
+        }
+        if (!extensions.empty()) return false;
+
+        // В s0 есть снимок от Add. Для последующих шагов без Extend
+        // исходная команда Add явно разрешает единственный стартовый узел.
+        const auto* base_command = current_command ? current_command :
+                                   (current_step == 0 ? add : nullptr);
+        if (base_command) {
+            const auto snapshot = json::parse(base_command->recovery_json());
+            const auto& base = snapshot.at("protectedBase");
+            const auto& progress = plan.progress.at(current_step);
+            const auto& nodes = plan.routes.at(current_step);
+            const auto& edges = plan.edges.at(current_step);
+            const auto expected_key = mission.id + "/" + std::to_string(attempt)
+                                    + "/s" + std::to_string(current_step);
+
+            const auto saved_nodes = base.at("nodes").get<std::vector<std::uint32_t>>();
+            const auto saved_edges = base.at("edges").get<std::vector<std::uint32_t>>();
+            if (base.at("robot") != mission.robot_id || base.at("map") != mission.map_id ||
+                base.at("version") != graph->version || base.at("key") != expected_key ||
+                saved_nodes.empty() || saved_nodes.size() != progress.released_nodes() ||
+                saved_edges.size() != saved_nodes.size() - 1 ||
+                base.at("reached").get<std::uint64_t>() > progress.last_node_index()) {
+                return false;
+            }
+
+            for (std::size_t i = 0; i < saved_nodes.size(); ++i) {
+                const auto node = graph->find_node(nodes[i]);
+                if (!node || *node != saved_nodes[i]) return false;
+            }
+            for (std::size_t i = 0; i < saved_edges.size(); ++i) {
+                const auto index = saved_edges[i];
+                if (index >= graph->edges.size()) return false;
+                const auto& edge = graph->edges[index];
+                if (edge.id != edges[i] || edge.from != saved_nodes[i] ||
+                    edge.to != saved_nodes[i + 1]) {
+                    return false;
+                }
+            }
+        }
+
+        // track_traffic устанавливает защиту до снятия блокировки старта.
+        track_traffic(mission, plan, static_cast<std::size_t>(current_step));
+        return true;
+    } catch (const std::exception& error) {
+        spdlog::warn("[journal] cannot restore mission {}: {}", mission.id, error.what());
+        return false;
     }
 }

@@ -183,6 +183,13 @@ private:
 
     asio::awaitable<grpc::Status> journaled_cancel(std::string id);
     asio::awaitable<void> journal_startup();
+
+    using RecoveryCommands = std::vector<fms::database::v1::ControlCommandRecord>;
+
+    bool restore_journal_base(Mission& mission, Plan& plan, const fms::v1::MissionStatus& status, const RecoveryCommands& commands);
+
+    std::map<std::string, RecoveryCommands> recovery_commands_;
+
     std::uint32_t journal_attempt(const std::string& id) const;
 
     ControlCommandJournal command_journal_;

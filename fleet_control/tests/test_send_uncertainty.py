@@ -7,6 +7,7 @@
 """
 from concurrent.futures import ThreadPoolExecutor
 import os
+import subprocess
 import threading
 import time
 
@@ -15,7 +16,9 @@ import pytest
 from google.protobuf import message_factory
 
 from conftest import dpb, dgrpc, Missions, SIM_MAP, CONTROL, http
-from test_mission_run import run_map, two_robots, action, wait_mission
+from test_mission_run import (
+    action, run_map, two_robots, wait_mission, wait_robot, wait_routes_after_restart,
+)
 
 
 class FaultProxy:
@@ -23,6 +26,7 @@ class FaultProxy:
         self.mode = "pass"
         self.captured = None
         self.calls = 0
+        self.add_calls = {}
         self.streams = []
         self.entered = threading.Event()
         self.release = threading.Event()
@@ -65,6 +69,8 @@ class FaultProxy:
                         if method_name == "AddMission":
                             with self.lock:
                                 self.calls += 1
+                                mission_id = request.mission.mission_id
+                                self.add_calls[mission_id] = self.add_calls.get(mission_id, 0) + 1
                                 mode = self.mode
                                 self.mode = "pass"
                                 self.captured = request
@@ -201,3 +207,121 @@ def test_cancel_not_found_does_not_allow_late_execution(missions, send_robots, s
     result = wait_mission(missions, mission_id, {"CANCELED", "FAILED", "COMPLETED"})
     assert result["state"] == "CANCELED", result
     assert send_proxy.calls == 1
+
+
+
+@pytest.fixture
+def restart_control(send_proxy):
+    command = os.environ.get("CONTROL_RESTART")
+    if not command:
+        pytest.skip("set CONTROL_RESTART to restart only fleet_control")
+
+    def restart():
+        subprocess.run(command, shell=True, check=True, timeout=30)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            try:
+                code, body = http("GET", f"{CONTROL}/api/health")
+                if code == 200 and body["status"] == "OK":
+                    return
+            except OSError:
+                pass
+            time.sleep(0.2)
+        pytest.fail("fleet_control did not come back after restart")
+
+    return restart
+
+
+@pytest.fixture
+def slow_recovery_robots(maps, monkeypatch, request, send_proxy):
+    create_map = maps.create
+
+    def create_slow_map(*args, **kwargs):
+        kwargs["edges"] = [{**edge, "maxSpeed": 0.25} for edge in kwargs["edges"]]
+        return create_map(*args, **kwargs)
+
+    monkeypatch.setattr(maps, "create", create_slow_map)
+    return request.getfixturevalue("two_robots")
+
+
+def create_recovery_mission(missions, robot, destination):
+    code, body = missions.create(Missions.body(
+        SIM_MAP, requestedRobotId=robot, steps=[{"nodeId": destination}],
+    ))
+    assert code == 201, body
+    return body["id"]
+
+
+def test_recovery_protects_moving_robot(
+    missions, robots, slow_recovery_robots, send_proxy, restart_control,
+):
+    first, second = slow_recovery_robots
+    send_proxy.arm("pass")
+    first_id = create_recovery_mission(missions, first, "c")
+
+    wait_robot(
+        robots, first,
+        lambda robot: robot["status"]["driving"] and robot["status"]["lastNodeId"] == "a",
+        "first robot moving from a toward b", timeout=35,
+    )
+    restart_control()
+
+    route = wait_routes_after_restart(first)
+    assert route["missionId"] == first_id, route
+
+    second_id = create_recovery_mission(missions, second, "b")
+    wait_mission(missions, second_id, {"RUNNING"}, timeout=20)
+    _, first_mission = missions.from_database(first_id)
+    assert first_mission["state"] == "RUNNING", first_mission
+
+    deadline = time.monotonic() + 65
+    while time.monotonic() < deadline:
+        code, first_mission = missions.from_database(first_id)
+        assert code == 200, first_mission
+        if first_mission["state"] == "COMPLETED":
+            break
+        assert first_mission["state"] == "RUNNING", first_mission
+
+        code, second_robot = robots.from_database(second)
+        assert code == 200, second_robot
+        assert second_robot["status"]["lastNodeId"] == "d", second_robot
+        assert not second_robot["status"]["driving"], second_robot
+        time.sleep(0.1)
+    else:
+        pytest.fail("first mission did not complete after control restart")
+
+    with send_proxy.lock:
+        assert send_proxy.add_calls[first_id] == 1
+
+    code, body = missions.cancel(second_id)
+    assert code == 202, body
+    wait_mission(missions, second_id, {"CANCELED"}, timeout=20)
+
+
+def test_recovery_blocks_when_add_outcome_is_unknown(
+    missions, maps, send_robots, send_proxy, restart_control,
+):
+    first, second = send_robots
+    send_proxy.arm("before")
+    first_id = create_recovery_mission(missions, first, "b")
+    assert send_proxy.entered.wait(30), first_id
+    wait_mission(missions, first_id, {"ASSIGNED"}, timeout=10)
+
+    # Карта и журнал остаются в отдельной БД этого сценария.
+    maps.ids.remove(SIM_MAP)
+    restart_control()
+
+    code, body = maps.delete(SIM_MAP)
+    assert code == 409 and body["code"] == "TRAFFIC_ACTIVE", body
+
+    second_id = create_recovery_mission(missions, second, "c")
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        code, first_mission = missions.from_database(first_id)
+        assert code == 200 and first_mission["state"] == "ASSIGNED", first_mission
+        code, second_mission = missions.from_database(second_id)
+        assert code == 200 and second_mission["state"] == "QUEUED", second_mission
+        with send_proxy.lock:
+            assert send_proxy.add_calls[first_id] == 1
+            assert second_id not in send_proxy.add_calls
+        time.sleep(0.2)
