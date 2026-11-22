@@ -112,7 +112,27 @@ void RobotSession::start_loops() {
     asio::co_spawn(io_context_, [self = shared_from_this()] { return self->watchdog(); }, log_if_failed);
 }
 
+
+bool RobotSession::request_probe(const std::string& id) {
+    if (send_instant_action(vda5050::action_type::kStateRequest, {}, id).empty()) {
+        return false;
+    }
+
+    // Срок жизни запроса восстановления отслеживает ProbeQueue.
+    pending_actions_.erase(id);
+    return true;
+}
+
+void RobotSession::lost_probe_state() {
+    if (observer_) {
+        awaiting_live_state_ = true;
+        probe_state_at_.reset();
+        observer_(nullptr);
+    }
+}
+
 void RobotSession::stop() {
+    observer_ = {};
     stopped_ = true;
     request(MqttAction::Unsubscribe, state_topic_);
     request(MqttAction::Unsubscribe, connection_topic_);
@@ -148,6 +168,12 @@ asio::awaitable<void> RobotSession::watchdog() {
 
         bool online = status_.connection() == fms::v1::CONNECTION_STATE_ONLINE;
         bool silent = std::chrono::steady_clock::now() - last_state_time_ > std::chrono::seconds(60);
+
+        if (probe_state_at_ &&
+            std::chrono::steady_clock::now() - *probe_state_at_ >= std::chrono::seconds(60)) {
+            lost_probe_state();
+        }
+
         if (online && silent) {
             status_.set_connection(fms::v1::CONNECTION_STATE_STALE);
             spdlog::warn("[{}] no state for 60 s, robot is STALE", robot_id_);
@@ -173,6 +199,18 @@ void RobotSession::handle(const VdaMessage& message) {
 
         if (message.topic == state_topic_) {
             auto state = json.get<vda5050::State>();
+
+            if (awaiting_live_state_ && !observer_) return;
+            if (observer_) {
+                if (!observer_(&state)) return;
+
+                if (status_.mission_id().empty()) {
+                    observer_ = {};
+                } else {
+                    probe_state_at_ = std::chrono::steady_clock::now();
+                }
+            }
+
             fill_status(state, status_);
             awaiting_live_state_ = false;
             check_instant_actions(state);
@@ -200,7 +238,9 @@ void RobotSession::handle(const VdaMessage& message) {
             log_status();
         } else if (message.topic == connection_topic_) {
             auto connection = json.get<vda5050::Connection>();
-            status_.set_connection(to_proto(connection.connection_state));
+            const auto next = to_proto(connection.connection_state);
+            if (next != fms::v1::CONNECTION_STATE_ONLINE) lost_probe_state();
+            status_.set_connection(next);
             last_state_time_ = std::chrono::steady_clock::now();
             log_status();
         } else if (message.topic == factsheet_topic_) {

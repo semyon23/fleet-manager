@@ -12,6 +12,9 @@
 #include "RobotSession.hpp"
 #include "StartupInventory.hpp"
 #include <optional>
+#include "ProbeQueue.hpp"
+#include "RecoveryProbe.hpp"
+
 enum class AddResult {
     Added,
     AlreadyExists,
@@ -37,9 +40,17 @@ public:
     bool post(const std::string& manufacturer, const std::string& serial_number, VdaMessage message);
 
 private:
+    void start_probes();
+    void pump_probes();
+    bool observe(const std::string& id, const vda5050::State* state);
+
+    ProbeQueue queue_;
+    std::map<std::string, RecoveryProbe> probes_;
+    bool timer_armed_ = false;
     RobotSession* find_by_vda(const std::string& manufacturer, const std::string& serial_number);
 
     asio::io_context& io_context_;
+    asio::steady_timer probe_timer_{io_context_};
     Outbox& outbox_;
     RobotStatusHub& status_hub_;
     MissionStatusHub& mission_hub_;

@@ -27,6 +27,14 @@ public:
     asio::awaitable<void> start_restored(
     const fms::database::v1::RobotRecord& record, std::string mission);
 
+    using Observer = std::function<bool(const vda5050::State*)>;
+
+    void observe_recovery(Observer observer) {
+        observer_ = std::move(observer);
+    }
+
+    bool request_probe(const std::string& id);
+
     bool awaiting_live_state() const { return awaiting_live_state_; }
 
     void stop();
@@ -58,6 +66,9 @@ public:
     const fms::v1::RobotStatus& status() const { return status_; }
 
 private:
+    Observer observer_;
+    std::optional<std::chrono::steady_clock::time_point> probe_state_at_;
+    void lost_probe_state();
     void start_loops();
     bool awaiting_live_state_ = false;
     asio::awaitable<void> run();

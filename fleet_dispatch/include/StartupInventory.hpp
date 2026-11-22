@@ -89,6 +89,7 @@ public:
         }
 
         if (!grants.empty()) hold("orphan last grant");
+        consistent = reason.empty();
         if (reason.empty() && !missions.empty()) hold("mission reconciliation pending");
     }
 
@@ -96,11 +97,13 @@ public:
     std::map<std::string, std::string> occupied;
     std::set<std::string> missions, deleting;
     std::string reason;
+    bool consistent = false;
 
 private:
     void hold(const char* text) {
         if (reason.empty()) reason = text;
     }
+
 };
 
 #endif //FLEETMANAGERSYSTEM_STARTUPINVENTORY_HPP

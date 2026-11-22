@@ -1,6 +1,9 @@
 #include "../include/FleetRegistry.hpp"
 #include "spdlog/spdlog.h"
 #include "../include/VdaTopics.hpp"
+#include <boost/uuid/random_generator.hpp>
+#include <boost/uuid/uuid_io.hpp>
+
 
 FleetRegistry::FleetRegistry(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, MissionStatusHub& mission_hub,
                   DatabaseWriter& database)
@@ -42,7 +45,158 @@ asio::awaitable<void> FleetRegistry::restore(StartupInventory inventory) {
         co_await session->start_restored(record, std::move(mission));
     }
 
-    if (!stopping_) inventory_.emplace(std::move(inventory));
+    if (!stopping_) {
+        inventory_.emplace(std::move(inventory));
+        start_probes();
+    }
+}
+
+
+void FleetRegistry::start_probes() {
+    const auto& inv = *inventory_;
+    using Execution = RecoveryProbe::Execution;
+
+    std::map<std::string, const Execution*> heads, grants;
+    for (const auto& e : inv.snapshot.active_missions()) {
+        heads.emplace(e.mission().robot_id(), &e);
+    }
+    for (const auto& e : inv.snapshot.last_grants()) {
+        grants.emplace(e.mission().mission_id(), &e);
+    }
+
+    for (const auto& record : inv.snapshot.robots()) {
+        const auto& spec = record.spec();
+        const auto& id = spec.robot_id();
+        if (inv.deleting.contains(id)) continue;
+
+        auto& p = probes_[id];
+        p.robot = &spec;
+
+        const auto it = heads.find(id);
+        if (inv.consistent && it != heads.end()) {
+            const auto& e = *it->second;
+            for (const auto& n : e.mission().nodes()) {
+                if (n.id() != e.status().current_node_id() || !n.has_move() ||
+                    e.status().state() != fms::v1::MISSION_STATE_RUNNING) {
+                    continue;
+                }
+                if (auto g = grants.find(e.mission().mission_id()); g != grants.end()) {
+                    p.head = &e;
+                    p.grant = g->second;
+                }
+            }
+        }
+
+        find(id)->observe_recovery([this, id](const auto* state) {
+            return observe(id, state);
+        });
+        queue_.add(id, ProbeQueue::Clock::now());
+    }
+
+    pump_probes();
+}
+
+void FleetRegistry::pump_probes() {
+    if (stopping_ || timer_armed_) return;
+
+    const auto now = ProbeQueue::Clock::now();
+    for (const auto& id : queue_.take(now)) {
+        auto& p = probes_.at(id);
+        p.token = "recovery-" + boost::uuids::to_string(boost::uuids::random_generator()());
+        if (!find(id)->request_probe(p.token)) queue_.retry(id, now);
+    }
+
+    if (queue_.empty()) return;
+    timer_armed_ = true;
+    probe_timer_.expires_after(std::chrono::milliseconds(200));
+    probe_timer_.async_wait([this](boost::system::error_code ec) {
+        timer_armed_ = false;
+        if (!ec) pump_probes();
+    });
+}
+
+bool FleetRegistry::observe(const std::string& id, const vda5050::State* state) {
+    using D = move_recovery::Decision;
+    auto& p = probes_.at(id);
+    const auto now = ProbeQueue::Clock::now();
+
+    if (p.decision && p.decision->decision == D::Conflict) return false;
+
+    auto renew = [&] {
+        p.reset();
+        queue_.retry(id, now);
+        pump_probes();
+    };
+
+    if (!state) {
+        if (!p.token.empty()) renew();
+        return false;
+    }
+    if (state->header.manufacturer != p.robot->manufacturer() ||
+        state->header.serial_number != p.robot->serial_number()) {
+        return false;
+    }
+
+    if (!p.head && p.decision) return true;
+
+    if (p.candidate) {
+        if (now - p.received >= std::chrono::seconds(60) ||
+            !p.acknowledged(*state) ||
+            state->header.header_id < p.candidate->header.header_id) {
+            renew();
+            return false;
+        }
+        if (state->header.header_id == p.candidate->header.header_id) return false;
+
+        // Обычное обновление телеметрии без изменения маршрута и действий.
+        if (*state == *p.candidate) {
+            p.candidate = *state;
+            p.received = now;
+            return true;
+        }
+    } else if (!queue_.live(id, now) || !p.acknowledged(*state)) {
+        return false;
+    }
+
+    queue_.remove(id);
+
+    if (!p.head) {
+        if (!inventory_->occupied.contains(id) &&
+            (state->driving || !vda5050::is_idle(*state))) {
+            renew();
+            return false;
+        }
+        p.decision = move_recovery::Result{D::Wait, "live state only", {}};
+        return true;
+    }
+
+    auto r = move_recovery::reconcile(*p.robot, *p.head, *p.grant, p.token, state);
+    if (r.decision == D::Attach && state->last_node_sequence_id < p.furthest) {
+        r = {D::Conflict, "progress regressed", {}};
+    }
+
+    const bool changed = !p.decision || p.decision->decision != r.decision ||
+                         p.decision->last_node_index != r.last_node_index;
+    if (changed) {
+        spdlog::info("[recovery] robot={} mission={} result={} reason={}", id,
+                     p.head->mission().mission_id(),
+                     r.decision == D::Attach ? "Attach" :
+                     r.decision == D::Wait ? "Wait" : "Conflict", r.reason);
+    }
+
+    if (r.decision == D::Wait) {
+        renew();
+    } else {
+        p.decision = r;
+        if (r.decision == D::Attach) {
+            p.furthest = state->last_node_sequence_id;
+            p.candidate = *state;
+            p.received = now;
+        } else {
+            p.candidate.reset();
+        }
+    }
+    return r.decision == D::Attach;
 }
 
 bool FleetRegistry::remove(const std::string& robot_id) {
@@ -52,6 +206,10 @@ bool FleetRegistry::remove(const std::string& robot_id) {
     }
     it->second->abort_mission("robot " + robot_id + " was removed");   // 6
     it->second->stop();
+
+    queue_.remove(robot_id);
+    probes_.erase(robot_id);
+
     sessions_.erase(it);
 
     if (inventory_) inventory_->deleting.erase(robot_id);
@@ -63,6 +221,7 @@ bool FleetRegistry::remove(const std::string& robot_id) {
 
 void FleetRegistry::stop_all() {
     stopping_ = true;
+    probe_timer_.cancel();
     for (auto& [id, session] : sessions_) {
         session->stop();
     }
