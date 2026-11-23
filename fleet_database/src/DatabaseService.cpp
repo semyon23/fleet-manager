@@ -25,6 +25,7 @@ using DeleteRobotRPC          = agrpc::ServerRPC<&Registry::RequestDeleteRobot>;
 using GetRobotRPC             = agrpc::ServerRPC<&Registry::RequestGetRobot>;
 using ListRobotsRPC           = agrpc::ServerRPC<&Registry::RequestListRobots>;
 using GetFactsheetRPC         = agrpc::ServerRPC<&Registry::RequestGetFactsheet>;
+using GetExecutionCheckpointRPC = agrpc::ServerRPC<&Storage::RequestGetExecutionCheckpoint>;
 using LoadDispatchSnapshotRPC = agrpc::ServerRPC<&Storage::RequestLoadDispatchSnapshot>;
 using SaveRobotStatusRPC      = agrpc::ServerRPC<&Storage::RequestSaveRobotStatus>;
 using SaveFactsheetRPC        = agrpc::ServerRPC<&Storage::RequestSaveFactsheet>;
@@ -203,6 +204,15 @@ void DatabaseService::start() {
         on_handler_done);
 
     // ---------------------------------------------------------------- DispatchStorage
+
+    agrpc::register_awaitable_rpc_handler<GetExecutionCheckpointRPC>(
+        grpc_context_, storage_,
+        [this](GetExecutionCheckpointRPC& rpc, GetExecutionCheckpointRPC::Request& request)
+            -> asio::awaitable<void> {
+            GetExecutionCheckpointRPC::Response response;
+            const auto status = co_await get_execution_checkpoint(request, response);
+            co_await rpc.finish(response, status);
+        }, on_handler_done);
 
     agrpc::register_awaitable_rpc_handler<LoadDispatchSnapshotRPC>(
         grpc_context_, storage_,
@@ -539,6 +549,25 @@ asio::awaitable<grpc::Status> DatabaseService::get_factsheet(const dbv1::GetFact
     co_return grpc::Status::OK;
 }
 // ==================================================================== DispatchStorage (DB-3 и позже)
+
+asio::awaitable<grpc::Status> DatabaseService::get_execution_checkpoint(
+    const fms::v1::GetExecutionCheckpointRequest& request,
+    fms::v1::GetExecutionCheckpointResponse& response) {
+    if (request.mission_id().empty())
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "mission_id is required"};
+
+    bool found = false;
+    try {
+        co_await database_.run([&](pqxx::work& tx) {
+            found = execution_head::lookup(tx, request.mission_id(), response);
+        });
+    } catch (const std::exception& e) {
+        co_return database_error(e);
+    }
+    if (!found)
+        co_return grpc::Status{grpc::StatusCode::NOT_FOUND, "dispatch execution not found"};
+    co_return grpc::Status::OK;
+}
 
 asio::awaitable<grpc::Status> DatabaseService::load_dispatch_snapshot(const dbv1::LoadDispatchSnapshotRequest&,dbv1::LoadDispatchSnapshotResponse& response) {
     try {

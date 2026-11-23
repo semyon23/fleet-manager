@@ -69,6 +69,10 @@ service FleetDispatch {
   rpc GetMission(GetMissionRequest) returns (GetMissionResponse);
   // ---------------------------------------------------------------- робот
 
+  // Последняя сохранённая запись одной миссии, включая завершённую. Нет записи — NOT_FOUND.
+  rpc GetExecutionCheckpoint(fms.v1.GetExecutionCheckpointRequest)
+      returns (fms.v1.GetExecutionCheckpointResponse);
+
   // VDA startPause / stopPause. Действует на робота, а не на миссию.
   rpc PauseRobot(PauseRobotRequest) returns (PauseRobotResponse);
   rpc ResumeRobot(ResumeRobotRequest) returns (ResumeRobotResponse);

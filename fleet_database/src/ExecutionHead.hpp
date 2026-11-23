@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "ExecutionCheckpoint.hpp"
 #include "ExecutionVersion.hpp"
 #include "RobotTable.hpp"
 #include <boost/algorithm/hex.hpp>
@@ -77,10 +78,8 @@ inline void save(pqxx::work& tx, const dbv1::MissionExecution& e,
 
     const auto state = e.status().state();
     const bool closed = terminal(state);
-    const bool confirmed_stop = state == fms::v1::MISSION_STATE_CANCELED &&
-                                !e.cancel_action_id().empty() && e.stopped_after_cancel();
     const bool uncertain = closed && state != fms::v1::MISSION_STATE_COMPLETED &&
-                           !confirmed_stop;
+                           !execution_checkpoint::confirmed_cancel(e);
 
     tx.exec("UPDATE dispatch_execution_heads SET robot_id=$2,version=$3,terminal=$4,"
             "uncertain=$5,execution=decode($6,'hex') WHERE mission_id=$1",
@@ -92,6 +91,44 @@ inline void save(pqxx::work& tx, const dbv1::MissionExecution& e,
                 pqxx::params{mid, e.order().mission_node_id(), e.order().order_id(),
                              e.order().order_update_id()});
     }
+}
+
+inline bool lookup(pqxx::work& tx, const std::string& mission_id,
+                   fms::v1::GetExecutionCheckpointResponse& result) {
+    const auto rows = tx.exec(
+        "SELECT h.robot_id,h.version,h.terminal,h.uncertain,"
+        "encode(h.execution,'hex'),r.attempt "
+        "FROM dispatch_execution_heads h "
+        "LEFT JOIN dispatch_add_receipts r USING (mission_id) "
+        "WHERE h.mission_id=$1", pqxx::params{mission_id});
+    if (rows.empty()) return false;
+
+    const auto row = rows.at(0);
+    const auto robot = row[0].as<std::string>();
+    const auto version = row[1].as<std::uint64_t>();
+    const bool terminal = row[2].as<bool>();
+    const bool uncertain = row[3].as<bool>();
+    result.set_mission_id(mission_id);
+    result.set_robot_id(robot);
+    result.set_checkpoint_version(version);
+    if (!row[5].is_null()) result.set_add_attempt(row[5].as<std::uint32_t>());
+
+    if (row[4].is_null()) {
+        if (version != 0 || terminal || !uncertain)
+            throw std::runtime_error("missing dispatch checkpoint payload");
+        result.set_kind(fms::v1::GetExecutionCheckpointResponse::UNCERTAIN);
+        return true;
+    }
+
+    auto e = read(row[4]);
+    if (version == 0 || version != e.checkpoint_version() || robot.empty() ||
+        e.mission().mission_id() != mission_id || e.status().mission_id() != mission_id ||
+        e.mission().robot_id() != robot || e.status().robot_id() != robot) {
+        throw std::runtime_error("dispatch checkpoint identity mismatch");
+    }
+    result.set_kind(execution_checkpoint::classify(e, terminal, uncertain));
+    result.mutable_status()->Swap(e.mutable_status());
+    return true;
 }
 
 inline void load(pqxx::work& tx, dbv1::DispatchSnapshot& snapshot) {

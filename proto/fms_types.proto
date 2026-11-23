@@ -357,3 +357,24 @@ message MissionStatus {
   google.protobuf.Timestamp updated_at = 8;
   google.protobuf.Timestamp finished_at = 9;
 }
+
+// Последняя зафиксированная запись dispatch. Запрос не требует активной сессии робота.
+message GetExecutionCheckpointRequest {
+  string mission_id = 1;
+}
+
+message GetExecutionCheckpointResponse {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    ACTIVE = 1;              // На момент записи выполнение продолжалось.
+    CONFIRMED_TERMINAL = 2;  // Dispatch сохранил подтверждённый итог миссии.
+    UNCERTAIN = 3;           // Записи недостаточно для подтверждения итога.
+  }
+
+  string mission_id = 1;
+  string robot_id = 2;              // Может быть неизвестен до первой записи выполнения.
+  uint64 checkpoint_version = 3;
+  optional uint32 add_attempt = 4;  // Попытка AddMission из квитанции, включая нулевую.
+  MissionStatus status = 5;         // Отсутствует, если статус ещё не записан.
+  Kind kind = 6;
+}

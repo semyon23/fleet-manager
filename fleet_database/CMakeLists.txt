@@ -38,6 +38,7 @@ if(FMS_BUILD_TESTS)
     add_executable(fleet_database_unit
             unit_tests/test_execution_order.cpp
             unit_tests/test_execution_version.cpp
+            unit_tests/test_execution_checkpoint.cpp
     )
 
     target_include_directories(fleet_database_unit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

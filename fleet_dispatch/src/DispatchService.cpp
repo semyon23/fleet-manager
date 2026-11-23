@@ -27,6 +27,7 @@ using ResumeRobotRPC        = agrpc::ServerRPC<&AsyncService::RequestResumeRobot
 using InitializePositionRPC = agrpc::ServerRPC<&AsyncService::RequestInitializePosition>;
 
 using GetMissionRPC         = agrpc::ServerRPC<&AsyncService::RequestGetMission>;
+using GetExecutionCheckpointRPC = agrpc::ServerRPC<&AsyncService::RequestGetExecutionCheckpoint>;
 
 const auto on_handler_done = [](std::exception_ptr error) {
     if (!error) return;
@@ -209,6 +210,21 @@ void DispatchService::start() {
         [this](GetMissionRPC& rpc, GetMissionRPC::Request& request) -> asio::awaitable<void> {
             GetMissionRPC::Response response;
             grpc::Status status = co_await get_mission(request, response);
+            co_await rpc.finish(response, status);
+        },
+        on_handler_done);
+
+    agrpc::register_awaitable_rpc_handler<GetExecutionCheckpointRPC>(
+        grpc_context_, service_,
+        [this](GetExecutionCheckpointRPC& rpc,
+               GetExecutionCheckpointRPC::Request& request) -> asio::awaitable<void> {
+            GetExecutionCheckpointRPC::Response response;
+            grpc::Status status;
+            if (request.mission_id().empty()) {
+                status = grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "mission_id is required"};
+            } else {
+                status = co_await database_.get_execution_checkpoint(request, response);
+            }
             co_await rpc.finish(response, status);
         },
         on_handler_done);

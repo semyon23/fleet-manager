@@ -31,6 +31,7 @@ private:
     asio::awaitable<grpc::Status> get_factsheet(const dbv1::GetFactsheetRequest& request, dbv1::GetFactsheetResponse& response);
 
     // DispatchStorage
+    asio::awaitable<grpc::Status> get_execution_checkpoint(const fms::v1::GetExecutionCheckpointRequest& request, fms::v1::GetExecutionCheckpointResponse& response);
     asio::awaitable<grpc::Status> load_dispatch_snapshot(const dbv1::LoadDispatchSnapshotRequest& request, dbv1::LoadDispatchSnapshotResponse& response);
     asio::awaitable<grpc::Status> save_robot_status(const dbv1::SaveRobotStatusRequest& request, dbv1::SaveRobotStatusResponse& response);
     asio::awaitable<grpc::Status> save_factsheet(const dbv1::SaveFactsheetRequest& request, dbv1::SaveFactsheetResponse& response);

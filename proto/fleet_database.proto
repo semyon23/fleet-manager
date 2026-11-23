@@ -202,6 +202,9 @@ service DispatchStorage {
   // При старте dispatch: роботы, их последний статус и незавершённые миссии.
   rpc LoadDispatchSnapshot(LoadDispatchSnapshotRequest) returns (LoadDispatchSnapshotResponse);
 
+  // Последняя сохранённая запись одной миссии, включая завершённую. Нет записи — NOT_FOUND.
+  rpc GetExecutionCheckpoint(fms.v1.GetExecutionCheckpointRequest)
+      returns (fms.v1.GetExecutionCheckpointResponse);
   // Статус робота целиком (последний, не история). Dispatch пишет важные изменения сразу,
   // позу и батарею — не чаще раза в несколько секунд.
   rpc SaveRobotStatus(SaveRobotStatusRequest) returns (SaveRobotStatusResponse);

@@ -169,3 +169,15 @@ asio::awaitable<grpc::Status> DatabaseWriter::load_snapshot(
     co_return co_await RPC::request(grpc_context_, *stub_, context,
                                     request, response, asio::use_awaitable);
 }
+
+asio::awaitable<grpc::Status> DatabaseWriter::get_execution_checkpoint(
+    const fms::v1::GetExecutionCheckpointRequest& request,
+    fms::v1::GetExecutionCheckpointResponse& response) {
+    using RPC = agrpc::ClientRPC<
+        &dbv1::DispatchStorage::Stub::PrepareAsyncGetExecutionCheckpoint>;
+
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + kTimeout);
+    co_return co_await RPC::request(grpc_context_, *stub_, context, request, response,
+                                    asio::use_awaitable);
+}
