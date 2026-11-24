@@ -42,6 +42,7 @@ public:
     }
 
     bool traffic_inventory_ready() const;
+    const fms::v1::RobotStatus* live_status(const std::string& robot_id) const;
 
     std::vector<traffic::TrafficOccupant> traffic_occupants() const;
 

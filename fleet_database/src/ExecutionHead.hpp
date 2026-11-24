@@ -93,14 +93,16 @@ inline void save(pqxx::work& tx, const dbv1::MissionExecution& e,
     }
 }
 
-inline bool lookup(pqxx::work& tx, const std::string& mission_id,
+inline bool lookup(pqxx::work& tx, const fms::v1::GetExecutionCheckpointRequest& request,
                    fms::v1::GetExecutionCheckpointResponse& result) {
+    const auto& mission_id = request.mission_id();
     const auto rows = tx.exec(
         "SELECT h.robot_id,h.version,h.terminal,h.uncertain,"
-        "encode(h.execution,'hex'),r.attempt "
+        "encode(h.execution,'hex'),r.attempt,h.grant_step,h.grant_order,h.grant_update,"
+        "CASE WHEN $2 THEN encode(r.request_bytes,'hex') END "
         "FROM dispatch_execution_heads h "
         "LEFT JOIN dispatch_add_receipts r USING (mission_id) "
-        "WHERE h.mission_id=$1", pqxx::params{mission_id});
+        "WHERE h.mission_id=$1", pqxx::params{mission_id, request.include_route_proof()});
     if (rows.empty()) return false;
 
     const auto row = rows.at(0);
@@ -113,6 +115,11 @@ inline bool lookup(pqxx::work& tx, const std::string& mission_id,
     result.set_checkpoint_version(version);
     if (!row[5].is_null()) result.set_add_attempt(row[5].as<std::uint32_t>());
 
+    if (!row[8].is_null()) {
+        result.set_grant_step(row[6].as<std::string>());
+        result.set_grant_order(row[7].as<std::string>());
+        result.set_grant_update(row[8].as<std::uint32_t>());
+    }
     if (row[4].is_null()) {
         if (version != 0 || terminal || !uncertain)
             throw std::runtime_error("missing dispatch checkpoint payload");
@@ -125,6 +132,10 @@ inline bool lookup(pqxx::work& tx, const std::string& mission_id,
         e.mission().mission_id() != mission_id || e.status().mission_id() != mission_id ||
         e.mission().robot_id() != robot || e.status().robot_id() != robot) {
         throw std::runtime_error("dispatch checkpoint identity mismatch");
+    }
+    if (request.include_route_proof()) {
+        if (!row[9].is_null()) result.set_accepted_add(decode(row[9]));
+        result.mutable_executed_mission()->Swap(e.mutable_mission());
     }
     result.set_kind(execution_checkpoint::classify(e, terminal, uncertain));
     result.mutable_status()->Swap(e.mutable_status());

@@ -1,4 +1,5 @@
 #include "Availability.hpp"
+#include "maps/MapStore.hpp"
 #include <format>
 
 namespace dbv1 = fms::database::v1;
@@ -6,7 +7,7 @@ namespace fms1 = fms::v1;
 
 // Дальше этого от узла — робот не на узле, а между узлами (остановился посреди ребра после отмены).
 // С запасом на погрешность локализации; у VDA-роботов точность остановки — сантиметры
-constexpr double kOnNodeTolerance = 0.5;   // м
+// Shared with traffic recovery and allocation.
 
 namespace {
 

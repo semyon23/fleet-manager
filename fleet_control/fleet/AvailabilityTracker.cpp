@@ -5,6 +5,7 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <google/protobuf/util/message_differencer.h>
 #include <spdlog/spdlog.h>
+#include <google/protobuf/util/time_util.h>
 
 #include "fleet/Availability.hpp"
 
@@ -121,7 +122,8 @@ std::vector<AvailabilityTracker::IdleRobot> AvailabilityTracker::idle_robots() c
             continue;
         }
         auto robot = robots_.find(robot_id);
-        if (robot == robots_.end() || !robot->second.status || !robot->second.status->has_pose()) {
+        if (robot == robots_.end() || !live_status(robot_id) || !robot->second.status->has_pose() ||
+            robot->second.status->driving() || !robot->second.status->observed_order().idle()) {
             continue;   // IDLE без позы не бывает, но не полагаемся
         }
         const auto& status = *robot->second.status;
@@ -201,6 +203,19 @@ asio::awaitable<void> AvailabilityTracker::write_loop() {
     }
 }
 
+const fms::v1::RobotStatus* AvailabilityTracker::live_status(const std::string& id) const {
+    const auto it = robots_.find(id);
+    if (!dispatch_connected_ || it == robots_.end() || it->second.deleting ||
+        !it->second.status_from_stream || !it->second.status) return nullptr;
+    const auto& s = *it->second.status;
+    if (s.connection() != fms::v1::CONNECTION_STATE_ONLINE || !s.has_observed_order() || !s.has_last_state_at())
+        return nullptr;
+    using google::protobuf::util::TimeUtil;
+    const auto age_ms = TimeUtil::TimestampToMilliseconds(TimeUtil::GetCurrentTime()) -
+                        TimeUtil::TimestampToMilliseconds(s.last_state_at());
+    return age_ms >= -2000 && age_ms < 60000 ? &s : nullptr;
+}
+
 bool AvailabilityTracker::traffic_inventory_ready() const {
     if (!dispatch_connected_ || !traffic_registry_ready_) {
         return false;
@@ -229,8 +244,9 @@ std::vector<traffic::TrafficOccupant>AvailabilityTracker::traffic_occupants() co
             }
 
             item.node = status.last_node_id();
-            item.stationary =
-                status.localized() && !status.driving();
+            const auto* graph = maps_.find(item.map);
+            item.stationary = live_status(id) && status.observed_order().idle() &&
+                              graph && stopped_on_node(status, *graph, item.node);
             item.has_mission = !status.mission_id().empty();
         }
 

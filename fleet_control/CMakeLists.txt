@@ -18,6 +18,8 @@ add_executable(fleet_control fc_main.cpp
         routing/Router.cpp
         missions/Mission.cpp
         missions/MissionStore.cpp
+        missions/ExecutionRecovery.cpp
+        missions/CheckpointRecovery.cpp
         api/MissionApi.cpp
         assignment/MissionAssigner.cpp
         missions/MissionRunner.cpp
@@ -70,6 +72,8 @@ if(FMS_BUILD_TESTS)
             unit_tests/test_base_guard.cpp
             unit_tests/test_base_planner.cpp
             unit_tests/test_extension_command.cpp
+            unit_tests/test_execution_recovery.cpp
+            missions/ExecutionRecovery.cpp
             unit_tests/test_fixed_route_gate.cpp
             routing/Router.cpp
             maps/Graph.cpp

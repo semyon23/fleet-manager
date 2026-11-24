@@ -45,7 +45,8 @@ public:
     // Миссию поменяли (состояние, робот, шаги): updatedAt, события истории (c3), запись в базу через очередь.
     // why — почему сменилось состояние, попадёт в событие. Завершённая уходит из памяти — ссылка mission
     // после вызова недействительна
-    nlohmann::json changed(Mission& mission, const std::string& why = "");
+    nlohmann::json changed(Mission& mission, const std::string& why = "",
+                           std::uint64_t dispatch_final_version = 0);
 
     std::vector<Mission*> active();   // все незавершённые: для сверки с dispatch
     std::set<std::string> busy_robots() const;   // роботы активных миссий: им новую не давать

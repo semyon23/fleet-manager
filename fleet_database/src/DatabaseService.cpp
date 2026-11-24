@@ -38,6 +38,8 @@ using Control = dbv1::ControlStorage::AsyncService;
 
 using PutControlCommandRPC = agrpc::ServerRPC<&Control::RequestPutControlCommand>;
 using ListControlCommandsRPC = agrpc::ServerRPC<&Control::RequestListControlCommands>;
+using OpenControlMissionsRPC = agrpc::ServerRPC<&Control::RequestListOpenControlMissions>;
+using CloseMissionCommandsRPC = agrpc::ServerRPC<&Control::RequestCloseMissionCommands>;
 using ResolveControlCommandRPC = agrpc::ServerRPC<&Control::RequestResolveControlCommand>;
 
 using CreateMapRPC = agrpc::ServerRPC<&Control::RequestCreateMap>;
@@ -413,6 +415,42 @@ void DatabaseService::start() {
         },
         on_handler_done);
 
+    agrpc::register_awaitable_rpc_handler<OpenControlMissionsRPC>(
+        grpc_context_, control_,
+        [this](OpenControlMissionsRPC& rpc, OpenControlMissionsRPC::Request& request) -> asio::awaitable<void> {
+            OpenControlMissionsRPC::Response response;
+            grpc::Status status;
+            try {
+                co_await database_.run([&](pqxx::work& tx) {
+                    list_open_control_missions(tx, request.after_mission_id(), response);
+                });
+            } catch (const std::exception& error) {
+                status = database_error(error);
+            }
+            co_await rpc.finish(response, status);
+        }, on_handler_done);
+
+    agrpc::register_awaitable_rpc_handler<CloseMissionCommandsRPC>(
+        grpc_context_, control_,
+        [this](CloseMissionCommandsRPC& rpc, CloseMissionCommandsRPC::Request& request)
+            -> asio::awaitable<void> {
+            CloseMissionCommandsRPC::Response response;
+            grpc::Status status;
+            if (request.mission_id().empty() || request.robot_id().empty() ||
+                !request.dispatch_final_version() || request.command_ids().empty()) {
+                status = {grpc::StatusCode::INVALID_ARGUMENT, "missing recovery identity"};
+            } else {
+                try {
+                    co_await database_.run([&](pqxx::work& tx) { close_mission_commands(tx, request); });
+                } catch (const ControlCommandConflict& error) {
+                    status = {grpc::StatusCode::FAILED_PRECONDITION, error.what()};
+                } catch (const std::exception& error) {
+                    status = database_error(error);
+                }
+            }
+            co_await rpc.finish(response, status);
+        }, on_handler_done);
+
     agrpc::register_awaitable_rpc_handler<ResolveControlCommandRPC>(
         grpc_context_, control_,
         [this](
@@ -559,7 +597,7 @@ asio::awaitable<grpc::Status> DatabaseService::get_execution_checkpoint(
     bool found = false;
     try {
         co_await database_.run([&](pqxx::work& tx) {
-            found = execution_head::lookup(tx, request.mission_id(), response);
+            found = execution_head::lookup(tx, request, response);
         });
     } catch (const std::exception& e) {
         co_return database_error(e);
@@ -864,6 +902,11 @@ asio::awaitable<grpc::Status> DatabaseService::save_mission(const dbv1::SaveMiss
         co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT,
                                "mission_id, map_id, body_json, created_at and updated_at are required"};
         }
+    if (mission.dispatch_final_version() > INT64_MAX ||
+        (mission.dispatch_final_version() && (mission.robot_id().empty() ||
+         (mission.state() != "COMPLETED" && mission.state() != "CANCELED" && mission.state() != "FAILED")))) {
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "invalid dispatch final"};
+    }
     for (int i = 0; i < request.events_size(); ++i) {
         if (std::string error = event_error(request.events(i)); !error.empty()) {
             co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT,
@@ -873,9 +916,12 @@ asio::awaitable<grpc::Status> DatabaseService::save_mission(const dbv1::SaveMiss
     try {
         // Одна транзакция: миссия, потом её события (внешний ключ). Ошибка — ни того, ни другого
         co_await database_.run([&](pqxx::work& tx) {
-            ::save_mission(tx, mission);
-            insert_mission_events(tx, mission.mission_id(), request.events());
+            if (::save_mission(tx, mission)) {
+                insert_mission_events(tx, mission.mission_id(), request.events());
+            }
         });
+    } catch (const std::domain_error& error) {
+        co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION, error.what()};
     } catch (const pqxx::check_violation&) {
         // CHECK в таблице: ошибка в control, а не в данных оператора
         co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT,
@@ -1028,7 +1074,7 @@ DatabaseService::list_control_commands(
             commands = ::list_control_commands(
                 tx,
                 request.robot_id(),
-                request.include_resolved());
+                request.include_resolved(), request.mission_id());
         });
     } catch (const std::exception& error) {
         co_return database_error(error);

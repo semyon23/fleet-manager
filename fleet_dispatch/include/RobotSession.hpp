@@ -72,6 +72,11 @@ private:
     std::optional<std::chrono::steady_clock::time_point> probe_state_at_;
     std::optional<std::uint32_t> recovery_header_;
     void lost_probe_state();
+    void invalidate_observation();
+    void request_observation();
+    std::string observation_token_;
+    std::optional<std::uint32_t> observed_header_;
+    std::chrono::steady_clock::time_point observation_deadline_{};
     void start_loops();
     bool awaiting_live_state_ = false;
     asio::awaitable<void> run();

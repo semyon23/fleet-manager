@@ -230,6 +230,14 @@ message ProtocolHealth {
   google.protobuf.Timestamp last_error_at = 3;   // не задано — ошибок не было
 }
 
+// Accepted VDA state in this dispatch connection. Never restored from storage.
+message ObservedOrder {
+  string order_id = 1;
+  uint32 update_id = 2;
+  uint32 node_sequence = 3;
+  bool idle = 4;
+}
+
 message RobotStatus {
   string robot_id = 1;
   ConnectionState connection = 2;
@@ -257,6 +265,7 @@ message RobotStatus {
 
   google.protobuf.Timestamp last_state_at = 15;  // время получения последнего state от робота
   ProtocolHealth protocol = 16;
+  ObservedOrder observed_order = 17;
 }
 
 // =================================================================== статус миссии
@@ -361,6 +370,7 @@ message MissionStatus {
 // Последняя зафиксированная запись dispatch. Запрос не требует активной сессии робота.
 message GetExecutionCheckpointRequest {
   string mission_id = 1;
+  bool include_route_proof = 2;
 }
 
 message GetExecutionCheckpointResponse {
@@ -377,4 +387,9 @@ message GetExecutionCheckpointResponse {
   optional uint32 add_attempt = 4;  // Попытка AddMission из квитанции, включая нулевую.
   MissionStatus status = 5;         // Отсутствует, если статус ещё не записан.
   Kind kind = 6;
+  string grant_step = 7;
+  string grant_order = 8;
+  optional uint32 grant_update = 9;
+  bytes accepted_add = 10;        // Immutable Add receipt, only when route proof is requested.
+  Mission executed_mission = 11;  // Effective route in this checkpoint, including granted prefixes.
 }

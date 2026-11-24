@@ -7,9 +7,13 @@
 #include "spdlog/spdlog.h"
 #include "../include/VdaTopics.hpp"
 #include "../include/RobotStatusBuilder.hpp"
+#include "../include/RecoveryProbe.hpp"
+#include <boost/uuid/random_generator.hpp>
+#include <boost/uuid/uuid_io.hpp>
 #include "../include/OrderBuilder.hpp"
 #include <google/protobuf/util/message_differencer.h>
 #include <google/protobuf/util/time_util.h>
+#include <algorithm>
 #include <limits>
 using google::protobuf::util::TimeUtil;
 
@@ -77,7 +81,7 @@ void RobotSession::start() {
     request(MqttAction::Subscribe, connection_topic_);
     request(MqttAction::Subscribe, factsheet_topic_);
 
-    send_instant_action(vda5050::action_type::kStateRequest);
+    request_observation();
     publish_status();
     start_loops();
 }
@@ -85,6 +89,7 @@ void RobotSession::start() {
 asio::awaitable<void> RobotSession::start_restored(
     const fms::database::v1::RobotRecord& record, std::string mission) {
     if (record.has_status()) status_ = record.status();
+    invalidate_observation();
     status_.set_connection(fms::v1::CONNECTION_STATE_UNKNOWN);
     status_.set_mission_id(std::move(mission));
     awaiting_live_state_ = true;
@@ -140,7 +145,23 @@ bool RobotSession::attach_move(ActiveMission mission, std::uint64_t checkpoint_v
     return true;
 }
 
+void RobotSession::invalidate_observation() {
+    status_.clear_observed_order();
+    observed_header_.reset();
+    observation_token_.clear();
+    observation_deadline_ = {};
+}
+
+void RobotSession::request_observation() {
+    const auto now = std::chrono::steady_clock::now();
+    if (observer_ || awaiting_live_state_ || observed_header_ || now < observation_deadline_) return;
+    const auto token = "state-" + boost::uuids::to_string(boost::uuids::random_generator()());
+    if (request_probe(token)) observation_token_ = token;
+    observation_deadline_ = now + std::chrono::seconds(5);
+}
+
 void RobotSession::lost_probe_state() {
+    invalidate_observation();
     if (!observer_ || awaiting_live_state_ || (mission_ && mission_->done())) return;
 
     awaiting_live_state_ = true;
@@ -192,6 +213,11 @@ asio::awaitable<void> RobotSession::watchdog() {
             lost_probe_state();
         }
 
+        if (observed_header_ && std::chrono::steady_clock::now() >= observation_deadline_) {
+            lost_probe_state();
+            publish_status();
+        }
+        if (online) request_observation();
         if (online && silent) {
             status_.set_connection(fms::v1::CONNECTION_STATE_STALE);
             spdlog::warn("[{}] no state for 60 s, robot is STALE", robot_id_);
@@ -217,14 +243,16 @@ void RobotSession::handle(const VdaMessage& message) {
 
         if (message.topic == state_topic_) {
             auto state = json.get<vda5050::State>();
+            if (state.header.manufacturer != manufacturer_ || state.header.serial_number != serial_number_)
+                return;
+            if (observed_header_ && std::chrono::steady_clock::now() >= observation_deadline_) {
+                lost_probe_state();
+                request_observation();
+            }
+            const bool registry_probe = awaiting_live_state_;
             bool attached_now = false;
 
             if (observer_ || awaiting_live_state_) {
-                if (state.header.manufacturer != manufacturer_ ||
-                    state.header.serial_number != serial_number_) {
-                    return;
-                    }
-
                 if (awaiting_live_state_) {
                     const bool already_attached = static_cast<bool>(mission_);
                     if (!observer_ || !observer_(&state)) return;
@@ -247,6 +275,22 @@ void RobotSession::handle(const VdaMessage& message) {
                 }
             }
 
+            if (observed_header_ && state.header.header_id <= *observed_header_) return;
+            if (registry_probe || observed_header_ ||
+                RecoveryProbe::acknowledged_token(observation_token_, state)) {
+                observation_token_.clear();
+                observed_header_ = state.header.header_id;
+                observation_deadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+                auto* observed = status_.mutable_observed_order();
+                observed->set_order_id(state.order_id);
+                observed->set_update_id(state.order_update_id);
+                observed->set_node_sequence(state.last_node_sequence_id);
+                const bool instant_actions_done = std::ranges::all_of(state.instant_action_states, [](const auto& action) {
+                    return action.action_status == vda5050::ActionStatus::Finished ||
+                           action.action_status == vda5050::ActionStatus::Failed;
+                });
+                observed->set_idle(vda5050::is_idle(state) && instant_actions_done);
+            }
             fill_status(state, status_);
             awaiting_live_state_ = false;
             check_instant_actions(state);
@@ -276,7 +320,11 @@ void RobotSession::handle(const VdaMessage& message) {
         } else if (message.topic == connection_topic_) {
             auto connection = json.get<vda5050::Connection>();
             const auto next = to_proto(connection.connection_state);
-            if (next != fms::v1::CONNECTION_STATE_ONLINE) lost_probe_state();
+            const auto previous = status_.connection();
+            if (next != fms::v1::CONNECTION_STATE_ONLINE ||
+                (previous != next && previous != fms::v1::CONNECTION_STATE_UNKNOWN &&
+                 previous != fms::v1::CONNECTION_STATE_UNSPECIFIED))
+                lost_probe_state();
             status_.set_connection(next);
             last_state_time_ = std::chrono::steady_clock::now();
             log_status();
@@ -299,8 +347,10 @@ void RobotSession::publish_status() {
 
     auto now = std::chrono::steady_clock::now();
     if (important_change(saved_status_, status_) || now - saved_at_ >= std::chrono::seconds(5)) {
-        database_.save_status(status_);
         saved_status_ = status_;
+        auto stored = status_;
+        stored.clear_observed_order();
+        database_.save_status(stored);
         saved_at_ = now;
     }
 }

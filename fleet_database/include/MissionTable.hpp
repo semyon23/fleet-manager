@@ -24,7 +24,8 @@ struct MissionFilter {
 };
 
 
-void save_mission(pqxx::work& tx, const dbv1::MissionRecord& mission);
+// false for an already committed final. Its history was written in the same transaction.
+bool save_mission(pqxx::work& tx, const dbv1::MissionRecord& mission);
 
 // События миссии (c3) — по порядку. В одной транзакции с save_mission и после неё: внешний ключ на missions.
 // Пустой details_json — {}

@@ -315,6 +315,10 @@ service ControlStorage {
   // Только когда защищённое состояние надёжно завершено
   // или заменено другим сохранённым состоянием.
   // НЕ вызывать просто по успешному ответу dispatch.
+  // Закрыть сверенный набор целиком после надёжной записи финала в control.
+  rpc CloseMissionCommands(CloseMissionCommandsRequest) returns (CloseMissionCommandsResponse);
+  rpc ListOpenControlMissions(ListOpenControlMissionsRequest) returns (ListOpenControlMissionsResponse);
+
   rpc ResolveControlCommand(ResolveControlCommandRequest)
       returns (ResolveControlCommandResponse);
 }
@@ -358,6 +362,7 @@ message MissionRecord {
   google.protobuf.Timestamp created_at = 7;
   google.protobuf.Timestamp updated_at = 8;
   optional google.protobuf.Timestamp finished_at = 9;   // только у завершённых
+  uint64 dispatch_final_version = 10;  // Положительная версия фиксирует сверенный финал.
 }
 // Событие миссии (c3): что с ней было и когда — для истории в UI. Пишет control вместе с самой миссией,
 // одной транзакцией: «миссия FAILED, а события FAILED нет» не бывает. Только дописываются, не меняются.
@@ -491,6 +496,7 @@ message ListControlCommandsRequest {
   // Пусто — все роботы.
   string robot_id = 1;
   bool include_resolved = 2;
+  string mission_id = 3;  // пусто — все миссии в выбранном наборе
 }
 
 message StoredControlCommand {
@@ -501,6 +507,27 @@ message StoredControlCommand {
 message ListControlCommandsResponse {
   repeated StoredControlCommand commands = 1;
 }
+
+message ListOpenControlMissionsRequest {
+  string after_mission_id = 1;
+}
+message OpenControlMission {
+  string mission_id = 1;
+  uint32 last_attempt = 2;
+}
+message ListOpenControlMissionsResponse {
+  repeated OpenControlMission missions = 1;
+  string next_cursor = 2;
+}
+
+message CloseMissionCommandsRequest {
+  string mission_id = 1;
+  string robot_id = 2;
+  uint32 attempt = 3;
+  uint64 dispatch_final_version = 4;
+  repeated string command_ids = 5;
+}
+message CloseMissionCommandsResponse {}
 
 message ResolveControlCommandRequest {
   string command_id = 1;

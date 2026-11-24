@@ -40,6 +40,8 @@ struct Graph {
     std::vector<GraphEdge> edges;
     std::unordered_map<std::string, uint32_t> node_index;     // id → номер
 
+    std::unordered_map<std::string, uint32_t> edge_index; // id → index within this version
+
     std::optional<uint32_t> find_node(const std::string& id) const;
 
     // Куда приехать, чтобы «быть на» узле: сам узел — waypoint или станция с рёбрами;

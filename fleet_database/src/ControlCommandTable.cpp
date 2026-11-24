@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 
 #include "fleet_dispatch.pb.h"
+#include <set>
 
 namespace db = fms::database::v1;
 namespace dp = fms::dispatch::v1;
@@ -132,7 +133,11 @@ bool put_control_command(
 
     const auto bytes = hex(c.SerializeAsString());
 
-    tx.exec(
+    const auto mission = tx.exec(
+        "SELECT dispatch_final_version FROM missions WHERE mission_id=$1 FOR SHARE",
+        pqxx::params{c.mission_id()});
+    const bool sealed = !mission.empty() && !mission[0][0].is_null();
+    if (!sealed) tx.exec(
         "INSERT INTO control_commands "
         "(command_id, robot_id, mission_id, map_id, map_version, "
         "kind, move_node_id, revision, payload, attempt) "
@@ -170,15 +175,15 @@ std::vector<db::StoredControlCommand>
 list_control_commands(
     pqxx::work& tx,
     const std::string& robot_id,
-    bool include_resolved) {
+    bool include_resolved, const std::string& mission_id) {
 
     const auto rows = tx.exec(
         "SELECT encode(payload,'hex'), resolved "
         "FROM control_commands "
         "WHERE ($1='' OR robot_id=$1) "
-        "AND ($2 OR NOT resolved) "
+        "AND ($2 OR NOT resolved) AND ($3='' OR mission_id=$3) "
         "ORDER BY sequence_id",
-        pqxx::params{robot_id, include_resolved});
+        pqxx::params{robot_id, include_resolved, mission_id});
 
     std::vector<db::StoredControlCommand> result;
     result.reserve(rows.size());
@@ -197,6 +202,49 @@ list_control_commands(
     }
 
     return result;
+}
+
+void list_open_control_missions(pqxx::work& tx, const std::string& after, db::ListOpenControlMissionsResponse& result) {
+    constexpr int page_size = 128;
+    const auto rows = tx.exec("SELECT mission_id,max(attempt) FROM control_commands "
+                              "WHERE NOT resolved AND mission_id > $1 GROUP BY mission_id "
+                              "ORDER BY mission_id LIMIT $2", pqxx::params{after, page_size + 1});
+    for (const auto& row : rows) {
+        if (result.missions_size() == page_size) {
+            result.set_next_cursor(result.missions(page_size - 1).mission_id());
+            break;
+        }
+        auto* mission = result.add_missions();
+        mission->set_mission_id(row[0].as<std::string>());
+        mission->set_last_attempt(row[1].as<std::uint32_t>());
+    }
+}
+
+void close_mission_commands(pqxx::work& tx, const db::CloseMissionCommandsRequest& r) {
+    const auto final = tx.exec(
+        "SELECT m.dispatch_final_version,h.version,h.terminal,h.uncertain,a.attempt "
+        "FROM missions m JOIN dispatch_execution_heads h USING(mission_id) "
+        "JOIN dispatch_add_receipts a USING(mission_id) "
+        "WHERE m.mission_id=$1 AND m.robot_id=$2 AND h.robot_id=$2 FOR UPDATE OF m",
+        pqxx::params{r.mission_id(), r.robot_id()});
+    if (final.empty() || final[0][0].is_null() ||
+        final[0][0].as<std::uint64_t>() != r.dispatch_final_version() ||
+        final[0][1].as<std::uint64_t>() != r.dispatch_final_version() ||
+        !final[0][2].as<bool>() || final[0][3].as<bool>() ||
+        final[0][4].as<std::uint32_t>() != r.attempt()) {
+        throw ControlCommandConflict("terminal checkpoint or control commit changed");
+    }
+    const auto rows = tx.exec("SELECT command_id,attempt FROM control_commands WHERE mission_id=$1",
+                              pqxx::params{r.mission_id()});
+    std::set<std::string> ids(r.command_ids().begin(), r.command_ids().end());
+    if (ids.empty() || ids.size() != rows.size() || ids.size() != static_cast<size_t>(r.command_ids_size()))
+        throw ControlCommandConflict("control command set changed");
+    for (const auto& row : rows) {
+        if (!ids.erase(row[0].as<std::string>()) || row[1].as<std::uint32_t>() > r.attempt())
+            throw ControlCommandConflict("control command attempt changed");
+    }
+    tx.exec("UPDATE control_commands SET resolved=true,resolved_at=now() "
+            "WHERE mission_id=$1 AND NOT resolved", pqxx::params{r.mission_id()});
 }
 
 bool resolve_control_command(

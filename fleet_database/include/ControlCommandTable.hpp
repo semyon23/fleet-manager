@@ -29,7 +29,12 @@ std::vector<fms::database::v1::StoredControlCommand>
 list_control_commands(
     pqxx::work& tx,
     const std::string& robot_id,
-    bool include_resolved);
+    bool include_resolved, const std::string& mission_id);
+
+void list_open_control_missions(pqxx::work& tx, const std::string& after,
+                                fms::database::v1::ListOpenControlMissionsResponse& response);
+
+void close_mission_commands(pqxx::work& tx, const fms::database::v1::CloseMissionCommandsRequest& request);
 
 // false — нет такого command_id.
 // Повтор завершения записи идемпотентен.

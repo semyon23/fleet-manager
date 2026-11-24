@@ -17,13 +17,8 @@ struct RecoveryProbe {
     std::string token;
     std::optional<move_recovery::Result> decision;
 
-    bool acknowledged(const vda5050::State& state) const {
-        if (token.empty() ||
-            state.header.manufacturer != robot->manufacturer() ||
-            state.header.serial_number != robot->serial_number()) {
-            return false;
-            }
-
+    static bool acknowledged_token(const std::string& token, const vda5050::State& state) {
+        if (token.empty()) return false;
         const vda5050::ActionState* found = nullptr;
         for (const auto& a : state.instant_action_states) {
             if (a.action_id != token) continue;
@@ -34,6 +29,12 @@ struct RecoveryProbe {
         return found &&
                found->action_status == vda5050::ActionStatus::Finished &&
                (!found->action_type || *found->action_type == "stateRequest");
+    }
+
+    bool acknowledged(const vda5050::State& state) const {
+        return state.header.manufacturer == robot->manufacturer() &&
+               state.header.serial_number == robot->serial_number() &&
+               acknowledged_token(token, state);
     }
 
     void reset() {

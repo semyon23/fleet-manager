@@ -86,6 +86,7 @@ MissionRunner::MissionRunner(asio::io_context& io_context, Services& services, M
       uncertain_timer_(io_context),
       extension_timer_(io_context),
       traffic_timer_(io_context),
+      checkpoint_timer_(io_context),
       command_journal_(services),
       journal_timer_(io_context) {}
 
@@ -98,6 +99,7 @@ void MissionRunner::start() {
     asio::co_spawn(io_context_, extension_loop(), log_failure);
     asio::co_spawn(io_context_, traffic_loop(), log_failure);
     asio::co_spawn(io_context_, journal_startup(), log_failure);
+    asio::co_spawn(io_context_, checkpoint_loop(), log_failure);
 }
 
 void MissionRunner::stop() {
@@ -112,6 +114,7 @@ void MissionRunner::stop() {
     extension_timer_.cancel();
     traffic_timer_.cancel();
     journal_timer_.cancel();
+    checkpoint_timer_.cancel();
 }
 
 // ==================================================================== отправка в dispatch
@@ -167,6 +170,10 @@ asio::awaitable<void> MissionRunner::send(std::string mission_id, std::string st
         sending_.erase(mission_id);
         co_return;
     }
+    if (checkpoint_jobs_.contains(mission_id)) {
+        sending_.erase(mission_id);
+        co_return;
+    }
     add_rpc_started_.insert(mission_id);
     dpv1::AddMissionResponse response;
     grpc::Status status = co_await services_.call<&Dispatch::PrepareAsyncAddMission>(*services_.dispatch, request, response);
@@ -217,6 +224,7 @@ asio::awaitable<void> MissionRunner::send(std::string mission_id, std::string st
         default:
             // Не повторять AddMission: dispatch мог уже принять и закончить её.
             uncertain_.insert(mission_id);
+            queue_checkpoint(mission_id);
             spdlog::warn("[runner] mission {}: send outcome unknown: {}",
                          mission_id, status.error_message());
     }
@@ -343,57 +351,8 @@ void MissionRunner::update_plan(Plan& plan, const fms1::MissionStatus& status) {
 
 // ==================================================================== статусы
 
-void MissionRunner::apply(Mission& mission, const fms1::MissionStatus& status) {
-
-    if (mission.finished() || status.robot_id() != mission.robot_id) {
-        return;
-    }
-
-    observe_extension(status);
-
-    uncertain_.erase(mission.id);
-    auto plan = plans_.find(mission.id);
-
-    if (plan != plans_.end()) {
-        update_plan(plan->second, status);
-    } else {
-        waiting_plans_[mission.id] = status;
-    }
-
-    if (plan != plans_.end()) {
-        try {
-            for (std::size_t i = 0;
-                 i < plan->second.progress.size(); ++i) {
-                const auto step_id = "s" + std::to_string(i);
-
-                for (const auto& step : status.steps()) {
-                    const auto held =
-                        traffic_routes_.find(mission.robot_id);
-
-                    const bool finishing_held =
-                        step.state() == fms1::STEP_STATE_COMPLETED &&
-                        held != traffic_routes_.end() &&
-                        held->second.key ==
-                            mission.id + "/" + std::to_string(journal_attempt(mission.id)) + "/" + step_id;
-
-                    if (step.node_id() == step_id &&
-                        step.has_move() &&
-                        (finishing_held ||
-                         status.current_node_id() == step_id)) {
-                        track_traffic(mission, plan->second, i);
-                         }
-                }
-                 }
-        } catch (const std::exception& error) {
-            traffic_fault_ = true;
-            spdlog::error(
-                "[traffic] grants blocked: {}", error.what());
-        }
-    }
-
-    const json before = mission_json(mission);
-    const std::string old_state = mission.state;
-
+void MissionRunner::copy_status(Mission& mission, const fms1::MissionStatus& status) {
+    const auto old_state = mission.state;
     mission.state = without_prefix(fms1::MissionState_Name(status.state()), "MISSION_STATE_");
     // Старый RUNNING не отменяет намерение оператора.
     // Терминальный COMPLETED/FAILED/CANCELED сохраняем как фактический итог.
@@ -438,6 +397,73 @@ void MissionRunner::apply(Mission& mission, const fms1::MissionStatus& status) {
         mission.error = MissionError{without_prefix(fms1::MissionErrorCode_Name(status.error().code()), "MISSION_ERROR_CODE_"),
                                      status.error().message()};
     }
+}
+
+void MissionRunner::apply(Mission& mission, const fms1::MissionStatus& status, std::uint64_t final_version) {
+
+    if (mission.finished() || status.robot_id() != mission.robot_id) {
+        return;
+    }
+
+    if (status.mission_id() != mission.id) return;
+    const bool final = status.state() == fms1::MISSION_STATE_COMPLETED ||
+                       status.state() == fms1::MISSION_STATE_FAILED ||
+                       status.state() == fms1::MISSION_STATE_CANCELED;
+    if (!final_version && (final || checkpoint_jobs_.contains(mission.id))) {
+        auto last = waiting_plans_.find(mission.id);
+        if (last == waiting_plans_.end() ||
+            TimeUtil::TimestampToNanoseconds(status.updated_at()) >=
+                TimeUtil::TimestampToNanoseconds(last->second.updated_at()))
+            waiting_plans_[mission.id] = status;
+        queue_checkpoint(mission.id);
+        return;
+    }
+    if (!final_version) observe_extension(status);
+
+    uncertain_.erase(mission.id);
+    auto plan = plans_.find(mission.id);
+
+    if (!final_version && plan != plans_.end()) {
+        update_plan(plan->second, status);
+    } else if (!final_version) {
+        waiting_plans_[mission.id] = status;
+    }
+
+    if (!final_version && plan != plans_.end()) {
+        try {
+            for (std::size_t i = 0;
+                 i < plan->second.progress.size(); ++i) {
+                const auto step_id = "s" + std::to_string(i);
+
+                for (const auto& step : status.steps()) {
+                    const auto held =
+                        traffic_routes_.find(mission.robot_id);
+
+                    const bool finishing_held =
+                        step.state() == fms1::STEP_STATE_COMPLETED &&
+                        held != traffic_routes_.end() &&
+                        held->second.key ==
+                            mission.id + "/" + std::to_string(journal_attempt(mission.id)) + "/" + step_id;
+
+                    if (step.node_id() == step_id &&
+                        step.has_move() &&
+                        (finishing_held ||
+                         status.current_node_id() == step_id)) {
+                        track_traffic(mission, plan->second, i);
+                         }
+                }
+                 }
+        } catch (const std::exception& error) {
+            traffic_fault_ = true;
+            spdlog::error(
+                "[traffic] grants blocked: {}", error.what());
+        }
+    }
+
+    const json before = mission_json(mission);
+    const std::string old_state = mission.state;
+
+    copy_status(mission, status);
 
     if (mission_json(mission) == before) {
         return;   // dispatch прислал то же самое — писать нечего
@@ -452,25 +478,15 @@ void MissionRunner::apply(Mission& mission, const fms1::MissionStatus& status) {
         missions_.changed(mission, canceling ? "canceled by operator" : "");
         return;
     }
-    // Закончилась: следующая миссия робота — в dispatch или обратно в очередь
-    const std::string robot_id = mission.robot_id;
-    const bool completed = mission.state == "COMPLETED";
-    std::string end_node;
-    if (plan != plans_.end() && !plan->second.routes.empty()) {
-        end_node = plan->second.routes.back().back();
-        plans_.erase(plan);
-    }
-    waiting_plans_.erase(mission.id);
-    command_journal_.forget(mission.id);
-    journal_attempts_.erase(mission.id);
-    add_rpc_started_.erase(mission.id);
-    local_adds_.erase(mission.id);
-    missions_.changed(mission);   // завершённая уходит из памяти: mission дальше не трогаем
-    release_next(robot_id, completed, end_node);
+    // The checkpoint job retains ownership until storage acknowledges the final
+    // and a current robot observation can take over the corridor.
+    missions_.changed(mission, "", final_version);
 }
 
 void MissionRunner::back_to_queue(Mission& mission, const std::string& why) {
     spdlog::warn("[runner] mission {} back to the queue ({}): {}", mission.id, mission.robot_id, why);
+    checkpoint_jobs_.erase(mission.id);
+    uncertain_.erase(mission.id);
     mission.state = "QUEUED";
     mission.robot_id.clear();
     mission.assigned_at_ms.reset();
@@ -496,7 +512,7 @@ void MissionRunner::finish(Mission& mission, const std::string& state, std::opti
     plans_.erase(mission.id);
     waiting_plans_.erase(mission.id);
     command_journal_.forget(mission.id);
-    journal_attempts_.erase(mission.id);
+    if (!checkpoint_jobs_.contains(mission.id)) journal_attempts_.erase(mission.id);
     add_rpc_started_.erase(mission.id);
     local_adds_.erase(mission.id);
     missions_.changed(mission, why);   // завершённая уходит из памяти: mission дальше не трогаем
@@ -648,6 +664,15 @@ asio::awaitable<void> MissionRunner::watch_dispatch() {
         }
         grpc::Status status = co_await rpc.finish(asio::use_awaitable);
         stream_ = nullptr;
+        if (traffic_snapshot_) {
+            for (const auto* m : missions_.active()) {
+                if (m->state != "QUEUED" && !is_next(m->id)) queue_checkpoint(m->id);
+            }
+            for (auto& [id, job] : checkpoint_jobs_) {
+                ++job->epoch;
+                waiting_plans_.erase(id);
+            }
+        }
         traffic_snapshot_ = false;
         if (stopped_) {
             break;
@@ -673,23 +698,6 @@ void MissionRunner::reconcile(
     const dpv1::MissionSnapshot& snapshot) {
 
     traffic_snapshot_ = true;
-
-    for (Mission* mission : missions_.active()) {
-        if (mission->state != "QUEUED" &&
-            !is_next(mission->id) &&
-            !sending_.contains(mission->id) &&
-            !plans_.contains(mission->id) &&
-            !recovery_commands_.contains(mission->id)) {
-            // Нет долговременной записи неподтверждённых разрешений.
-            // GetMission не исключает ещё летящую команду.
-            traffic_fault_ = true;
-
-            spdlog::error(
-                "[traffic] restart with active mission {}: "
-                "grants require reconciliation",
-                mission->id);
-            }
-    }
 
     std::set<std::string> in_dispatch;
 
@@ -717,6 +725,8 @@ void MissionRunner::reconcile(
 
         // Отсутствие в снимке не запрещает позднюю доставку AddMission.
         uncertain_.insert(mission->id);
+        waiting_plans_.erase(mission->id);
+        queue_checkpoint(mission->id);
         ++uncertain;
     }
 
@@ -726,7 +736,8 @@ void MissionRunner::reconcile(
 }
 // Маршруты — ровно те, что ушли роботу: из миссии в dispatch, а не построенные заново (карта могла измениться).
 // Время шагов — по графу от начала до конца маршрута: нужно только для оценки «скоро свободен» (c1b)
-asio::awaitable<void> MissionRunner::restore(std::string mission_id) {
+asio::awaitable<void> MissionRunner::restore(std::string mission_id, Job job, std::uint64_t epoch,
+                                           RecoveryCommands commands) {
     if (stopped_) {
         co_return;
     }
@@ -749,7 +760,8 @@ asio::awaitable<void> MissionRunner::restore(std::string mission_id) {
     if (!mission ||
         mission->finished() ||
         mission->state == "QUEUED" ||
-        plans_.contains(mission_id)) {
+        (!job && (plans_.contains(mission_id) || checkpoint_jobs_.contains(mission_id))) ||
+        (job && (!checkpoint_current(mission_id, job, epoch) || !traffic_snapshot_))) {
         co_return;
     }
 
@@ -769,6 +781,10 @@ asio::awaitable<void> MissionRunner::restore(std::string mission_id) {
         co_return;
     }
 
+    if (job && (response.status().mission_id() != mission_id ||
+                response.status().robot_id() != mission->robot_id ||
+                (response.status().state() != fms1::MISSION_STATE_RUNNING &&
+                 response.status().state() != fms1::MISSION_STATE_PAUSED))) co_return;
     const auto& source = response.mission();
 
     if (source.mission_id() != mission_id ||
@@ -886,17 +902,24 @@ asio::awaitable<void> MissionRunner::restore(std::string mission_id) {
 
     plan.last_node = plan.routes[current].front();
 
-    auto recovery = recovery_commands_.find(mission_id);
-    if (recovery != recovery_commands_.end()) {
-        if (!traffic_snapshot_ ||
-            !restore_journal_base(*mission, plan, latest->second, recovery->second)) {
-            co_return;
+    const auto live = latest->second;
+    update_plan(plan, live);
+    if (job) {
+        const auto previous = plans_.find(mission_id);
+        if (previous != plans_.end()) {
+            const auto& old = previous->second;
+            if (plan.routes != old.routes || plan.edges != old.edges || plan.progress.size() != old.progress.size())
+                co_return;
+            for (std::size_t i = 0; i < plan.progress.size(); ++i) {
+                const auto& p = plan.progress[i];
+                const auto& prior = old.progress[i];
+                if (p.revision() < prior.revision() || p.confirmed_revision() < prior.confirmed_revision() ||
+                    p.last_node_index() < prior.last_node_index() || p.released_nodes() < prior.released_nodes())
+                    co_return;
             }
+        }
+        if (!restore_journal_base(*mission, plan, live, commands)) co_return;
     }
-    // Используем последний статус, полученный control из стрима.
-    // response.status() намеренно не применяем: пока RPC летел,
-    // робот мог пройти ещё несколько узлов или сменить шаг.
-    update_plan(plan, latest->second);
 
     spdlog::info(
         "[runner] mission {}: route restored from dispatch, {} steps",
@@ -905,10 +928,9 @@ asio::awaitable<void> MissionRunner::restore(std::string mission_id) {
     plans_[mission_id] = std::move(plan);
     waiting_plans_.erase(latest);
 
-    if (recovery != recovery_commands_.end()) {
-        // К этому моменту уже установлены и план, и защищённый участок.
-        recovery_commands_.erase(recovery);
-        spdlog::info("[journal] restored protected base for mission {}", mission_id);
+    if (job) {
+        checkpoint_jobs_.erase(mission_id);
+        apply(*mission, live);
     }
 }
 
@@ -1000,6 +1022,7 @@ MissionRunner::routes(const std::string& map_id) {
 
 void MissionRunner::request_restore(const std::string& mission_id) {
     if (stopped_ ||
+        checkpoint_jobs_.contains(mission_id) ||
         plans_.contains(mission_id) ||
         !waiting_plans_.contains(mission_id) ||
         sending_.contains(mission_id) ||
@@ -1099,6 +1122,12 @@ asio::awaitable<void> MissionRunner::uncertain_loop() {
         cursor = id;
 
         if (sending_.contains(id) || is_next(id)) continue;
+        if (checkpoint_jobs_.contains(id)) {
+            // Only the operator's existing cancellation may be retried during recovery.
+            if (auto* m = missions_.find(id); m && m->state == "CANCELING" && plans_.contains(id))
+                co_await journaled_cancel(id);
+            continue;
+        }
 
         dpv1::GetMissionRequest request;
         request.set_mission_id(id);
@@ -1122,7 +1151,7 @@ asio::awaitable<void> MissionRunner::uncertain_loop() {
             uncertain_.contains(id) &&
             response.status().mission_id() == id &&
             response.status().robot_id() == mission->robot_id &&
-            !waiting_plans_.contains(id)) {
+            !checkpoint_jobs_.contains(id) && !waiting_plans_.contains(id)) {
             apply(*mission, response.status());
             request_restore(id);
         }
@@ -1393,7 +1422,7 @@ bool MissionRunner::traffic_ready() const {
 
     if (!journal_loaded_ ||
         traffic_fault_ ||
-        !recovery_commands_.empty() ||
+        !checkpoint_jobs_.empty() ||
         !traffic_availability_ ||
         !traffic_snapshot_ ||
         !maps_.loaded() ||
@@ -1477,6 +1506,9 @@ void MissionRunner::track_traffic(
     next.map = mission.map_id;
     next.version = graph->version;
     next.reached = progress.last_node_index();
+    // Keep the approach to the final node until the robot actually stops on it.
+    if (step + 1 == plan.routes.size() && nodes.size() > 1 && next.reached + 1 == nodes.size())
+        --next.reached;
 
     std::size_t released = progress.released_nodes();
     auto old = traffic_routes_.find(mission.robot_id);
@@ -1825,7 +1857,13 @@ ControlCommandJournal::Handle MissionRunner::stage_command(
     record.set_request_proto(payload);
     record.set_recovery_version(1);
     record.set_recovery_json(snapshot.dump());
-    return command_journal_.stage(std::move(record));
+    auto entry = command_journal_.stage(std::move(record));
+    if (auto it = checkpoint_jobs_.find(id); it != checkpoint_jobs_.end() &&
+        it->second->last_command != entry->record.command_id()) {
+        it->second->last_command = entry->record.command_id();
+        ++it->second->epoch;
+    }
+    return entry;
 }
 
 asio::awaitable<grpc::Status> MissionRunner::journaled_cancel(std::string id) {
@@ -1860,6 +1898,7 @@ asio::awaitable<grpc::Status> MissionRunner::journaled_cancel(std::string id) {
                                   "AddMission started despite cancellation"};
         }
         // Намерение отмены уже надёжно записано. AddMission не вызывался.
+        queue_checkpoint(id);
         finish(*mission, "CANCELED", std::nullopt, "canceled before dispatch send");
         co_return grpc::Status::OK;
     }
@@ -1872,92 +1911,33 @@ asio::awaitable<grpc::Status> MissionRunner::journaled_cancel(std::string id) {
 
 asio::awaitable<void> MissionRunner::journal_startup() {
     using Storage = fms::database::v1::ControlStorage::Stub;
+    std::string after;
     while (!stopped_) {
         if (!(missions_.loaded() && maps_.loaded())) {
             journal_timer_.expires_after(std::chrono::milliseconds(100));
             co_await journal_timer_.async_wait(asio::as_tuple(asio::use_awaitable));
             continue;
         }
-        fms::database::v1::ListControlCommandsRequest request;
-        fms::database::v1::ListControlCommandsResponse response;
-        auto status = co_await services_.call<&Storage::PrepareAsyncListControlCommands>(
+        fms::database::v1::ListOpenControlMissionsRequest request;
+        request.set_after_mission_id(after);
+        fms::database::v1::ListOpenControlMissionsResponse response;
+        auto status = co_await services_.call<&Storage::PrepareAsyncListOpenControlMissions>(
             *services_.control, request, response);
-        bool retry = !status.ok();
-        bool unresolved = false;
-
-        std::map<std::string, RecoveryCommands> recoverable;
-
-        if (status.ok()) {
-            std::map<std::string, std::vector<fms::database::v1::ControlCommandRecord>> groups;
-            for (const auto& item : response.commands()) {
-                groups[item.command().mission_id()].push_back(item.command());
-                auto& attempt = journal_attempts_[item.command().mission_id()];
-                attempt = std::max(attempt, item.command().attempt());
-            }
-            for (auto& [id, commands] : groups) {
-                fms::database::v1::GetMissionRequest get;
-                get.set_mission_id(id);
-                fms::database::v1::GetMissionResponse got;
-                status = co_await services_.call<&Storage::PrepareAsyncGetMission>(
-                    *services_.control, get, got);
-                if (!status.ok() && status.error_code() != grpc::StatusCode::NOT_FOUND) {
-                    retry = true;
-                    break;
-                }
-                bool cleared = status.ok() && got.mission().state() == "COMPLETED";
-                std::string proof_id;
-                // Для отмены доказательство должно относиться к последней попытке.
-                if (status.ok() && got.mission().state() == "CANCELED") {
-                    for (const auto& command : commands) {
-                        if (command.attempt() != journal_attempt(id) ||
-                            command.kind() != fms::database::v1::CONTROL_COMMAND_KIND_CANCEL_MISSION) continue;
-                        const auto snapshot = json::parse(command.recovery_json(), nullptr, false);
-                        if (command.recovery_version() != 1 || !snapshot.is_object()) continue;
-                        if (snapshot.contains("cancelBeforeAdd") && snapshot["cancelBeforeAdd"] == true) cleared = true;
-                        const auto base = snapshot.find("protectedBase");
-                        if (base != snapshot.end() && base->is_object() &&
-                            base->contains("nodes") && (*base)["nodes"].is_array() &&
-                            !(*base)["nodes"].empty() && base->contains("reached") &&
-                            (*base)["reached"].is_number_unsigned() &&
-                            (*base)["reached"].get<std::uint64_t>() == (*base)["nodes"].size() - 1) {
-                            cleared = true;
-                        }
-                        if (cleared) { proof_id = command.command_id(); break; }
-                    }
-                }
-                if (!cleared) {
-                    const auto* mission = missions_.find(id);
-                    if (status.ok() && mission && !mission->finished() &&
-                        mission->state != "QUEUED") {
-                        recoverable.emplace(id, std::move(commands));
-                        continue;
-                        }
-                    unresolved = true;
-                    spdlog::error("[journal] mission {} has unresolved commands; recovery required", id);
-                    continue;
-                }
-                // Cancel с доказательством закрываем последним, чтобы обрыв
-                // между Resolve не уничтожил доказательство для остальных записей.
-                std::stable_partition(commands.begin(), commands.end(), [&](const auto& cmd) {
-                    return cmd.command_id() != proof_id;
-                });
-                for (const auto& command : commands) {
-                    fms::database::v1::ResolveControlCommandRequest resolve;
-                    resolve.set_command_id(command.command_id());
-                    fms::database::v1::ResolveControlCommandResponse resolved;
-                    status = co_await services_.call<&Storage::PrepareAsyncResolveControlCommand>(
-                        *services_.control, resolve, resolved);
-                    if (!status.ok()) { retry = true; break; }
-                }
-                if (retry) break;
-                journal_attempts_.erase(id);
-            }
-        }
         if (stopped_) co_return;
-        if (!retry) {
-            recovery_commands_ = std::move(recoverable);
+        if (status.ok()) {
+            for (const auto& entry : response.missions()) {
+                auto& attempt = journal_attempts_[entry.mission_id()];
+                attempt = std::max(attempt, entry.last_attempt());
+                queue_checkpoint(entry.mission_id());
+            }
+            if (!response.next_cursor().empty()) {
+                after = response.next_cursor();
+                continue;
+            }
+            for (const auto* m : missions_.active()) {
+                if (m->state != "QUEUED" && !is_next(m->id)) queue_checkpoint(m->id);
+            }
             journal_loaded_ = true;
-            if (unresolved) traffic_fault_ = true;
             co_return;
         }
         journal_timer_.expires_after(std::chrono::seconds(2));
@@ -1974,13 +1954,14 @@ bool MissionRunner::restore_journal_base(
     if (status.mission_id() != mission.id || status.robot_id() != mission.robot_id ||
         (status.state() != fms1::MISSION_STATE_RUNNING &&
          status.state() != fms1::MISSION_STATE_PAUSED) ||
-        mission.state == "CANCELING" || !mission.current_step) {
+        mission.state == "CANCELING") {
         return false;
     }
 
-    const int current_step = *mission.current_step;
-    if (current_step < 0 || static_cast<std::size_t>(current_step) >= plan.routes.size() ||
-        status.current_node_id() != std::format("s{}", current_step)) {
+    int current_step = 0;
+    while (current_step < static_cast<int>(plan.routes.size()) &&
+           status.current_node_id() != "s" + std::to_string(current_step)) ++current_step;
+    if (static_cast<std::size_t>(current_step) >= plan.routes.size()) {
         return false;
     }
 
@@ -2138,8 +2119,31 @@ bool MissionRunner::restore_journal_base(
             }
         }
 
-        // track_traffic устанавливает защиту до снятия блокировки старта.
-        track_traffic(mission, plan, static_cast<std::size_t>(current_step));
+        // Every preceding step above has confirmed completion across its entire grant.
+        // A warm control may still own its last observed prefix from an earlier step.
+        auto old = traffic_routes_.find(mission.robot_id);
+        decltype(traffic_routes_)::node_type previous;
+        if (old != traffic_routes_.end()) {
+            for (int i = 0; i < current_step; ++i) {
+                if (old->second.key != mission.id + "/" + std::to_string(attempt) + "/s" + std::to_string(i))
+                    continue;
+                if (old->second.map != graph->map_id || old->second.version != graph->version ||
+                    old->second.nodes.size() > plan.routes[i].size()) return false;
+                for (std::size_t j = 0; j < old->second.nodes.size(); ++j) {
+                    if (graph->find_node(plan.routes[i][j]) != old->second.nodes[j]) return false;
+                    if (j && (old->second.edges.at(j-1) >= graph->edges.size() ||
+                        graph->edges[old->second.edges[j-1]].id != plan.edges[i][j-1])) return false;
+                }
+                previous = traffic_routes_.extract(old);
+                break;
+            }
+        }
+        try {
+            track_traffic(mission, plan, static_cast<std::size_t>(current_step));
+        } catch (...) {
+            if (!previous.empty()) traffic_routes_.insert(std::move(previous));
+            throw;
+        }
         return true;
     } catch (const std::exception& error) {
         spdlog::warn("[journal] cannot restore mission {}: {}", mission.id, error.what());

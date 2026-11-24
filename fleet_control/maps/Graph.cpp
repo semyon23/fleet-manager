@@ -218,6 +218,7 @@ Graph build_graph(const std::string& map_id, uint32_t version, const json& body)
         }
         a.has_edges = true;
         b.has_edges = true;
+        graph.edge_index.emplace(edge.id, static_cast<uint32_t>(graph.edges.size()));
         graph.edges.push_back(std::move(edge));
     }
     return graph;

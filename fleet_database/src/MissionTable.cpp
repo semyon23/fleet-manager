@@ -1,5 +1,8 @@
 #include "../include/MissionTable.hpp"
+#include "ExecutionHead.hpp"
 #include <google/protobuf/util/time_util.h>
+#include <nlohmann/json.hpp>
+#include <stdexcept>
 
 using google::protobuf::util::TimeUtil;
 
@@ -9,7 +12,7 @@ namespace
         "mission_id, map_id, robot_id, state, priority, body::text, "
         "(extract(epoch FROM created_at) * 1000)::bigint, "
         "(extract(epoch FROM updated_at) * 1000)::bigint, "
-        "(extract(epoch FROM finished_at) * 1000)::bigint";
+        "(extract(epoch FROM finished_at) * 1000)::bigint, dispatch_final_version";
 
     dbv1::MissionRecord row_to_mission(pqxx::row_ref row)
     {
@@ -27,11 +30,26 @@ namespace
         if (!row[8].is_null()) {
             *mission.mutable_finished_at() = TimeUtil::MillisecondsToTimestamp(row[8].as<long long>());
         }
+        if (!row[9].is_null()) mission.set_dispatch_final_version(row[9].as<std::uint64_t>());
         return mission;
     }
 } // namespace
 
-void save_mission(pqxx::work& tx, const dbv1::MissionRecord& mission) {
+bool save_mission(pqxx::work& tx, const dbv1::MissionRecord& mission) {
+    if (mission.dispatch_final_version()) {
+        fms::v1::GetExecutionCheckpointRequest request;
+        request.set_mission_id(mission.mission_id());
+        fms::v1::GetExecutionCheckpointResponse stored;
+        const bool found = execution_head::lookup(tx, request, stored);
+        const auto& status = stored.status();
+        if (!found || !stored.has_add_attempt() || !stored.has_status() ||
+            stored.checkpoint_version() != mission.dispatch_final_version() ||
+            stored.robot_id() != mission.robot_id() ||
+            fms::v1::MissionState_Name(status.state()) != "MISSION_STATE_" + mission.state() ||
+            (mission.state() == "COMPLETED" &&
+             stored.kind() != fms::v1::GetExecutionCheckpointResponse::CONFIRMED_TERMINAL))
+            throw std::domain_error("mission does not match the stored dispatch final");
+    }
     // Пустой robot_id и отсутствующий finished_at — NULL
     std::optional<std::string> robot_id;
     if (!mission.robot_id().empty()) {
@@ -42,19 +60,39 @@ void save_mission(pqxx::work& tx, const dbv1::MissionRecord& mission) {
         finished_at = TimeUtil::TimestampToMilliseconds(mission.finished_at());
     }
 
-    tx.exec("INSERT INTO missions (mission_id, map_id, robot_id, state, priority, body, "
-            "created_at, updated_at, finished_at) "
+    const auto rows = tx.exec("INSERT INTO missions (mission_id, map_id, robot_id, state, priority, body, "
+            "created_at, updated_at, finished_at, dispatch_final_version) "
             "VALUES ($1, $2, $3, $4, $5, $6::jsonb, "
             "to_timestamp($7::bigint / 1000.0), to_timestamp($8::bigint / 1000.0), "
-            "to_timestamp($9::bigint / 1000.0)) "
+            "to_timestamp($9::bigint / 1000.0), NULLIF($10::bigint,0)) "
             "ON CONFLICT (mission_id) DO UPDATE SET "
             "map_id = EXCLUDED.map_id, robot_id = EXCLUDED.robot_id, state = EXCLUDED.state, "
             "priority = EXCLUDED.priority, body = EXCLUDED.body, created_at = EXCLUDED.created_at, "
-            "updated_at = EXCLUDED.updated_at, finished_at = EXCLUDED.finished_at",
+            "updated_at = EXCLUDED.updated_at, finished_at = EXCLUDED.finished_at, "
+            "dispatch_final_version = EXCLUDED.dispatch_final_version "
+            "WHERE missions.dispatch_final_version IS NULL AND "
+            "(EXCLUDED.dispatch_final_version IS NULL OR missions.state NOT IN "
+            "('COMPLETED','CANCELED','FAILED') OR (missions.state=EXCLUDED.state "
+            "AND missions.robot_id=EXCLUDED.robot_id AND missions.map_id=EXCLUDED.map_id)) RETURNING 1",
             pqxx::params{mission.mission_id(), mission.map_id(), robot_id, mission.state(),
                          static_cast<int>(mission.priority()), mission.body_json(),
                          TimeUtil::TimestampToMilliseconds(mission.created_at()),
-                         TimeUtil::TimestampToMilliseconds(mission.updated_at()), finished_at});
+                         TimeUtil::TimestampToMilliseconds(mission.updated_at()), finished_at,
+                         static_cast<long long>(mission.dispatch_final_version())});
+    if (!rows.empty()) return true;
+    const auto stored = select_mission(tx, mission.mission_id());
+    if (stored && mission.dispatch_final_version() != 0 &&
+        stored->dispatch_final_version() == mission.dispatch_final_version() &&
+        stored->state() == mission.state() && stored->robot_id() == mission.robot_id() &&
+        stored->map_id() == mission.map_id() && stored->priority() == mission.priority() &&
+        TimeUtil::TimestampToMilliseconds(stored->created_at()) == TimeUtil::TimestampToMilliseconds(mission.created_at()) &&
+        TimeUtil::TimestampToMilliseconds(stored->updated_at()) == TimeUtil::TimestampToMilliseconds(mission.updated_at()) &&
+        stored->has_finished_at() == mission.has_finished_at() &&
+        TimeUtil::TimestampToMilliseconds(stored->finished_at()) == TimeUtil::TimestampToMilliseconds(mission.finished_at()) &&
+        nlohmann::json::parse(stored->body_json()) == nlohmann::json::parse(mission.body_json())) {
+        return false;
+    }
+    throw std::domain_error("mission final already committed");
 }
 
 void insert_mission_events(pqxx::work& tx, const std::string& mission_id,

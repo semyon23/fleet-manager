@@ -144,13 +144,15 @@ std::vector<Mission*> MissionStore::queue() {
     return queued;
 }
 
-nlohmann::json MissionStore::changed(Mission& mission, const std::string& why) {
+nlohmann::json MissionStore::changed(Mission& mission, const std::string& why,
+                                     std::uint64_t dispatch_final_version) {
     mission.updated_at_ms = now_ms();
     nlohmann::json document = mission_json(mission);
 
     auto last = last_.find(mission.id);
     Pending& pending = pending_[mission.id];
     pending.record = record_of(mission);   // за время записи поменялась ещё раз — уйдёт последняя версия,
+    pending.record.set_dispatch_final_version(dispatch_final_version);
     add_events(pending.events,             // а события копятся все, по порядку
                mission_events(last == last_.end() ? nullptr : &last->second, mission, why), mission.updated_at_ms);
     wakeup_.try_send(boost::system::error_code{});
@@ -222,7 +224,8 @@ asio::awaitable<void> MissionStore::write_loop() {
             dbv1::SaveMissionResponse response;
             grpc::Status status =
                 co_await services_.call<&Control::PrepareAsyncSaveMission>(*services_.control, request, response);
-            if (status.error_code() == grpc::StatusCode::UNAVAILABLE ||
+            if ((!status.ok() && item.record.dispatch_final_version()) ||
+                status.error_code() == grpc::StatusCode::UNAVAILABLE ||
                 status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
                 // За это время могла прийти новее: документ — её, а наши события случились раньше её событий
                 auto [it, inserted] = pending_.try_emplace(id, std::move(item));

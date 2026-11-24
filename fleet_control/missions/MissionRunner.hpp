@@ -6,7 +6,9 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <chrono>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -114,7 +116,25 @@ private:
     asio::awaitable<void> send(std::string mission_id, std::string start_node);
     asio::awaitable<void> watch_dispatch();
     asio::awaitable<void> overdue_loop();
-    asio::awaitable<void> restore(std::string mission_id);
+    using RecoveryCommands = std::vector<fms::database::v1::ControlCommandRecord>;
+    struct PendingHandoff;
+    struct CheckpointJob {
+        std::shared_ptr<PendingHandoff> handoff;
+        std::uint64_t epoch = 0;
+        std::uint64_t version = 0;
+        std::chrono::milliseconds delay{200};
+        std::chrono::steady_clock::time_point due{};
+        bool busy = false;
+        std::string last_command;
+    };
+    using Job = std::shared_ptr<CheckpointJob>;
+    void queue_checkpoint(const std::string& id);
+    bool checkpoint_current(const std::string& id, const Job& job, std::uint64_t epoch) const;
+    asio::awaitable<void> checkpoint_loop();
+    asio::awaitable<void> recover_checkpoint(std::string id, Job job, std::uint64_t epoch);
+    asio::awaitable<void> handoff_checkpoint(std::string id, Job job, std::uint64_t epoch);
+    asio::awaitable<void> restore(std::string mission_id, Job job = {}, std::uint64_t epoch = 0,
+                                  RecoveryCommands commands = {});
     void request_restore(const std::string& mission_id);
     asio::awaitable<void> restore_loop();
     asio::awaitable<void> uncertain_loop();
@@ -129,7 +149,8 @@ private:
 
     // Миссия для dispatch. nullopt и why — маршрута нет
     std::optional<fms::v1::Mission> build(const Mission& mission, const std::string& start_node, std::string& why);
-    void apply(Mission& mission, const fms::v1::MissionStatus& status);   // статус из dispatch → документ
+    static void copy_status(Mission& mission, const fms::v1::MissionStatus& status);
+    void apply(Mission& mission, const fms::v1::MissionStatus& status, std::uint64_t final_version = 0);   // статус из dispatch → документ
     void back_to_queue(Mission& mission, const std::string& why);
     // why — причина для истории (c3): нужна, когда нет error (отмена оператором)
     void finish(Mission& mission, const std::string& state, std::optional<MissionError> error,
@@ -184,11 +205,11 @@ private:
     asio::awaitable<grpc::Status> journaled_cancel(std::string id);
     asio::awaitable<void> journal_startup();
 
-    using RecoveryCommands = std::vector<fms::database::v1::ControlCommandRecord>;
-
     bool restore_journal_base(Mission& mission, Plan& plan, const fms::v1::MissionStatus& status, const RecoveryCommands& commands);
 
-    std::map<std::string, RecoveryCommands> recovery_commands_;
+    std::map<std::string, Job> checkpoint_jobs_;
+    asio::steady_timer checkpoint_timer_;
+    std::size_t checkpoint_inflight_ = 0;
 
     std::uint32_t journal_attempt(const std::string& id) const;
 
