@@ -75,6 +75,7 @@ if(FMS_BUILD_TESTS)
             unit_tests/test_execution_recovery.cpp
             missions/ExecutionRecovery.cpp
             unit_tests/test_fixed_route_gate.cpp
+            unit_tests/test_recovery_admission.cpp
             routing/Router.cpp
             maps/Graph.cpp
             missions/Mission.cpp

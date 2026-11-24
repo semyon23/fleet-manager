@@ -12,6 +12,22 @@ GateResult FixedRouteGate::check(
     std::span<const ProtectedRoute> routes,
     const ProtectedRoute& wanted) const {
 
+    return check(graph, occupants, routes, wanted,
+                 RecoveryBounds{graph.map_id, graph.version, true, {}});
+}
+
+GateResult FixedRouteGate::check(
+    const Graph& graph,
+    std::span<const TrafficOccupant> occupants,
+    std::span<const ProtectedRoute> routes,
+    const ProtectedRoute& wanted,
+    const RecoveryBounds& recovery) const {
+
+    if (!recovery.complete || recovery.map != graph.map_id ||
+        recovery.version != graph.version) {
+        return {false, "recovery inventory incomplete or stale"};
+    }
+
     BaseGuard guard(graph);
     std::map<std::string, RobotId> ids;
     std::map<std::string, const ProtectedRoute*> by_robot;
@@ -142,6 +158,49 @@ GateResult FixedRouteGate::check(
                 "protected robot missing from inventory"
             };
         }
+    }
+
+    std::set<std::string> recovering;
+    for (const auto& mission : recovery.missions) {
+        if (mission.steps.empty()) return {false, "unknown issued base"};
+        const auto& robot = mission.steps.front().robot;
+        const auto it = by_robot.find(robot);
+        if (robot == wanted.robot || it == by_robot.end() ||
+            !recovering.insert(robot).second) {
+            return {false, "recovery owner unavailable"};
+        }
+
+        const auto& held = *it->second;
+        const RobotId owner = ids.at(robot);
+        const auto& resources = guard.resources();
+        bool matching_step = false;
+        for (const auto& base : mission.steps) {
+            try {
+                validate(base);
+            } catch (const std::logic_error&) {
+                return {false, "invalid recovery base"};
+            }
+            if (base.robot != robot) return {false, "inconsistent recovery owner"};
+            if (base.key == held.key) {
+                if (matching_step || base.nodes.size() > held.nodes.size() ||
+                    !std::equal(base.nodes.begin(), base.nodes.end(), held.nodes.begin()) ||
+                    !std::equal(base.edges.begin(), base.edges.end(), held.edges.begin())) {
+                    return {false, "inconsistent recovery prefix"};
+                }
+                matching_step = true;
+            }
+            // A retry may start a step again. Check the entire possible grant
+            // against what the guard actually owns after applying held.reached.
+            for (auto node : base.nodes) {
+                if (guard.owner(resources.node_resource(node)) != owner)
+                    return {false, "recovery node is not protected"};
+            }
+            for (auto edge : base.edges) {
+                if (guard.owner(resources.lane_resource(edge)) != owner)
+                    return {false, "recovery lane is not protected"};
+            }
+        }
+        if (!matching_step) return {false, "recovery attempt is not protected"};
     }
 
     auto previous = by_robot.find(wanted.robot);

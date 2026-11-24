@@ -39,6 +39,21 @@ namespace traffic {
         std::string reason;
     };
 
+    // All possibly issued step bases from one verified mission/attempt.
+    // An empty list means the bounds of this mission are unknown.
+    struct RecoveryMission {
+        std::vector<ProtectedRoute> steps;
+    };
+
+    // Snapshot for one map. Set complete only after accounting for every
+    // unresolved owner in the fleet, including its map and current attempt.
+    // An unknown owner/map or contradictory order leaves complete false.
+    struct RecoveryBounds {
+        std::string map;
+        std::uint32_t version = 0;
+        bool complete = false;
+        std::vector<RecoveryMission> missions;
+    };
     // Начальная стендовая реализация: проверяет весь оставшийся путь шага.
     // При конфликте робот ждёт в конце прежнего base.
     // Частичную новую выдачу до произвольного узла не делает.
@@ -55,6 +70,13 @@ namespace traffic {
             std::span<const TrafficOccupant> occupants,
             std::span<const ProtectedRoute> protected_routes,
             const ProtectedRoute& wanted) const;
+
+        GateResult check(
+            const Graph &graph,
+            std::span<const TrafficOccupant> occupants,
+            std::span<const ProtectedRoute> protected_routes,
+            const ProtectedRoute &wanted,
+            const RecoveryBounds &recovery) const;
     };
 
 } // namespace traffic
