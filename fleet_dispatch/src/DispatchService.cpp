@@ -28,6 +28,7 @@ using InitializePositionRPC = agrpc::ServerRPC<&AsyncService::RequestInitializeP
 
 using GetMissionRPC         = agrpc::ServerRPC<&AsyncService::RequestGetMission>;
 using GetExecutionCheckpointRPC = agrpc::ServerRPC<&AsyncService::RequestGetExecutionCheckpoint>;
+using RecoveryInventoryRPC = agrpc::ServerRPC<&AsyncService::RequestGetRecoveryInventory>;
 
 const auto on_handler_done = [](std::exception_ptr error) {
     if (!error) return;
@@ -213,6 +214,14 @@ void DispatchService::start() {
             co_await rpc.finish(response, status);
         },
         on_handler_done);
+
+    agrpc::register_awaitable_rpc_handler<RecoveryInventoryRPC>(
+        grpc_context_, service_,
+        [this](RecoveryInventoryRPC& rpc, RecoveryInventoryRPC::Request&) -> asio::awaitable<void> {
+            RecoveryInventoryRPC::Response response;
+            const auto status = co_await fleet_registry_.recovery_inventory(response);
+            co_await rpc.finish(response, status);
+        }, on_handler_done);
 
     agrpc::register_awaitable_rpc_handler<GetExecutionCheckpointRPC>(
         grpc_context_, service_,

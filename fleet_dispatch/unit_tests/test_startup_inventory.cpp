@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include "../include/RecoveryInventory.hpp"
 #include "../include/StartupInventory.hpp"
 
 TEST_CASE("Dispatch startup inventory", "[startup-inventory]") {
@@ -57,5 +58,100 @@ TEST_CASE("Dispatch startup inventory", "[startup-inventory]") {
             u->set_robot_id("r");
         }
         CHECK(StartupInventory(s).reason == "multiple executions on one robot");
+    }
+}
+
+TEST_CASE("Fleet recovery inventory distinguishes loading from an empty fleet", "[recovery-inventory]") {
+    using Reply = fms::dispatch::v1::GetRecoveryInventoryResponse;
+    RecoveryInventory inventory("first"), restarted("second");
+    const auto& view = inventory.snapshot();
+    CHECK(view.instance_id() == "first");
+    REQUIRE(view.state() == Reply::LOADING);
+    const auto loading = view.revision();
+    inventory.reject_startup();
+    CHECK(view.state() == Reply::CONFLICT);
+    inventory.update({}, {}, true);
+    REQUIRE(view.state() == Reply::READY);
+    CHECK(view.robots().empty());
+    CHECK(view.missions().empty());
+    CHECK(view.revision() > loading);
+    const auto ready = view.revision();
+    inventory.update({}, {}, true);
+    CHECK(view.revision() == ready);
+    CHECK(restarted.snapshot().instance_id() != view.instance_id());
+    CHECK(restarted.snapshot().state() == Reply::LOADING);
+    fms::database::v1::RecoveryRows rows;
+    rows.add_robots("r");
+    rows.add_deleting("r");
+    inventory.update(rows, {{"r", {}}}, true);
+    REQUIRE(view.blocked_robots_size() == 1);
+    CHECK(view.blocked_robots(0) == "r");
+}
+
+TEST_CASE("Fleet recovery inventory versions ownership and observation changes", "[recovery-inventory]") {
+    using Reply = fms::dispatch::v1::GetRecoveryInventoryResponse;
+    fms::database::v1::RecoveryRows rows;
+    std::map<std::string, RecoveryRobotView> live;
+    for (const auto* id : {"b", "a"}) {
+        rows.add_robots(id);
+        live[id] = {};
+        auto* mission = rows.add_missions();
+        mission->set_robot_id(id);
+        mission->set_mission_id(std::string("m-") + id);
+    }
+    rows.mutable_missions(1)->set_add_attempt(0);
+    RecoveryInventory inventory("run");
+    const auto& view = inventory.snapshot();
+    inventory.update(rows, live, true);
+    REQUIRE(view.state() == Reply::READY);
+    REQUIRE(view.missions_size() == 2);
+    CHECK(view.missions(0).mission_id() == "m-a");
+    CHECK(view.missions(0).has_add_attempt());
+    CHECK(view.missions(0).add_attempt() == 0);
+    CHECK_FALSE(view.missions(1).has_add_attempt());
+    REQUIRE(view.blocked_robots_size() == 2);
+    CHECK(view.blocked_robots(0) == "a");
+    const auto revision = view.revision();
+    rows.mutable_robots()->SwapElements(0, 1);
+    rows.mutable_missions()->SwapElements(0, 1);
+    inventory.update(rows, live, true);
+    CHECK(view.revision() == revision);
+
+    SECTION("uncertainty changes for an existing owner") {
+        rows.mutable_missions(0)->set_uncertain(true);
+        inventory.update(rows, live, true);
+        REQUIRE(view.state() == Reply::READY);
+        CHECK(view.missions(0).uncertain());
+        CHECK(view.revision() > revision);
+    }
+    SECTION("confirmed terminal rows disappear while a robot awaiting fresh state remains blocked") {
+        rows.clear_missions();
+        live["b"].blocked = true;
+        inventory.update(rows, live, true);
+        REQUIRE(view.state() == Reply::READY);
+        CHECK(view.missions().empty());
+        REQUIRE(view.blocked_robots_size() == 1);
+        CHECK(view.blocked_robots(0) == "b");
+        CHECK(view.revision() > revision);
+        const auto waiting = view.revision();
+        live["b"].blocked = false;
+        inventory.update(rows, live, true);
+        CHECK(view.blocked_robots().empty());
+        CHECK(view.revision() > waiting);
+    }
+    SECTION("inconsistent evidence invalidates the previous snapshot") {
+        bool consistent = true;
+        SECTION("unknown owner") { rows.mutable_missions(0)->clear_robot_id(); }
+        SECTION("two missions claim one owner") { rows.mutable_missions(0)->set_robot_id("b"); }
+        SECTION("duplicate mission") { rows.mutable_missions(0)->set_mission_id("m-b"); }
+        SECTION("robot missing from the registry") { live.erase("a"); }
+        SECTION("robot missing from storage") { rows.mutable_robots()->RemoveLast(); }
+        SECTION("different live mission") { live["a"].mission = "another"; }
+        SECTION("durable receipt conflict") { rows.mutable_missions(0)->set_conflict(true); }
+        SECTION("conflicting live order") { live["a"].conflict = true; }
+        SECTION("inconsistent startup snapshot") { consistent = false; }
+        inventory.update(rows, live, consistent);
+        CHECK(view.state() == Reply::CONFLICT);
+        CHECK(view.revision() > revision);
     }
 }

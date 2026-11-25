@@ -225,8 +225,25 @@ service DispatchStorage {
       returns (DispatchAddReceiptResponse);
 }
 
-message LoadDispatchSnapshotRequest {}
-message LoadDispatchSnapshotResponse { DispatchSnapshot snapshot = 1; }
+message RecoveryRow {
+  string mission_id = 1;
+  string robot_id = 2;             // Пусто, если владельца установить не удалось.
+  optional uint32 add_attempt = 3; // Из проверенной квитанции Add, включая попытку 0.
+  bool uncertain = 4;
+  bool conflict = 5;               // Квитанция нечитаема или противоречит записи исполнения.
+}
+
+message RecoveryRows {
+  repeated string robots = 1;      // Все зарегистрированные, включая PENDING_DELETE.
+  repeated RecoveryRow missions = 2; // Незавершённые и с неподтверждённым исходом.
+  repeated string deleting = 3;
+}
+
+message LoadDispatchSnapshotRequest { bool recovery_only = 1; }
+message LoadDispatchSnapshotResponse {
+  DispatchSnapshot snapshot = 1;   // Обычная загрузка dispatch при старте.
+  RecoveryRows recovery = 2;       // Только при recovery_only, даже если парк пуст.
+}
 
 message SaveRobotStatusRequest {
   fms.v1.RobotStatus status = 1;   // robot_id внутри

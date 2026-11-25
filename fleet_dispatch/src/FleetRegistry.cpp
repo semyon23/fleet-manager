@@ -4,11 +4,14 @@
 #include <google/protobuf/util/time_util.h>
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid_io.hpp>
+#include <boost/asio/as_tuple.hpp>
+#include <boost/asio/use_awaitable.hpp>
 
 
 FleetRegistry::FleetRegistry(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, MissionStatusHub& mission_hub,
                   DatabaseWriter& database)
-    : io_context_(io_context), outbox_(outbox),  status_hub_(status_hub), mission_hub_(mission_hub), database_(database)  {}
+    : recovery_(boost::uuids::to_string(boost::uuids::random_generator()())),
+      io_context_(io_context), outbox_(outbox), status_hub_(status_hub), mission_hub_(mission_hub), database_(database) {}
 
 AddResult FleetRegistry::add(const std::string& robot_id, const std::string& manufacturer,
                              const std::string& serial_number) {
@@ -138,8 +141,9 @@ bool FleetRegistry::observe(const std::string& id, const vda5050::State* state) 
     queue_.remove(id);
 
     if (!p.head) {
-        if (!inventory_->occupied.contains(id) &&
-            (state->driving || !vda5050::is_idle(*state))) {
+        p.unclaimed_motion = !inventory_->occupied.contains(id) &&
+            (state->driving || !vda5050::is_idle(*state));
+        if (p.unclaimed_motion) {
             retry();
             return false;
         }
@@ -178,6 +182,68 @@ bool FleetRegistry::observe(const std::string& id, const vda5050::State* state) 
     spdlog::warn("[recovery] robot={} mission={} result=Conflict reason={}",
                  id, p.head->mission().mission_id(), result.reason);
     return false;
+}
+
+std::map<std::string, RecoveryRobotView> FleetRegistry::recovery_robots() const {
+    std::map<std::string, RecoveryRobotView> robots;
+    for (const auto& [id, session] : sessions_) {
+        auto& r = robots[id];
+        const auto& s = session->status();
+        r.mission = s.mission_id();
+        const auto* mission = session->mission();
+        const bool fresh = !session->awaiting_live_state() && s.has_observed_order() &&
+                           s.connection() == fms::v1::CONNECTION_STATE_ONLINE;
+        r.blocked = !fresh || session->saving_order() || inventory_->deleting.contains(id);
+        const auto probe = probes_.find(id);
+        if (probe != probes_.end()) {
+            const auto& p = probe->second;
+            r.conflict = p.unclaimed_motion ||
+                (p.decision && p.decision->decision == move_recovery::Decision::Conflict);
+        }
+        if (mission && mission->recovery_hold() != ActiveMission::RecoveryHold::None)
+            r.conflict = true;
+        if (fresh && (s.driving() || !s.observed_order().idle())) {
+            const auto* order = mission ? mission->tracker() : nullptr;
+            if (!order || s.observed_order().order_id() != order->order_id() ||
+                s.observed_order().update_id() > order->sent_update_id()) r.conflict = true;
+        }
+    }
+    return robots;
+}
+
+asio::awaitable<grpc::Status> FleetRegistry::recovery_inventory(
+    fms::dispatch::v1::GetRecoveryInventoryResponse& out) {
+    if (!inventory_) {
+        out = recovery_.snapshot();
+        co_return grpc::Status::OK;
+    }
+    // Dispatch runs on one executor. Overlapping readers share one storage read.
+    auto read = reading_;
+    if (read) {
+        co_await read->done.async_wait(asio::as_tuple(asio::use_awaitable));
+    } else {
+        read = std::make_shared<RecoveryRead>(io_context_);
+        reading_ = read;
+        try {
+            fms::database::v1::LoadDispatchSnapshotResponse stored;
+            read->status = co_await database_.load_snapshot(stored, true);
+            if (read->status.ok()) {
+                if (!stored.has_recovery() || stored.has_snapshot()) {
+                    read->status = grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
+                                                "compact recovery inventory unavailable"};
+                } else {
+                    recovery_.update(stored.recovery(), recovery_robots(), inventory_->consistent);
+                    read->reply = recovery_.snapshot();
+                }
+            }
+        } catch (const std::exception& error) {
+            read->status = grpc::Status{grpc::StatusCode::INTERNAL, error.what()};
+        }
+        reading_.reset();
+        read->done.expires_at(asio::steady_timer::clock_type::now());
+    }
+    if (read->status.ok()) out = read->reply;
+    co_return read->status;
 }
 
 bool FleetRegistry::remove(const std::string& robot_id) {

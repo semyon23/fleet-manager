@@ -14,6 +14,7 @@
 #include <optional>
 #include "ProbeQueue.hpp"
 #include "RecoveryProbe.hpp"
+#include "RecoveryInventory.hpp"
 
 enum class AddResult {
     Added,
@@ -28,6 +29,8 @@ public:
 
     AddResult add(const std::string& robot_id, const std::string& manufacturer, const std::string& serial_number);
     asio::awaitable<void> restore(StartupInventory inventory);
+    asio::awaitable<grpc::Status> recovery_inventory(fms::dispatch::v1::GetRecoveryInventoryResponse& out);
+    void reject_startup() { recovery_.reject_startup(); }
 
     const StartupInventory* inventory() const {
         return inventory_ ? &*inventory_ : nullptr;
@@ -40,6 +43,17 @@ public:
     bool post(const std::string& manufacturer, const std::string& serial_number, VdaMessage message);
 
 private:
+    struct RecoveryRead {
+        explicit RecoveryRead(asio::io_context& io)
+            : done(io, asio::steady_timer::time_point::max()) {}
+        asio::steady_timer done;
+        grpc::Status status{grpc::StatusCode::UNAVAILABLE, "recovery read interrupted"};
+        fms::dispatch::v1::GetRecoveryInventoryResponse reply;
+    };
+    RecoveryInventory recovery_;
+    std::shared_ptr<RecoveryRead> reading_;
+    std::map<std::string, RecoveryRobotView> recovery_robots() const;
+
     void start_probes();
     void pump_probes();
     bool observe(const std::string& id, const vda5050::State* state);

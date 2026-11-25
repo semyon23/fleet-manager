@@ -61,7 +61,7 @@ asio::awaitable<void> DatabaseWriter::run() {
         if (pending_.empty()) {
             auto [ec] = co_await wakeup_.async_receive(asio::as_tuple(asio::use_awaitable));
             if (ec) {
-                break;   
+                break;
             }
             continue;
         }
@@ -158,11 +158,12 @@ asio::awaitable<grpc::Status> DatabaseWriter::save_execution(
 }
 
 asio::awaitable<grpc::Status> DatabaseWriter::load_snapshot(
-    dbv1::LoadDispatchSnapshotResponse& response) {
+    dbv1::LoadDispatchSnapshotResponse& response, bool recovery_only) {
     using RPC = agrpc::ClientRPC<
         &dbv1::DispatchStorage::Stub::PrepareAsyncLoadDispatchSnapshot>;
 
     dbv1::LoadDispatchSnapshotRequest request;
+    request.set_recovery_only(recovery_only);
     grpc::ClientContext context;
     context.set_deadline(std::chrono::system_clock::now() + kTimeout);
 

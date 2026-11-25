@@ -49,7 +49,7 @@ service FleetDispatch {
   // когда робот подтвердит cancelOrder.
   rpc CancelMission(CancelMissionRequest) returns (CancelMissionResponse);
 
-   // Изменить маршрут текущего шага MoveStep (трафик):
+  // Изменить маршрут текущего шага MoveStep (трафик):
   //   - выдать роботу следующие узлы (расширить base);
   //   - и/или заменить невыданную часть маршрута (horizon) — объезд, другая цель.
   //     Пока не реализовано (T2): replace_tail → UNIMPLEMENTED.
@@ -72,6 +72,7 @@ service FleetDispatch {
   // Последняя сохранённая запись одной миссии, включая завершённую. Нет записи — NOT_FOUND.
   rpc GetExecutionCheckpoint(fms.v1.GetExecutionCheckpointRequest)
       returns (fms.v1.GetExecutionCheckpointResponse);
+  rpc GetRecoveryInventory(GetRecoveryInventoryRequest) returns (GetRecoveryInventoryResponse);
 
   // VDA startPause / stopPause. Действует на робота, а не на миссию.
   rpc PauseRobot(PauseRobotRequest) returns (PauseRobotResponse);
@@ -157,7 +158,7 @@ message RouteTail {
   uint32 from_index = 1;
   repeated fms.v1.RouteNode nodes = 2;   // новые узлы после route[from_index]; пусто — маршрут кончается на from_index
   repeated fms.v1.RouteEdge edges = 3;   // edges[0]: route[from_index] -> nodes[0], edges[i]: nodes[i-1] -> nodes[i];
-                                         // размер = размер nodes
+  // размер = размер nodes
   // Action'ы на конечном узле (pick, drop, startCharging) — в nodes последнего узла, как в MoveStep.
   // Цель шага при этом может поменяться: решает control.
 }
@@ -236,6 +237,23 @@ message MissionStatusUpdate {
 
 message GetMissionRequest {
   string mission_id = 1;
+}
+
+message GetRecoveryInventoryRequest {}
+message RecoveryMission {
+  string mission_id = 1;
+  string robot_id = 2;
+  optional uint32 add_attempt = 3;
+  bool uncertain = 4;
+}
+message GetRecoveryInventoryResponse {
+  enum State { LOADING = 0; READY = 1; CONFLICT = 2; }
+  State state = 1; // READY describes the inventory, not permission to move.
+  string instance_id = 2;
+  uint64 revision = 3; // Version of the published view, local to instance_id.
+  repeated RecoveryMission missions = 4;
+  repeated string robots = 5;
+  repeated string blocked_robots = 6; // Occupied or without a verified usable state.
 }
 message GetMissionResponse {
   fms.v1.Mission mission = 1;          // как в AddMission, но released_nodes текущего шага — текущие

@@ -6,6 +6,7 @@
 #include "ExecutionCheckpoint.hpp"
 #include "ExecutionVersion.hpp"
 #include "RobotTable.hpp"
+#include "fleet_dispatch.pb.h"
 #include <boost/algorithm/hex.hpp>
 #include <google/protobuf/util/message_differencer.h>
 #include <grpcpp/support/status.h>
@@ -142,9 +143,55 @@ inline bool lookup(pqxx::work& tx, const fms::v1::GetExecutionCheckpointRequest&
     return true;
 }
 
-inline void load(pqxx::work& tx, dbv1::DispatchSnapshot& snapshot) {
-    tx.exec("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY");
+inline void load_recovery(pqxx::work& tx, dbv1::RecoveryRows& recovery) {
+    for (const auto& robot : tx.exec("SELECT robot_id,lifecycle FROM robots ORDER BY robot_id")) {
+        const auto id = robot[0].as<std::string>();
+        recovery.add_robots(id);
+        if (robot[1].as<std::string>() == "PENDING_DELETE") recovery.add_deleting(id);
+    }
 
+    // Старые записи до checkpoint_version могли сохранить заказ без владельца в head.
+    const auto heads = tx.exec(
+        "SELECT h.mission_id,h.robot_id,h.uncertain,r.attempt,encode(r.request_bytes,'hex'),"
+        "legacy.first_owner,legacy.last_owner "
+        "FROM dispatch_execution_heads h LEFT JOIN dispatch_add_receipts r USING (mission_id) "
+        "LEFT JOIN LATERAL (SELECT min(o.robot_id) AS first_owner,max(o.robot_id) AS last_owner "
+        "FROM dispatch_execution_orders o WHERE h.version=0 AND o.mission_id=h.mission_id) "
+        "legacy ON true "
+        "WHERE NOT h.terminal OR h.uncertain ORDER BY h.mission_id");
+    for (const auto& head : heads) {
+        auto* row = recovery.add_missions();
+        row->set_mission_id(head[0].as<std::string>());
+        row->set_robot_id(head[1].as<std::string>());
+        row->set_uncertain(head[2].as<bool>());
+        if (!head[5].is_null()) {
+            const auto owner = head[5].as<std::string>();
+            if (owner != head[6].as<std::string>() ||
+                (!row->robot_id().empty() && row->robot_id() != owner)) {
+                row->set_conflict(true);
+                row->set_uncertain(true);
+                continue;
+            }
+            row->set_robot_id(owner);
+        }
+        if (head[3].is_null()) continue;
+
+        const auto attempt = head[3].as<std::uint32_t>();
+        fms::dispatch::v1::AddMissionRequest add;
+        if (!add.ParseFromString(decode(head[4])) || add.attempt() != attempt ||
+            add.mission().mission_id() != row->mission_id() || add.mission().robot_id().empty() ||
+            (!row->robot_id().empty() && row->robot_id() != add.mission().robot_id())) {
+            row->set_conflict(true);
+            row->set_uncertain(true);
+            continue;
+        }
+
+        row->set_robot_id(add.mission().robot_id());
+        row->set_add_attempt(attempt);
+    }
+}
+
+inline void load(pqxx::work& tx, dbv1::DispatchSnapshot& snapshot) {
     for (auto& robot : select_robots(tx, true)) {
         snapshot.add_robots()->Swap(&robot);
     }

@@ -607,10 +607,16 @@ asio::awaitable<grpc::Status> DatabaseService::get_execution_checkpoint(
     co_return grpc::Status::OK;
 }
 
-asio::awaitable<grpc::Status> DatabaseService::load_dispatch_snapshot(const dbv1::LoadDispatchSnapshotRequest&,dbv1::LoadDispatchSnapshotResponse& response) {
+asio::awaitable<grpc::Status> DatabaseService::load_dispatch_snapshot(
+    const dbv1::LoadDispatchSnapshotRequest& request, dbv1::LoadDispatchSnapshotResponse& response) {
     try {
         co_await database_.run([&](pqxx::work& tx) {
-            execution_head::load(tx, *response.mutable_snapshot());
+            tx.exec("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY");
+            if (request.recovery_only()) {
+                execution_head::load_recovery(tx, *response.mutable_recovery());
+            } else {
+                execution_head::load(tx, *response.mutable_snapshot());
+            }
         });
     } catch (const std::exception& error) {
         co_return database_error(error);

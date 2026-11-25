@@ -16,6 +16,7 @@ struct RecoveryProbe {
     const Execution* grant = nullptr;
     std::string token;
     std::optional<move_recovery::Result> decision;
+    bool unclaimed_motion = false;
 
     static bool acknowledged_token(const std::string& token, const vda5050::State& state) {
         if (token.empty()) return false;

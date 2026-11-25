@@ -19,6 +19,7 @@ add_executable(fleet_dispatch fd_main.cpp
         src/MissionStatusHub.cpp
         src/DatabaseWriter.cpp
         src/MoveRecovery.cpp
+        src/RecoveryInventory.cpp
 )
 
 target_link_libraries(fleet_dispatch
@@ -50,6 +51,7 @@ if(FMS_BUILD_TESTS)
             src/OrderBuilder.cpp
             src/ActiveMission.cpp
             src/OrderTracker.cpp
+            src/RecoveryInventory.cpp
     )
     target_link_libraries(fleet_dispatch_unit PRIVATE
             Catch2::Catch2WithMain

@@ -58,6 +58,7 @@ int main(){
                     try {
                         inventory.emplace(std::move(*response.mutable_snapshot()));
                     } catch (const std::invalid_argument& error) {
+                        registry.reject_startup();
                         spdlog::error("[startup] {}", error.what());
                     }
                     if (inventory) {
