@@ -224,6 +224,13 @@ const fms::v1::RobotStatus* AvailabilityTracker::live_status(const std::string& 
     return age_ms >= -2000 && age_ms < 60000 ? &s : nullptr;
 }
 
+const fms::v1::RobotStatus* AvailabilityTracker::live_status(const std::string& id, const std::string& instance) const {
+    const auto it = robots_.find(id);
+    if (instance.empty() || instance != traffic_instance_ || it == robots_.end() ||
+        it->second.traffic_epoch != traffic_epoch_) return nullptr;
+    return live_status(id);
+}
+
 bool AvailabilityTracker::assessment_fleet_ready() const {
     if (traffic_instance_.empty() || !traffic_inventory_ready()) return false;
     for (const auto& [id, robot] : robots_)

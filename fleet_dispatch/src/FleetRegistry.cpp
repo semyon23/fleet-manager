@@ -184,33 +184,55 @@ bool FleetRegistry::observe(const std::string& id, const vda5050::State* state) 
     return false;
 }
 
+RecoveryRobotView FleetRegistry::recovery_robot(const std::string& id, const RobotSession& session) const {
+    RecoveryRobotView r;
+    const auto& s = session.status();
+    r.mission = s.mission_id();
+    const auto* mission = session.mission();
+    const bool fresh = !session.awaiting_live_state() && s.has_observed_order() &&
+                       s.connection() == fms::v1::CONNECTION_STATE_ONLINE;
+    r.blocked = !fresh || session.saving_order() || inventory_->deleting.contains(id);
+    if (!r.mission.empty() && (!mission || mission->status().state() != fms::v1::MISSION_STATE_RUNNING))
+        r.blocked = true;
+    const auto probe = probes_.find(id);
+    if (probe != probes_.end()) {
+        const auto& p = probe->second;
+        r.conflict = p.unclaimed_motion ||
+            (p.decision && p.decision->decision == move_recovery::Decision::Conflict);
+    }
+    if (mission && mission->recovery_hold() != ActiveMission::RecoveryHold::None)
+        r.conflict = true;
+    if (fresh && (s.driving() || !s.observed_order().idle())) {
+        const auto* order = mission ? mission->tracker() : nullptr;
+        if (!order || s.observed_order().order_id() != order->order_id() ||
+            s.observed_order().update_id() > order->sent_update_id()) r.conflict = true;
+    }
+    return r;
+}
+
 std::map<std::string, RecoveryRobotView> FleetRegistry::recovery_robots() const {
     std::map<std::string, RecoveryRobotView> robots;
-    for (const auto& [id, session] : sessions_) {
-        auto& r = robots[id];
-        const auto& s = session->status();
-        r.mission = s.mission_id();
-        const auto* mission = session->mission();
-        const bool fresh = !session->awaiting_live_state() && s.has_observed_order() &&
-                           s.connection() == fms::v1::CONNECTION_STATE_ONLINE;
-        r.blocked = !fresh || session->saving_order() || inventory_->deleting.contains(id);
-        if (!r.mission.empty() && (!mission || mission->status().state() != fms::v1::MISSION_STATE_RUNNING))
-            r.blocked = true;
-        const auto probe = probes_.find(id);
-        if (probe != probes_.end()) {
-            const auto& p = probe->second;
-            r.conflict = p.unclaimed_motion ||
-                (p.decision && p.decision->decision == move_recovery::Decision::Conflict);
-        }
-        if (mission && mission->recovery_hold() != ActiveMission::RecoveryHold::None)
-            r.conflict = true;
-        if (fresh && (s.driving() || !s.observed_order().idle())) {
-            const auto* order = mission ? mission->tracker() : nullptr;
-            if (!order || s.observed_order().order_id() != order->order_id() ||
-                s.observed_order().update_id() > order->sent_update_id()) r.conflict = true;
-        }
-    }
+    for (const auto& [id, session] : sessions_)
+        robots.emplace(id, recovery_robot(id, *session));
     return robots;
+}
+
+const ActiveMission* FleetRegistry::observed_mission(const fms::dispatch::v1::GetMissionRequest& request) {
+    if (stopping_ || !inventory_ || !recovery_.identifies_active(request, RecoveryInventory::Clock::now()))
+        return nullptr;
+    const auto& robot = request.expected_robot_id();
+    const auto* session = find(robot);
+    if (!session || !session->mission()) return nullptr;
+    const auto live = recovery_robot(robot, *session);
+    const auto& mission = *session->mission();
+    if (live.blocked || live.conflict || live.mission != request.mission_id() ||
+        mission.mission_id() != request.mission_id() || mission.mission().robot_id() != robot)
+        return nullptr;
+    const auto* tracker = mission.tracker();
+    const auto& observed = session->status().observed_order();
+    if (!tracker || tracker->order_id() != observed.order_id() ||
+        tracker->sent_update_id() != observed.update_id()) return nullptr;
+    return &mission;
 }
 
 asio::awaitable<grpc::Status> FleetRegistry::recovery_inventory(
@@ -226,6 +248,7 @@ asio::awaitable<grpc::Status> FleetRegistry::recovery_inventory(
     } else {
         read = std::make_shared<RecoveryRead>(io_context_);
         reading_ = read;
+        const auto read_started = RecoveryInventory::Clock::now();
         try {
             fms::database::v1::LoadDispatchSnapshotResponse stored;
             read->status = co_await database_.load_snapshot(stored, true);
@@ -234,13 +257,14 @@ asio::awaitable<grpc::Status> FleetRegistry::recovery_inventory(
                     read->status = grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
                                                 "compact recovery inventory unavailable"};
                 } else {
-                    recovery_.update(stored.recovery(), recovery_robots(), inventory_->consistent);
+                    recovery_.update(stored.recovery(), recovery_robots(), inventory_->consistent, read_started);
                     read->reply = recovery_.snapshot();
                 }
             }
         } catch (const std::exception& error) {
             read->status = grpc::Status{grpc::StatusCode::INTERNAL, error.what()};
         }
+        if (!read->status.ok()) recovery_.read_failed();
         reading_.reset();
         read->done.expires_at(asio::steady_timer::clock_type::now());
     }

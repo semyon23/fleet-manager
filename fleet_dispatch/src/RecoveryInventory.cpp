@@ -13,7 +13,24 @@ void RecoveryInventory::reject_startup() {
     }
 }
 
-void RecoveryInventory::update(const Rows &rows, const std::map<std::string, RecoveryRobotView> &live, bool startup_consistent) {
+bool RecoveryInventory::identifies_active(const fms::dispatch::v1::GetMissionRequest& request,
+                                         Clock::time_point now) const {
+    if (!expires_ || now >= *expires_ || view_.state() != Reply::READY ||
+        request.expected_instance_id().empty() || request.expected_instance_id() != view_.instance_id() ||
+        request.expected_robot_id().empty() || request.mission_id().empty() || !request.has_expected_add_attempt())
+        return false;
+    const auto& restricted = view_.live_restrictions().robots();
+    if (std::binary_search(restricted.begin(), restricted.end(), request.expected_robot_id())) return false;
+    const auto& rows = view_.missions();
+    const auto row = std::lower_bound(rows.begin(), rows.end(), request.mission_id(),
+        [](const auto& entry, const auto& id) { return entry.mission_id() < id; });
+    return row != rows.end() && row->mission_id() == request.mission_id() &&
+           row->robot_id() == request.expected_robot_id() && !row->uncertain() &&
+           row->has_add_attempt() && row->add_attempt() == request.expected_add_attempt();
+}
+
+void RecoveryInventory::update(const Rows &rows, const std::map<std::string, RecoveryRobotView> &live,
+                               bool startup_consistent, Clock::time_point read_started) {
      Reply next;
         next.set_instance_id(view_.instance_id());
         next.set_revision(view_.revision());
@@ -70,4 +87,5 @@ void RecoveryInventory::update(const Rows &rows, const std::map<std::string, Rec
             next.set_revision(view_.revision() + 1);
             view_.Swap(&next);
         }
+        expires_ = read_started + std::chrono::seconds(3);
 }

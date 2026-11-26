@@ -49,6 +49,7 @@ public:
     bool traffic_inventory_ready() const;
     bool assessment_fleet_ready() const;
     const fms::v1::RobotStatus* live_status(const std::string& robot_id) const;
+    const fms::v1::RobotStatus* live_status(const std::string& robot_id, const std::string& instance) const;
 
     std::vector<traffic::TrafficOccupant> traffic_occupants() const;
 

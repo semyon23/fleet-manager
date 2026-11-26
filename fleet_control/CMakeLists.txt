@@ -76,6 +76,7 @@ if(FMS_BUILD_TESTS)
             unit_tests/test_base_planner.cpp
             unit_tests/test_extension_command.cpp
             unit_tests/test_execution_recovery.cpp
+            unit_tests/test_scoped_progress.cpp
             unit_tests/test_recovery_assessment.cpp
             unit_tests/test_recovery_inventory_cache.cpp
             missions/RecoveryAssessment.cpp

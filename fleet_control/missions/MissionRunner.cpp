@@ -981,35 +981,30 @@ MissionRunner::routes(const std::string& map_id) {
             continue;
         }
 
-        auto plan = plans_.find(mission->id);
-        if (plan == plans_.end()) {
-            continue;
+        int current_step = mission->current_step.value_or(0);
+        std::optional<RouteParts> parts;
+        RobotRoute route;
+        const auto* move = traffic_snapshot_ ? nullptr : scoped_progress(*mission);
+        if (move) {
+            route.progress_source = "scoped_read";
+            current_step = move->step;
+            parts = move->parts;
+        } else {
+            const auto plan = plans_.find(mission->id);
+            if (plan == plans_.end() || current_step < 0) continue;
+            const auto current = static_cast<std::size_t>(current_step);
+            const auto& saved = plan->second;
+            if (traffic_snapshot_ && !checkpoint_jobs_.contains(mission->id) &&
+                !mission_stream_instance_.empty() && saved.status_instance == mission_stream_instance_)
+                route.progress_source = "mission_stream";
+            if (current >= saved.routes.size() || current >= saved.edges.size() ||
+                current >= saved.progress.size()) continue;
+            parts = split_route(saved.routes[current], saved.edges[current], saved.progress[current]);
         }
-
-        const int current_step = mission->current_step.value_or(0);
-        if (current_step < 0) {
-            continue;
-        }
-
-        const size_t current = static_cast<size_t>(current_step);
-        const Plan& saved = plan->second;
-
-        if (current >= saved.routes.size() ||
-            current >= saved.edges.size() ||
-            current >= saved.progress.size()) {
-            continue;
-            }
-
-        auto parts = split_route(
-            saved.routes[current],
-            saved.edges[current],
-            saved.progress[current]);
-
         if (!parts) {
             continue;
         }
 
-        RobotRoute route;
         route.robot_id = mission->robot_id;
         route.map_id = mission->map_id;
         route.mission_id = mission->id;
@@ -1020,7 +1015,7 @@ MissionRunner::routes(const std::string& map_id) {
         route.planned_nodes = std::move(parts->planned.nodes);
         route.planned_edges = std::move(parts->planned.edges);
 
-        for (size_t i = current; i < mission->steps.size(); ++i) {
+        for (size_t i = current_step; i < mission->steps.size(); ++i) {
             route.goals.push_back(mission->steps[i].node_id);
         }
 

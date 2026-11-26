@@ -79,6 +79,15 @@ class FinalStorage(Storage):
         self.called = threading.Event()
         self.release = threading.Event()
 
+    def LoadDispatchSnapshot(self, request, context):
+        if request.recovery_only:
+            rows = db.RecoveryRows(robots=[r.spec.robot_id for r in self.snapshot.robots])
+            rows.missions.add(mission_id="m", robot_id="r", add_attempt=0)
+            for row in self.snapshot.unresolved:
+                rows.missions.add(mission_id=row.mission_id, robot_id=row.robot_id, uncertain=True)
+            return db.LoadDispatchSnapshotResponse(recovery=rows)
+        return super().LoadDispatchSnapshot(request, context)
+
     def SaveMissionExecution(self, request, context):
         self.records.append(request.execution.SerializeToString(deterministic=True))
         self.called.set()
@@ -100,6 +109,10 @@ def test_restart_requires_current_probe(tmp_path, order, result, later):
         snapshot = checkpoint()
         head = snapshot.active_missions[0]
         if later:
+            other = snapshot.robots.add().spec
+            other.robot_id, other.manufacturer, other.serial_number = "A", "K", "102"
+            other.lifecycle = db.ROBOT_LIFECYCLE_ACTIVE
+            snapshot.unresolved.add(mission_id="held-trip", robot_id="A")
             head.mission.nodes[0].move.nodes[0].actions.add(
                 action_id="scan", action_type="scan", blocking_type=fms.BLOCKING_TYPE_HARD)
             head.status.steps[0].actions.add(action_id="scan", action_type="scan")
@@ -152,6 +165,11 @@ def test_restart_requires_current_probe(tmp_path, order, result, later):
             binary = ROOT / "cmake-build-debug/fleet_dispatch/fleet_dispatch"
             with process(["stdbuf", "-oL", binary], tmp_path / "first.log", env):
                 old = token()
+                if later:
+                    with grpc.insecure_channel(addr) as previous_channel:
+                        previous_api = dp_rpc.FleetDispatchStub(previous_channel)
+                        old_run = previous_api.GetRecoveryInventory(dp.GetRecoveryInventoryRequest(), timeout=2).instance_id
+                        assert old_run
             log = tmp_path / "second.log"
             with process(["stdbuf", "-oL", binary], log, env), grpc.insecure_channel(addr) as channel:
                 current = token()
@@ -163,7 +181,10 @@ def test_restart_requires_current_probe(tmp_path, order, result, later):
                 api = dp_rpc.FleetDispatchStub(channel)
                 reply = json.loads(state(retry, order, 2))
                 if later:
-                    reply["actionStates"] = [dict(actionId="scan", actionType="scan", actionStatus="RUNNING")]
+                    connection = {k: reply[k] for k in ("headerId", "timestamp", "version", "manufacturer", "serialNumber")}
+                    connection["connectionState"] = "ONLINE"
+                    client.publish(TOPIC + "connection", json.dumps(connection), qos=1).wait_for_publish(3)
+                    reply["actionStates"] = [dict(actionId="scan", actionType="scan", actionStatus="INITIALIZING")]
                 def publish():
                     client.publish(TOPIC + "state", json.dumps(reply), qos=1).wait_for_publish(3)
                 publish()
@@ -174,19 +195,65 @@ def test_restart_requires_current_probe(tmp_path, order, result, later):
                 assert f"result={'Conflict' if result == 'Attach' else 'Attach'} " not in log.read_text()
                 rejected(first, api.StreamMissionStatus, dp.StreamMissionStatusRequest())
                 def owner():
-                    update = first(api.StreamRobotStatus, dp.StreamRobotStatusRequest())
+                    update = first(api.StreamRobotStatus, dp.StreamRobotStatusRequest(robot_ids=["r"]))
                     robot, = update.snapshot.robots
                     return robot.mission_id
 
                 assert owner() == "m"
                 if later:
                     assert not store.called.is_set()
+                    view = api.GetRecoveryInventory(dp.GetRecoveryInventoryRequest(), timeout=2)
+                    assert view.state == dp.GetRecoveryInventoryResponse.READY
+                    assert list(view.live_restrictions.robots) == ["A"]
+                    assert view.instance_id and view.instance_id != old_run
+
+                    scope = dp.GetMissionRequest(mission_id="m", expected_robot_id="r",
+                                                 expected_instance_id=view.instance_id, expected_add_attempt=0)
+                    observed = api.GetMission(scope, timeout=2)
+                    assert observed.instance_id == view.instance_id and observed.HasField("add_attempt")
+                    assert observed.add_attempt == 0 and observed.mission == head.mission
+                    assert observed.status.state == fms.MISSION_STATE_RUNNING
+                    step, = observed.status.steps
+                    assert step.move.last_node_id == "A" and step.move.last_node_index == 0
+                    assert step.actions[0].action_id == "scan"
+                    assert step.actions[0].status == fms.ACTION_STATUS_INITIALIZING
+
+                    # Observe the next live update while the global mission stream is still gated.
+                    reply["instantActionStates"] = []
+                    reply["actionStates"][0]["actionStatus"] = "RUNNING"
+                    reply["headerId"] += 1
+                    publish()
+                    until = time.monotonic() + 5
+                    while True:
+                        api.GetRecoveryInventory(dp.GetRecoveryInventoryRequest(), timeout=2)
+                        current_status = api.GetMission(scope, timeout=2).status
+                        if current_status.steps[0].actions[0].status == fms.ACTION_STATUS_RUNNING:
+                            break
+                        assert time.monotonic() < until, current_status
+                        time.sleep(.05)
+
+                    rejected(lambda: api.GetMission(dp.GetMissionRequest(mission_id="m"), timeout=2))
+                    for field, wrong in (("expected_instance_id", old_run), ("expected_robot_id", "A"),
+                                         ("expected_add_attempt", 1), ("mission_id", "held-trip")):
+                        invalid = dp.GetMissionRequest()
+                        invalid.CopyFrom(scope)
+                        setattr(invalid, field, wrong)
+                        rejected(lambda: api.GetMission(invalid, timeout=2))
+                    partial = dp.GetMissionRequest(mission_id="m", expected_instance_id=view.instance_id)
+                    with pytest.raises(grpc.RpcError) as error:
+                        api.GetMission(partial, timeout=2)
+                    assert error.value.code() == grpc.StatusCode.INVALID_ARGUMENT
                     reply["instantActionStates"] = []
                     reply["actionStates"][0]["actionStatus"] = "FINISHED"
                     reply["headerId"] += 1
                     publish()
                 if result == "Attach":
                     assert store.called.wait(4), log.read_text()
+                    if later:
+                        # The durable row remains active in this storage double; the live
+                        # target must still stop serving progress during its final write.
+                        api.GetRecoveryInventory(dp.GetRecoveryInventoryRequest(), timeout=2)
+                        rejected(lambda: api.GetMission(scope, timeout=2))
                     publish()
                     assert owner() == "m"
                     store.release.set()

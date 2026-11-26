@@ -3,6 +3,7 @@
 #include "fleet_database.pb.h"
 #include "fleet_dispatch.pb.h"
 #include "missions/Mission.hpp"
+#include "missions/RouteParts.hpp"
 #include "traffic/FixedRouteGate.hpp"
 #include <optional>
 #include <span>
@@ -28,6 +29,19 @@ std::optional<Authority> read_authority(const Mission& mission, const Graph& gra
                                        std::span<const Command> records, std::uint32_t attempt);
 
 bool matches_execution(const Authority& authority, const Checkpoint& checkpoint);
+
+struct ObservedMove {
+    std::uint32_t add_attempt;
+    int step;
+    fms::v1::MoveProgress progress;
+    RouteParts parts;
+};
+
+// cp was checked against the local Add/Extend journal by matches_execution().
+std::optional<ObservedMove> observe_move(const Checkpoint& cp,
+    const fms::dispatch::v1::GetMissionRequest& request,
+    const fms::dispatch::v1::GetMissionResponse& reply, const fms::v1::RobotStatus& robot,
+    const ObservedMove* previous);
 
 struct Decision {
     bool terminal = false;

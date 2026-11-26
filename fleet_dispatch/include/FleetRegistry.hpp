@@ -41,6 +41,7 @@ public:
 
     RobotSession* find(const std::string& robot_id);
     RobotSession* find_by_mission(const std::string& mission_id);
+    const ActiveMission* observed_mission(const fms::dispatch::v1::GetMissionRequest& request);
     bool post(const std::string& manufacturer, const std::string& serial_number, VdaMessage message);
 
 private:
@@ -53,6 +54,7 @@ private:
     };
     RecoveryInventory recovery_;
     std::shared_ptr<RecoveryRead> reading_;
+    RecoveryRobotView recovery_robot(const std::string& id, const RobotSession& session) const;
     std::map<std::string, RecoveryRobotView> recovery_robots() const;
 
     void start_probes();

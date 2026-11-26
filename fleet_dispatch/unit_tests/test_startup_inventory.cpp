@@ -174,3 +174,60 @@ TEST_CASE("Fleet recovery inventory versions ownership and observation changes",
         CHECK(view.revision() > revision);
     }
 }
+
+TEST_CASE("Scoped mission observation needs a current durable Add identity", "[scoped-mission]") {
+    namespace dp = fms::dispatch::v1;
+    using namespace std::chrono_literals;
+    const RecoveryInventory::Clock::time_point start{};
+    RecoveryInventory inventory("run");
+    fms::database::v1::RecoveryRows rows;
+    rows.add_robots("A");
+    rows.add_robots("D");
+    auto* held = rows.add_missions();
+    held->set_robot_id("A");
+    held->set_mission_id("blocked");
+    held->set_uncertain(true);
+    auto* trip = rows.add_missions();
+    trip->set_robot_id("D");
+    trip->set_mission_id("trip");
+    trip->set_add_attempt(0);
+    std::map<std::string, RecoveryRobotView> live{{"A", {}}, {"D", {"trip", false, false}}};
+
+    dp::GetMissionRequest req;
+    req.set_expected_instance_id("run");
+    req.set_expected_robot_id("D");
+    req.set_mission_id("trip");
+    req.set_expected_add_attempt(0);
+    CHECK_FALSE(inventory.identifies_active(req, start));
+    inventory.update(rows, live, true, start);
+    REQUIRE(inventory.identifies_active(req, start + 2999ms));
+    CHECK_FALSE(inventory.identifies_active(req, start + 3s));
+
+    SECTION("unrelated robot remains held") {
+        CHECK_FALSE(inventory.snapshot().live_restrictions().robots().empty());
+        inventory.update(rows, live, true, start + 2s);
+        CHECK(inventory.identifies_active(req, start + 4s));
+        inventory.read_failed();
+    }
+    SECTION("attempt zero must be explicit") { req.clear_expected_add_attempt(); }
+    SECTION("different attempt") { req.set_expected_add_attempt(1); }
+    SECTION("different robot") { req.set_expected_robot_id("A"); }
+    SECTION("different mission") { req.set_mission_id("blocked"); }
+    SECTION("different dispatch") { req.set_expected_instance_id("previous-run"); }
+    SECTION("receipt has no verified attempt") {
+        trip->clear_add_attempt();
+        inventory.update(rows, live, true, start);
+    }
+    SECTION("unresolved target") {
+        trip->set_uncertain(true);
+        inventory.update(rows, live, true, start);
+    }
+    SECTION("pending target write") {
+        live.at("D").blocked = true;
+        inventory.update(rows, live, true, start);
+    }
+    SECTION("inconsistent fleet") {
+        inventory.update(rows, live, false, start);
+    }
+    CHECK_FALSE(inventory.identifies_active(req, start + 2500ms));
+}

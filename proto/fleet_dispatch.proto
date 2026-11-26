@@ -239,6 +239,10 @@ message MissionStatusUpdate {
 
 message GetMissionRequest {
   string mission_id = 1;
+  // Together these fields request a live, read-only observation of one Add attempt.
+  string expected_instance_id = 2;
+  string expected_robot_id = 3;
+  optional uint32 expected_add_attempt = 4;
 }
 
 message GetRecoveryInventoryRequest {}
@@ -264,5 +268,7 @@ message GetRecoveryInventoryResponse {
 message GetMissionResponse {
   fms.v1.Mission mission = 1;          // как в AddMission, но released_nodes текущего шага — текущие
   fms.v1.MissionStatus status = 2;
+  string instance_id = 3;
+  optional uint32 add_attempt = 4; // Present only on a verified scoped read.
 }
 

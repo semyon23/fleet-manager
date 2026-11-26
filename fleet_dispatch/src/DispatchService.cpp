@@ -566,6 +566,20 @@ RobotSession* DispatchService::find_online_robot(const std::string& robot_id, gr
 
 asio::awaitable<grpc::Status> DispatchService::get_mission(const dv1::GetMissionRequest& request,
                                                            dv1::GetMissionResponse& response) {
+    const bool scoped = request.has_expected_add_attempt() || !request.expected_instance_id().empty() ||
+                        !request.expected_robot_id().empty();
+    if (scoped) {
+        if (request.mission_id().empty() || request.expected_instance_id().empty() ||
+            request.expected_robot_id().empty() || !request.has_expected_add_attempt())
+            co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "incomplete mission observation identity"};
+        const auto* mission = fleet_registry_.observed_mission(request);
+        if (!mission) co_return grpc::Status{grpc::StatusCode::UNAVAILABLE, "live mission not verified"};
+        *response.mutable_mission() = mission->mission();
+        *response.mutable_status() = mission->status();
+        response.set_instance_id(fleet_registry_.instance_id());
+        response.set_add_attempt(request.expected_add_attempt());
+        co_return grpc::Status::OK;
+    }
     if (auto g = startup_gate(true); !g.ok()) co_return g;
     RobotSession* session = fleet_registry_.find_by_mission(request.mission_id());
     if (!session) {

@@ -18,6 +18,7 @@
 #include "missions/MissionStore.hpp"
 #include "missions/RouteParts.hpp"
 #include "missions/RecoveryAssessment.hpp"
+#include "missions/ExecutionRecovery.hpp"
 #include "missions/RecoveryInventoryCache.hpp"
 #include "missions/ExtensionCommand.hpp"
 #include "missions/ControlCommandJournal.hpp"
@@ -84,6 +85,7 @@ public:
 
     // c2. Маршруты роботов для UI (GET /routes): что осталось проехать по текущему шагу и цели шагов
     struct RobotRoute {
+        std::string progress_source = "last_known";
         std::string robot_id;
         std::string map_id;
         std::string mission_id;
@@ -143,9 +145,17 @@ private:
         std::uint64_t proof_epoch = 0;
         std::uint64_t proof_source_epoch = 0;
         std::optional<recovery_assessment::LocalEvidence> assessment;
+        std::optional<execution_recovery::ObservedMove> observed;
+        std::uint64_t observed_revision = 0;
+        std::uint64_t observed_source = 0;
+        std::uint64_t observed_epoch = 0;
+        std::chrono::steady_clock::time_point observed_until{};
     };
     using Job = std::shared_ptr<CheckpointJob>;
     void queue_checkpoint(const std::string& id);
+    asio::awaitable<void> observe_checkpoint(const std::string& id, const Job& job,
+        std::uint64_t epoch, const execution_recovery::Checkpoint& cp);
+    const execution_recovery::ObservedMove* scoped_progress(const Mission& mission) const;
     bool checkpoint_current(const std::string& id, const Job& job, std::uint64_t epoch) const;
     asio::awaitable<void> checkpoint_loop();
     asio::awaitable<void> recover_checkpoint(std::string id, Job job, std::uint64_t epoch);

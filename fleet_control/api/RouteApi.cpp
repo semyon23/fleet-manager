@@ -28,6 +28,7 @@ asio::awaitable<HttpResponse> RouteApi::list(const HttpRequest& req) {
             {"mapId", route.map_id},
             {"missionId", route.mission_id},
             {"stepIndex", route.step_index},
+            {"progressSource", route.progress_source},
             {"released", {{"nodes", route.nodes}, {"edges", route.edges}}},
             // Пока трафика нет, весь маршрут шага разрешён сразу — неразрешённой части нет (T1)
             // Пока трафика нет ...

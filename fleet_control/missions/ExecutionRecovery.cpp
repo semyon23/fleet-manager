@@ -1,4 +1,5 @@
 #include "missions/ExecutionRecovery.hpp"
+#include "missions/RecoveryAssessment.hpp"
 #include "fleet/Availability.hpp"
 #include <algorithm>
 #include <map>
@@ -183,6 +184,59 @@ bool matches_execution(const Authority& a, const Checkpoint& cp) {
         move->set_released_nodes(a.add.mission().nodes(i).move().released_nodes());
     }
     return MessageDifferencer::Equals(effective, a.add.mission());
+}
+
+std::optional<ObservedMove> observe_move(const Checkpoint& cp, const dp::GetMissionRequest& request,
+    const dp::GetMissionResponse& reply, const fms1::RobotStatus& robot, const ObservedMove* previous) {
+    const auto& mission = reply.mission();
+    const auto& state = reply.status();
+    const auto& id = request.mission_id();
+    if (id.empty() || request.expected_instance_id().empty() || request.expected_robot_id().empty() ||
+        !request.has_expected_add_attempt() || !reply.has_add_attempt() || !cp.has_add_attempt() ||
+        reply.instance_id() != request.expected_instance_id() ||
+        reply.add_attempt() != request.expected_add_attempt() || cp.add_attempt() != reply.add_attempt() ||
+        robot.robot_id() != request.expected_robot_id() || cp.robot_id() != robot.robot_id() ||
+        mission.robot_id() != robot.robot_id() || state.robot_id() != robot.robot_id() ||
+        cp.mission_id() != id || mission.mission_id() != id || state.mission_id() != id ||
+        cp.kind() != Checkpoint::ACTIVE || !cp.has_grant_update() || !cp.has_status() ||
+        cp.status().current_node_id() != cp.grant_step() || cp.status().steps_size() != mission.nodes_size() ||
+        state.state() != fms1::MISSION_STATE_RUNNING || cp.grant_step() != state.current_node_id() ||
+        !google::protobuf::util::MessageDifferencer::Equals(cp.executed_mission(), mission) ||
+        mission.nodes_size() != state.steps_size()) return {};
+
+    for (int i = 0; i < mission.nodes_size(); ++i) {
+        const auto& node = mission.nodes(i);
+        if (node.id() != state.current_node_id()) continue;
+        const auto& step = state.steps(i);
+        const auto& move = node.move();
+        const auto& progress = step.move();
+        if (node.id() != "s" + std::to_string(i) || !node.has_move() ||
+            step.node_id() != node.id() || step.state() != fms1::STEP_STATE_RUNNING ||
+            step.attempts() != 1 || !step.has_move() || !move.has_released_nodes() ||
+            !move.nodes_size() || !robot.localized() || !robot.has_pose() ||
+            move.nodes(0).map_id() != robot.pose().map_id() ||
+            progress.released_nodes() != move.released_nodes() || progress.last_node_id().empty() ||
+            progress.revision() != progress.confirmed_revision() || !progress.update_rejected().empty() ||
+            cp.grant_order() != robot.observed_order().order_id() ||
+            cp.grant_update() != progress.confirmed_revision() ||
+            !recovery_assessment::matches_move(robot, id, i, progress)) return {};
+        const auto& committed = cp.status().steps(i);
+        if (committed.node_id() != step.node_id() || committed.attempts() > 1 ||
+            (committed.has_move() && progress.last_node_index() < committed.move().last_node_index())) return {};
+        if (previous && previous->add_attempt == reply.add_attempt() &&
+            (i < previous->step || (i == previous->step &&
+            (progress.last_node_index() < previous->progress.last_node_index() ||
+             progress.released_nodes() < previous->progress.released_nodes() ||
+             progress.revision() < previous->progress.revision())))) return {};
+
+        std::vector<std::string> nodes, edges;
+        for (const auto& n : move.nodes()) nodes.push_back(n.node_id());
+        for (const auto& e : move.edges()) edges.push_back(e.edge_id());
+        auto parts = split_route(nodes, edges, progress);
+        if (parts) return ObservedMove{reply.add_attempt(), i, progress, std::move(*parts)};
+        break;
+    }
+    return {};
 }
 
 Decision terminal(const Authority& a, const Graph& graph, const Checkpoint& cp) {
