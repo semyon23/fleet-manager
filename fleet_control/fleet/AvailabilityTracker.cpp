@@ -57,6 +57,7 @@ void AvailabilityTracker::on_status(const fms::v1::RobotStatus& status) {
     const std::optional<fms::v1::RobotStatus> before = robot.status;
     robot.status = status;
     robot.status_from_stream = true;
+    robot.traffic_epoch = traffic_epoch_;
     if (on_status_change && !robot.deleting) {
         on_status_change(status.robot_id(), before ? &*before : nullptr, status);
     }
@@ -79,8 +80,15 @@ void AvailabilityTracker::set_deleting(const std::string& robot_id) {
     if (on_robot_removed) on_robot_removed(robot_id);   // M-5: тревоги удаляемого — снять и подтвердить
 }
 
+void AvailabilityTracker::set_traffic_instance(const std::string& instance) {
+    traffic_instance_ = instance;
+    ++traffic_epoch_;
+    if (on_traffic_epoch) on_traffic_epoch();
+}
+
 void AvailabilityTracker::set_dispatch_connected(bool connected) {
     if (on_dispatch) on_dispatch(connected);
+    if (dispatch_connected_ != connected && on_traffic_epoch) on_traffic_epoch();
     dispatch_connected_ = connected;
 
     if (!connected) {
@@ -214,6 +222,13 @@ const fms::v1::RobotStatus* AvailabilityTracker::live_status(const std::string& 
     const auto age_ms = TimeUtil::TimestampToMilliseconds(TimeUtil::GetCurrentTime()) -
                         TimeUtil::TimestampToMilliseconds(s.last_state_at());
     return age_ms >= -2000 && age_ms < 60000 ? &s : nullptr;
+}
+
+bool AvailabilityTracker::assessment_fleet_ready() const {
+    if (traffic_instance_.empty() || !traffic_inventory_ready()) return false;
+    for (const auto& [id, robot] : robots_)
+        if (robot.traffic_epoch != traffic_epoch_) return false;
+    return true;
 }
 
 bool AvailabilityTracker::traffic_inventory_ready() const {

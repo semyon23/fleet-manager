@@ -17,6 +17,8 @@
 #include "maps/MapStore.hpp"
 #include "missions/MissionStore.hpp"
 #include "missions/RouteParts.hpp"
+#include "missions/RecoveryAssessment.hpp"
+#include "missions/RecoveryInventoryCache.hpp"
 #include "missions/ExtensionCommand.hpp"
 #include "missions/ControlCommandJournal.hpp"
 #include "services/Services.hpp"
@@ -40,6 +42,13 @@ public:
     void configure_traffic(AvailabilityTracker& availability);
 
     bool traffic_ready() const;
+
+    struct Assessment {
+        traffic::GateResult route;
+        std::string instance;
+        std::uint64_t revision = 0;
+    };
+    Assessment assess_route(const std::string& mission_id, const std::string& robot_id);
 
     bool try_map_edit(const std::string& map);
 
@@ -99,6 +108,11 @@ private:
     // Маршрут отправленной миссии
     struct Plan {
         std::uint32_t traffic_version = 0;
+        std::vector<fms::database::v1::ControlCommandRecord> restored_commands;
+        struct Assessment { Mission request; recovery_assessment::LocalEvidence evidence; };
+        mutable std::optional<Assessment> assessment;
+        std::string status_instance;
+        std::vector<std::uint32_t> step_attempts;
         std::vector<std::vector<std::string>> routes;   // узлы маршрута каждого шага (nodeId)
         std::vector<std::vector<std::string>> edges;    // рёбра маршрута каждого шага (edgeId), для UI
         std::vector<std::string> planned_nodes;
@@ -126,6 +140,9 @@ private:
         std::chrono::steady_clock::time_point due{};
         bool busy = false;
         std::string last_command;
+        std::uint64_t proof_epoch = 0;
+        std::uint64_t proof_source_epoch = 0;
+        std::optional<recovery_assessment::LocalEvidence> assessment;
     };
     using Job = std::shared_ptr<CheckpointJob>;
     void queue_checkpoint(const std::string& id);
@@ -190,6 +207,7 @@ private:
 
     AvailabilityTracker* traffic_availability_ = nullptr;
     bool traffic_snapshot_ = false;
+    std::string mission_stream_instance_;
     bool traffic_fault_ = false;
 
     std::string traffic_error_;
@@ -210,6 +228,19 @@ private:
     std::map<std::string, Job> checkpoint_jobs_;
     asio::steady_timer checkpoint_timer_;
     std::size_t checkpoint_inflight_ = 0;
+
+    using Inventory = fms::dispatch::v1::GetRecoveryInventoryResponse;
+    asio::awaitable<void> inventory_loop();
+    const Inventory* current_inventory() const;
+    void invalidate_inventory();
+    void wake_inventory_if_idle();
+    std::optional<recovery_assessment::Local> assessment_evidence() const;
+
+    asio::steady_timer inventory_timer_{io_context_};
+    recovery_assessment::InventoryCache inventory_cache_;
+    std::uint64_t assessment_source_epoch_ = 0;
+    bool inventory_idle_ = false;
+    std::chrono::steady_clock::time_point inventory_next_read_{};
 
     std::uint32_t journal_attempt(const std::string& id) const;
 

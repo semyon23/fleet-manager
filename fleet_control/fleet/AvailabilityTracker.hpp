@@ -38,10 +38,16 @@ public:
     std::vector<IdleRobot> idle_robots() const;
 
     void set_traffic_registry_ready(bool ready) {
+        if (traffic_registry_ready_ == ready) return;
         traffic_registry_ready_ = ready;
+        if (on_traffic_epoch) on_traffic_epoch();
     }
 
+    std::function<void()> on_traffic_epoch;
+    const std::string& traffic_instance() const { return traffic_instance_; }
+    void set_traffic_instance(const std::string& instance);
     bool traffic_inventory_ready() const;
+    bool assessment_fleet_ready() const;
     const fms::v1::RobotStatus* live_status(const std::string& robot_id) const;
 
     std::vector<traffic::TrafficOccupant> traffic_occupants() const;
@@ -58,6 +64,7 @@ public:
     std::function<void(bool connected)> on_dispatch;
 private:
     struct Robot {
+        std::uint64_t traffic_epoch = 0;
         bool deleting = false;
         std::optional<fms::v1::RobotStatus> status;   // последний известный
         bool status_from_stream = false;              // из стрима свежее, чем из базы, — базой не перезаписываем
@@ -72,6 +79,8 @@ private:
     Services& services_;
     const MapStore& maps_;
     double low_battery_percent_;
+    std::string traffic_instance_;
+    std::uint64_t traffic_epoch_ = 0;
     bool traffic_registry_ready_ = false;
     bool dispatch_connected_ = false;
     std::map<std::string, Robot> robots_;

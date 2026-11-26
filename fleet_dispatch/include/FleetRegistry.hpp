@@ -31,6 +31,7 @@ public:
     asio::awaitable<void> restore(StartupInventory inventory);
     asio::awaitable<grpc::Status> recovery_inventory(fms::dispatch::v1::GetRecoveryInventoryResponse& out);
     void reject_startup() { recovery_.reject_startup(); }
+    const std::string& instance_id() const { return recovery_.snapshot().instance_id(); }
 
     const StartupInventory* inventory() const {
         return inventory_ ? &*inventory_ : nullptr;

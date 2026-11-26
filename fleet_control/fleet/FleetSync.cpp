@@ -52,6 +52,7 @@ asio::awaitable<void> FleetSync::watch_dispatch() {
                 on_update(update);
             }
         }
+        if (connected_) availability_.set_traffic_instance({});
         grpc::Status status = co_await rpc.finish(asio::use_awaitable);
         stream_ = nullptr;
 
@@ -71,6 +72,7 @@ asio::awaitable<void> FleetSync::watch_dispatch() {
 
 void FleetSync::on_update(const dpv1::RobotStatusUpdate& update) {
     if (update.has_snapshot()) {
+        availability_.set_traffic_instance(update.snapshot().instance_id());
         in_dispatch_.clear();
         for (const auto& robot : update.snapshot().robots()) {
             in_dispatch_.insert(robot.robot_id());

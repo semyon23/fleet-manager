@@ -160,6 +160,7 @@ void DispatchService::start() {
                        status = grpc::Status{grpc::StatusCode::UNAVAILABLE, "status stream closed, subscribe again"};
                        co_return;
                    }
+                   if (update.has_snapshot()) update.mutable_snapshot()->set_instance_id(fleet_registry_.instance_id());
                    if (!co_await rpc.write(update)) {
                        co_return;   // клиент отключился во время записи
                    }
@@ -193,6 +194,7 @@ void DispatchService::start() {
                         status = grpc::Status{grpc::StatusCode::UNAVAILABLE, "mission stream closed, subscribe again"};
                         co_return;
                     }
+                    if (update.has_snapshot()) update.mutable_snapshot()->set_instance_id(fleet_registry_.instance_id());
                     if (!co_await rpc.write(update)) {
                         co_return;
                     }

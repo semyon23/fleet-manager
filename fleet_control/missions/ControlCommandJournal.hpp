@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "services/Services.hpp"
 
@@ -30,6 +31,11 @@ public:
     Handle stage(Record record);
     asio::awaitable<grpc::Status> persist(Handle entry);
     void forget(const std::string& mission_id);
+    // Merge local commands with a previously read journal. A staged command
+    // without an acknowledgement makes the possible issued base ambiguous.
+    enum class Missing { Append, Reject };
+    bool all_stored(const std::string& mission_id) const;
+    bool merge_stored(const std::string& mission_id, std::vector<Record>& records, Missing missing) const;
 
 private:
     Services& services_;

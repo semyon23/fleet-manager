@@ -86,6 +86,9 @@ TEST_CASE("Fleet recovery inventory distinguishes loading from an empty fleet", 
     inventory.update(rows, {{"r", {}}}, true);
     REQUIRE(view.blocked_robots_size() == 1);
     CHECK(view.blocked_robots(0) == "r");
+    REQUIRE(view.has_live_restrictions());
+    REQUIRE(view.live_restrictions().robots_size() == 1);
+    CHECK(view.live_restrictions().robots(0) == "r");
 }
 
 TEST_CASE("Fleet recovery inventory versions ownership and observation changes", "[recovery-inventory]") {
@@ -116,6 +119,22 @@ TEST_CASE("Fleet recovery inventory versions ownership and observation changes",
     rows.mutable_missions()->SwapElements(0, 1);
     inventory.update(rows, live, true);
     CHECK(view.revision() == revision);
+
+    SECTION("an active owner may extend only while its own live session is usable") {
+        REQUIRE(view.has_live_restrictions());
+        CHECK(view.live_restrictions().robots_size() == 2);
+        live["a"].mission = "m-a";
+        live["b"].mission = "m-b";
+        inventory.update(rows, live, true);
+        CHECK(view.blocked_robots_size() == 2);
+        CHECK(view.live_restrictions().robots().empty());
+        const auto healthy = view.revision();
+        live["a"].blocked = true;
+        inventory.update(rows, live, true);
+        CHECK(view.revision() > healthy);
+        REQUIRE(view.live_restrictions().robots_size() == 1);
+        CHECK(view.live_restrictions().robots(0) == "a");
+    }
 
     SECTION("uncertainty changes for an existing owner") {
         rows.mutable_missions(0)->set_uncertain(true);

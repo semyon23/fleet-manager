@@ -196,6 +196,7 @@ message StreamRobotStatusRequest {
 
 message RobotSnapshot {
   repeated fms.v1.RobotStatus robots = 1;
+  string instance_id = 2; // Process that owns this stream and its recovery inventory.
 }
 
 message RobotStatusUpdate {
@@ -216,6 +217,7 @@ message StreamMissionStatusRequest {
 // Нужно, чтобы control, переподключившись, узнал итог миссии, завершившейся, пока его не было.
 message MissionSnapshot {
   repeated fms.v1.MissionStatus missions = 1;
+  string instance_id = 2; // Process that owns this stream and its recovery inventory.
 }
 
 // NotifyStep миссии.
@@ -246,6 +248,9 @@ message RecoveryMission {
   optional uint32 add_attempt = 3;
   bool uncertain = 4;
 }
+message RecoveryLiveRestrictions {
+  repeated string robots = 1; // Cannot extend even their own known running mission.
+}
 message GetRecoveryInventoryResponse {
   enum State { LOADING = 0; READY = 1; CONFLICT = 2; }
   State state = 1; // READY describes the inventory, not permission to move.
@@ -254,6 +259,7 @@ message GetRecoveryInventoryResponse {
   repeated RecoveryMission missions = 4;
   repeated string robots = 5;
   repeated string blocked_robots = 6; // Occupied or without a verified usable state.
+  RecoveryLiveRestrictions live_restrictions = 7; // Absent on older dispatch instances.
 }
 message GetMissionResponse {
   fms.v1.Mission mission = 1;          // как в AddMission, но released_nodes текущего шага — текущие

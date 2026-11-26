@@ -40,6 +40,25 @@ bool newer_than(const types::MissionStatus& a, const types::MissionStatus& b) {
         return a.updated_at().seconds() > b.updated_at().seconds();
     return a.updated_at().nanos() > b.updated_at().nanos();
 }
+
+recovery_assessment::LocalEvidence local_evidence(const execution_recovery::Authority& auth,
+                                                  bool recovering) {
+    recovery_assessment::LocalEvidence result;
+    result.robot = auth.add.mission().robot_id();
+    result.attempt = auth.add.attempt();
+    result.recovering = recovering;
+    result.steps.reserve(auth.steps.size());
+    for (const auto& step : auth.steps) result.steps.push_back(step.base);
+    return result;
+}
+
+// Keep the previous proof available while its exact epoch is rechecked. A
+// failed refresh revokes it, including exceptions and RPC errors.
+struct ProofRefresh {
+    std::optional<recovery_assessment::LocalEvidence>& proof;
+    bool checked = false;
+    ~ProofRefresh() { if (!checked) proof.reset(); }
+};
 } // namespace
 
 struct MissionRunner::PendingHandoff {
@@ -53,6 +72,8 @@ void MissionRunner::queue_checkpoint(const std::string& id) {
     auto [it, inserted] = checkpoint_jobs_.try_emplace(id);
     if (inserted) {
         it->second = std::make_shared<CheckpointJob>();
+        if (traffic_snapshot_ && (checkpoint_jobs_.size() == 1 || current_inventory()))
+            invalidate_inventory();
         checkpoint_timer_.cancel_one();
     }
 }
@@ -60,6 +81,51 @@ void MissionRunner::queue_checkpoint(const std::string& id) {
 bool MissionRunner::checkpoint_current(const std::string& id, const Job& job, std::uint64_t epoch) const {
     const auto it = checkpoint_jobs_.find(id);
     return !stopped_ && it != checkpoint_jobs_.end() && it->second == job && job->epoch == epoch;
+}
+
+std::optional<recovery_assessment::Local> MissionRunner::assessment_evidence() const {
+    if (!journal_loaded_ || !sending_.empty()) return std::nullopt;
+    recovery_assessment::Local owners;
+    for (const auto& [id, job] : checkpoint_jobs_) {
+        if (!job->assessment || job->proof_epoch != job->epoch ||
+            job->proof_source_epoch != assessment_source_epoch_ ||
+            job->assessment->attempt != journal_attempt(id)) return std::nullopt;
+        if (!command_journal_.all_stored(id)) return std::nullopt;
+        owners.emplace(id, *job->assessment);
+    }
+    for (const auto* mission : missions_.active()) {
+        const auto& id = mission->id;
+        if (const auto it = owners.find(id); it != owners.end()) {
+            if (mission->robot_id != it->second.robot || it->second.steps.empty() ||
+                mission->map_id != it->second.steps.front().map) return std::nullopt;
+            continue;
+        }
+        const auto next = next_.find(mission->robot_id);
+        if (mission->state == "QUEUED" || (next != next_.end() && next->second.mission_id == id)) continue;
+        const auto plan = plans_.find(id);
+        const auto* graph = maps_.find(mission->map_id);
+        if (plan == plans_.end() || !graph || graph->version != plan->second.traffic_version)
+            return std::nullopt;
+        const auto* source = current_inventory();
+        if (!source || plan->second.status_instance != source->instance_id()) return std::nullopt;
+        auto& cache = plan->second.assessment;
+        if (!cache) {
+            auto records = plan->second.restored_commands;
+            if (!command_journal_.merge_stored(id, records, ControlCommandJournal::Missing::Append))
+                return std::nullopt;
+            const auto auth = execution_recovery::read_authority(*mission, *graph, records, journal_attempt(id));
+            if (!auth) return std::nullopt;
+            cache.emplace(Plan::Assessment{*mission, local_evidence(*auth, auth->cancel)});
+        }
+        const auto& saved = cache->request;
+        if (!command_journal_.all_stored(id) || saved.id != id || saved.created_at_ms != mission->created_at_ms ||
+            !same_request(saved, *mission) || cache->evidence.robot != mission->robot_id ||
+            cache->evidence.attempt != journal_attempt(id)) return std::nullopt;
+        auto& copy = owners.emplace(id, cache->evidence).first->second;
+        copy.recovering = copy.recovering || uncertain_.contains(id) ||
+            (mission->state != "RUNNING" && mission->state != "PAUSED");
+    }
+    return owners;
 }
 
 asio::awaitable<void> MissionRunner::checkpoint_loop() {
@@ -103,10 +169,14 @@ asio::awaitable<void> MissionRunner::checkpoint_loop() {
 asio::awaitable<void> MissionRunner::recover_checkpoint(std::string id, Job job, std::uint64_t epoch) {
     const auto current = [&] { return checkpoint_current(id, job, epoch); };
     if (!current() || sending_.contains(id)) co_return;
-    if (job->handoff && job->handoff->epoch == epoch) {
+    const auto source_epoch = assessment_source_epoch_;
+    const bool refresh_only = job->handoff && job->handoff->epoch == epoch;
+    if (refresh_only) {
         co_await handoff_checkpoint(id, job, epoch);
-        co_return;
+        if (!current() || (job->assessment && job->proof_epoch == epoch &&
+                           job->proof_source_epoch == source_epoch)) co_return;
     }
+    ProofRefresh refresh{job->assessment};
 
     db::ListControlCommandsRequest list;
     list.set_mission_id(id);
@@ -138,6 +208,7 @@ asio::awaitable<void> MissionRunner::recover_checkpoint(std::string id, Job job,
         return cancel_before_send(doc, cmd, attempt);
     });
     if (local_cancel != commands.end()) {
+        if (refresh_only) co_return;
         if (add_rpc_started_.contains(id) || std::ranges::any_of(commands, [](const auto& c) {
             return c.kind() == db::CONTROL_COMMAND_KIND_EXTEND_MISSION;
         })) co_return;
@@ -171,7 +242,7 @@ asio::awaitable<void> MissionRunner::recover_checkpoint(std::string id, Job job,
     // Across a step transition all possible steps are still durable and motion stays gated.
     const auto known_step = doc.current_step.value_or(0);
     if (known_step < 0 || static_cast<std::size_t>(known_step) >= auth->steps.size()) co_return;
-    if (!traffic_routes_.contains(doc.robot_id)) {
+    if (!refresh_only && !traffic_routes_.contains(doc.robot_id)) {
         const auto& base = auth->steps[known_step].base;
         traffic_routes_.emplace(doc.robot_id, base);
     }
@@ -185,6 +256,8 @@ asio::awaitable<void> MissionRunner::recover_checkpoint(std::string id, Job job,
         cp.mission_id() != id || cp.robot_id() != doc.robot_id || !cp.has_status() ||
         cp.status().robot_id() != doc.robot_id || cp.status().mission_id() != id ||
         !cp.checkpoint_version() || cp.checkpoint_version() < job->version) co_return;
+    if (refresh_only && (cp.kind() != types::GetExecutionCheckpointResponse::CONFIRMED_TERMINAL ||
+        cp.checkpoint_version() != job->handoff->close.dispatch_final_version())) co_return;
     job->version = cp.checkpoint_version();
     graph = maps_.find(doc.map_id);
     if (!graph || graph->version != auth->steps.front().base.version) co_return;
@@ -195,8 +268,23 @@ asio::awaitable<void> MissionRunner::recover_checkpoint(std::string id, Job job,
                    !same_request(doc, *active))) co_return;
     const auto live = waiting_plans_.find(id);
     using Checkpoint = types::GetExecutionCheckpointResponse;
+    const auto remember = [&] {
+        job->assessment.reset();
+        if (source_epoch != assessment_source_epoch_ || journal_attempt(id) != attempt) return;
+        if (std::ranges::any_of(rows.commands(), [&](const auto& row) {
+            return row.command().attempt() == attempt && row.resolved();
+        })) return;
+        // A new command may be staged or persisted while the list RPC is in
+        // flight. It must occur in this same durable command set.
+        if (!command_journal_.merge_stored(id, commands, ControlCommandJournal::Missing::Reject)) return;
+        job->assessment = local_evidence(*auth, true);
+        job->proof_epoch = epoch;
+        job->proof_source_epoch = source_epoch;
+        refresh.checked = true;
+    };
 
     if (cp.kind() == Checkpoint::ACTIVE) {
+        remember();
         // A durable ACTIVE may precede MQTT. Only the live view may resume execution.
         if (active && traffic_snapshot_ && live != waiting_plans_.end() &&
             (live->second.state() == types::MISSION_STATE_RUNNING ||
@@ -205,6 +293,7 @@ asio::awaitable<void> MissionRunner::recover_checkpoint(std::string id, Job job,
         co_return;
     }
     if (cp.kind() == Checkpoint::UNCERTAIN) {
+        remember();
         // An observed failure is still visible to the operator. Its traffic protection stays open.
         if (live != waiting_plans_.end() && live->second.SerializeAsString() == cp.status().SerializeAsString() &&
             (cp.status().state() == types::MISSION_STATE_FAILED ||
@@ -217,6 +306,10 @@ asio::awaitable<void> MissionRunner::recover_checkpoint(std::string id, Job job,
 
     auto decision = execution_recovery::terminal(*auth, *graph, cp);
     if (!decision.terminal || !decision.held) co_return;
+    if (refresh_only) {
+        remember();
+        co_return;
+    }
     const auto& base = *decision.held;
     auto held = traffic_routes_.find(doc.robot_id);
     if (held == traffic_routes_.end()) {
@@ -244,6 +337,8 @@ asio::awaitable<void> MissionRunner::recover_checkpoint(std::string id, Job job,
             !std::equal(old.edges.begin(), old.edges.end(), previous.edges.begin())) co_return;
         if (decision.preceding_steps_complete) held->second = base;
     }
+
+    remember();
 
     const std::string state = cp.status().state() == types::MISSION_STATE_COMPLETED ? "COMPLETED" : "CANCELED";
     if (auto* m = missions_.find(id)) {

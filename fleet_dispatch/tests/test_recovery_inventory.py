@@ -69,6 +69,13 @@ def after_startup(api):
     return read_inventory(api)
 
 
+def assert_stream_sources(api, inventory):
+    robots = first(api.StreamRobotStatus, dp.StreamRobotStatusRequest())
+    missions = first(api.StreamMissionStatus, dp.StreamMissionStatusRequest())
+    assert robots.snapshot.instance_id == inventory.instance_id
+    assert missions.snapshot.instance_id == inventory.instance_id
+
+
 def expect_gate_closed(api, health, store):
     assert health(b"", timeout=2) == b"\x08\x02"  # NOT_SERVING
     rejected(first, api.StreamMissionStatus, dp.StreamMissionStatusRequest())
@@ -94,6 +101,7 @@ def test_loading_empty_ready_and_restart(tmp_path):
             ready = after_startup(api)
             assert ready.state == Inventory.READY
             assert ready.instance_id == loading.instance_id
+            assert_stream_sources(api, ready)
             assert ready.revision > loading.revision
             assert not ready.missions and not ready.robots and not ready.blocked_robots
             assert read_inventory(api) == ready
@@ -103,6 +111,7 @@ def test_loading_empty_ready_and_restart(tmp_path):
             restarted = after_startup(api)
             assert restarted.state == Inventory.READY
             assert restarted.instance_id and restarted.instance_id != ready.instance_id
+            assert_stream_sources(api, restarted)
             assert not restarted.missions and not restarted.robots and not restarted.blocked_robots
             assert read_inventory(api) == restarted
 

@@ -100,6 +100,7 @@ void MissionRunner::start() {
     asio::co_spawn(io_context_, traffic_loop(), log_failure);
     asio::co_spawn(io_context_, journal_startup(), log_failure);
     asio::co_spawn(io_context_, checkpoint_loop(), log_failure);
+    asio::co_spawn(io_context_, inventory_loop(), log_failure);
 }
 
 void MissionRunner::stop() {
@@ -115,6 +116,7 @@ void MissionRunner::stop() {
     traffic_timer_.cancel();
     journal_timer_.cancel();
     checkpoint_timer_.cancel();
+    inventory_timer_.cancel();
 }
 
 // ==================================================================== отправка в dispatch
@@ -323,6 +325,8 @@ std::optional<fms1::Mission> MissionRunner::build(const Mission& mission, const 
 
 void MissionRunner::update_plan(Plan& plan, const fms1::MissionStatus& status) {
 
+    plan.status_instance = mission_stream_instance_;
+    plan.step_attempts.assign(plan.progress.size(), 0);
     for (size_t i = 0; i < plan.progress.size(); ++i) {
         const std::string step_id = std::format("s{}", i);
 
@@ -334,6 +338,7 @@ void MissionRunner::update_plan(Plan& plan, const fms1::MissionStatus& status) {
             // Копируем весь прогресс, включая сброс ожидания,
             // новую revision и текст отказа обновления.
             plan.progress[i] = step.move();
+            plan.step_attempts[i] = step.attempts();
 
             if (status.current_node_id() == step_id) {
                 const size_t at = step.move().last_node_index();
@@ -662,6 +667,10 @@ asio::awaitable<void> MissionRunner::watch_dispatch() {
                 on_update(update);
             }
         }
+        if (traffic_snapshot_) {
+            mission_stream_instance_.clear();
+            invalidate_inventory();
+        }
         grpc::Status status = co_await rpc.finish(asio::use_awaitable);
         stream_ = nullptr;
         if (traffic_snapshot_) {
@@ -697,6 +706,8 @@ void MissionRunner::on_update(const dpv1::MissionStatusUpdate& update) {
 void MissionRunner::reconcile(
     const dpv1::MissionSnapshot& snapshot) {
 
+    if (!traffic_snapshot_ || mission_stream_instance_ != snapshot.instance_id()) invalidate_inventory();
+    mission_stream_instance_ = snapshot.instance_id();
     traffic_snapshot_ = true;
 
     std::set<std::string> in_dispatch;
@@ -919,6 +930,10 @@ asio::awaitable<void> MissionRunner::restore(std::string mission_id, Job job, st
             }
         }
         if (!restore_journal_base(*mission, plan, live, commands)) co_return;
+        if (job->assessment && job->proof_epoch == epoch &&
+            job->proof_source_epoch == assessment_source_epoch_) {
+            plan.restored_commands = std::move(commands);
+        }
     }
 
     spdlog::info(
@@ -1416,6 +1431,7 @@ asio::awaitable<void> MissionRunner::extension_loop() {
 void MissionRunner::configure_traffic(AvailabilityTracker& availability) {
 
     traffic_availability_ = &availability;
+    availability.on_traffic_epoch = [this] { invalidate_inventory(); };
 }
 
 bool MissionRunner::traffic_ready() const {
@@ -1857,6 +1873,7 @@ ControlCommandJournal::Handle MissionRunner::stage_command(
     record.set_request_proto(payload);
     record.set_recovery_version(1);
     record.set_recovery_json(snapshot.dump());
+    plan->second.assessment.reset();
     auto entry = command_journal_.stage(std::move(record));
     if (auto it = checkpoint_jobs_.find(id); it != checkpoint_jobs_.end() &&
         it->second->last_command != entry->record.command_id()) {

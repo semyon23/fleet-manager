@@ -23,6 +23,7 @@ void RecoveryInventory::update(const Rows &rows, const std::map<std::string, Rec
             live.size() != robots.size();
 
         std::set<std::string> blocked(rows.deleting().begin(), rows.deleting().end());
+        auto restricted = blocked;
         for (const auto& id : blocked)
             if (!robots.contains(id)) conflict = true;
 
@@ -49,16 +50,21 @@ void RecoveryInventory::update(const Rows &rows, const std::map<std::string, Rec
             const auto it = live.find(id);
             if (it == live.end()) {
                 blocked.insert(id);
+                restricted.insert(id);
                 conflict = true;
                 continue;
             }
             const auto& r = it->second;
             const auto owner = owners.find(id);
+            if (r.blocked || r.conflict || (owner != owners.end() && r.mission != owner->second))
+                restricted.insert(id);
             if (r.blocked || r.conflict || !r.mission.empty()) blocked.insert(id);
             if (r.conflict || (!r.mission.empty() &&
                 (owner == owners.end() || owner->second != r.mission))) conflict = true;
         }
         for (const auto& id : blocked) next.add_blocked_robots(id);
+        auto* restrictions = next.mutable_live_restrictions();
+        for (const auto& id : restricted) restrictions->add_robots(id);
         next.set_state(conflict ? Reply::CONFLICT : Reply::READY);
         if (!google::protobuf::util::MessageDifferencer::Equals(view_, next)) {
             next.set_revision(view_.revision() + 1);

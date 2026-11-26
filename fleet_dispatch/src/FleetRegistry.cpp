@@ -194,6 +194,8 @@ std::map<std::string, RecoveryRobotView> FleetRegistry::recovery_robots() const 
         const bool fresh = !session->awaiting_live_state() && s.has_observed_order() &&
                            s.connection() == fms::v1::CONNECTION_STATE_ONLINE;
         r.blocked = !fresh || session->saving_order() || inventory_->deleting.contains(id);
+        if (!r.mission.empty() && (!mission || mission->status().state() != fms::v1::MISSION_STATE_RUNNING))
+            r.blocked = true;
         const auto probe = probes_.find(id);
         if (probe != probes_.end()) {
             const auto& p = probe->second;

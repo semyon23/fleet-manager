@@ -70,3 +70,34 @@ void ControlCommandJournal::forget(const std::string& mission_id) {
     // Удаляем только из памяти. Записи БД остаются для разбора при старте.
     entries_.erase(mission_id);
 }
+
+bool ControlCommandJournal::all_stored(const std::string& mission_id) const {
+    const auto found = entries_.find(mission_id);
+    if (found == entries_.end()) return true;
+    for (const auto& [id, entry] : found->second)
+        if (!entry->stored || entry->resolved) return false;
+    return true;
+}
+
+bool ControlCommandJournal::merge_stored(const std::string& mission_id,
+                                        std::vector<Record>& records, Missing missing) const {
+    std::map<std::string, std::size_t> known;
+    for (std::size_t i = 0; i < records.size(); ++i) {
+        const auto& row = records[i];
+        if (row.mission_id() != mission_id || row.command_id().empty() ||
+            !known.emplace(row.command_id(), i).second) return false;
+    }
+    const auto found = entries_.find(mission_id);
+    if (found == entries_.end()) return true;
+    for (const auto& [key, entry] : found->second) {
+        if (!entry->stored || entry->resolved) return false;
+        const auto it = known.find(key);
+        if (it == known.end()) {
+            if (missing == Missing::Reject) return false;
+            records.push_back(entry->record);
+        } else if (records[it->second].SerializeAsString() != entry->record.SerializeAsString()) {
+            return false;
+        }
+    }
+    return true;
+}

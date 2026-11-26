@@ -2,6 +2,18 @@
 #include <nlohmann/json.hpp>
 
 RouteApi::RouteApi(MissionRunner& runner, ApiRouter& router) : runner_(runner) {
+    router.add_route(http::verb::get, "/api/fms/routes/recovery-assessment",
+        [this](const HttpRequest& req, const PathParams&) -> asio::awaitable<HttpResponse> {
+            const auto mission = query_param(req, "missionId").value_or("");
+            const auto robot = query_param(req, "robotId").value_or("");
+            if (mission.empty() || robot.empty())
+                co_return error_response(req, http::status::bad_request, "INVALID_INPUT",
+                                         "missionId and robotId are required");
+            const auto answer = runner_.assess_route(mission, robot);
+            nlohmann::json body = {{"granted", answer.route.granted}, {"reason", answer.route.reason},
+                                   {"instanceId", answer.instance}, {"revision", answer.revision}};
+            co_return json_response(req, http::status::ok, body.dump());
+        });
     router.add_route(http::verb::get, "/api/fms/routes",
         [this](const HttpRequest& req, const PathParams&) { return list(req); });
 }
