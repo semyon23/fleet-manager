@@ -130,3 +130,52 @@ TEST_CASE("The live robot must confirm the current MoveStep", "[recovery-assessm
     SECTION("safety stop") { robot.mutable_safety()->set_emergency_stop(fms1::EMERGENCY_STOP_REMOTE); }
     CHECK_FALSE(matches());
 }
+
+TEST_CASE("An extension rechecks the reserved destination after persistence", "[recovery-send]") {
+    Stand s;
+    s.record("next", "D");
+    s.extend = "next";
+    s.fleet.back().has_mission = true;
+    s.inv.mutable_live_restrictions()->add_robots("A");
+    const ProtectedRoute origin{"D", "next/0/s0", "map", 1, {2}, {}, 0};
+    s.held.push_back(origin);
+    s.local.emplace("next", LocalEvidence{"D",0,{origin},false});
+    REQUIRE(s.allowed());
+
+    s.held.back() = s.wanted;
+    s.local.at("next").steps = {s.wanted};
+    REQUIRE(s.allowed());
+    SECTION("D loses its live session") { s.inv.mutable_live_restrictions()->add_robots("D"); }
+    SECTION("D no longer confirms this step") { s.local.at("next").recovering = true; }
+    SECTION("D's durable identity changed") { s.inv.mutable_missions(1)->set_add_attempt(1); }
+    SECTION("A gains an unaccounted grant to F") {
+        s.local.at("trip").steps.push_back({"A", "trip/0/s1", "map", 1, {3}, {}, 0});
+    }
+    CHECK_FALSE(s.allowed());
+}
+
+TEST_CASE("The pending Add must still own only its origin", "[recovery-send]") {
+    Stand s;
+    REQUIRE(s.allowed());
+    s.held.push_back({"D", "next/0/s0", "map", 1, {2}, {}, 0});
+    auto recheck = [&] {
+        return assess(s.graph, s.inv, s.fleet, s.held, s.local, s.wanted, "", true, nullptr, true).granted;
+    };
+    REQUIRE(recheck());
+
+    SECTION("another local reservation owns E") { s.held.back().key = "other/0/s0"; }
+    SECTION("earlier Add attempt owns E") { s.held.back().key = "next/1/s0"; }
+    SECTION("reservation already extends beyond the origin") { s.held.back() = s.wanted; }
+    SECTION("map was replaced") { ++s.held.back().version; }
+    SECTION("origin reservation disappeared") { s.held.pop_back(); }
+    SECTION("robot left E while storage was writing") { s.fleet.back().node = "F"; }
+    SECTION("dispatch already owns D") { s.record("next", "D"); }
+    SECTION("A's possible grant reaches F") {
+        s.local.at("trip").steps.push_back({"A", "trip/0/s1", "map", 1, {3}, {}, 0});
+    }
+    SECTION("the path now crosses C") {
+        s.wanted.nodes = {2,3,1};
+        s.wanted.edges = {1,2};
+    }
+    CHECK_FALSE(recheck());
+}

@@ -146,6 +146,7 @@ bool RobotSession::attach_move(ActiveMission mission, std::uint64_t checkpoint_v
 }
 
 void RobotSession::invalidate_observation() {
+    ++observation_epoch_;
     status_.clear_observed_order();
     observed_header_.reset();
     observation_token_.clear();
@@ -161,7 +162,9 @@ void RobotSession::request_observation() {
 }
 
 void RobotSession::lost_probe_state() {
+    const bool was_observed = status_.has_observed_order();
     invalidate_observation();
+    if (was_observed) status_hub_.publish(status_);
     if (!observer_ || awaiting_live_state_ || (mission_ && mission_->done())) return;
 
     awaiting_live_state_ = true;
@@ -500,7 +503,8 @@ asio::awaitable<bool> RobotSession::persist(
 }
 
 asio::awaitable<bool> RobotSession::start_mission(
-    const fms::v1::Mission& mission, fms::v1::MissionStatus& initial_status) {
+    const fms::v1::Mission& mission, fms::v1::MissionStatus& initial_status, MotionGuard guard) {
+    unpublished_update_.reset();
     checkpoint_version_ = 0;
     cancel_id_.clear();
     stopped_after_cancel_ = false;
@@ -510,7 +514,7 @@ asio::awaitable<bool> RobotSession::start_mission(
     bool sent;
     if (mission_->order_needed()) {
         saving_order_ = true;
-        sent = co_await send_step_order();
+        sent = co_await send_step_order(std::move(guard));
         saving_order_ = false;
     } else {
         stored_wait_ = mission_->current_step().id();
@@ -557,6 +561,7 @@ void RobotSession::on_mission_changed() {
             case Hold::None:             break;
         }
 
+        status_hub_.publish(status_, true);
         spdlog::warn("[recovery] robot={} mission={} held: {}",
                      robot_id_, mission_->mission_id(), reason);
         publish_mission_change();
@@ -666,7 +671,7 @@ void RobotSession::abort_mission(const std::string &message) {
     on_mission_changed();
 }
 
-asio::awaitable<bool> RobotSession::send_step_order() {
+asio::awaitable<bool> RobotSession::send_step_order(MotionGuard guard) {
     if (cancel_preparing_ || !mission_ || !mission_->order_needed()) co_return false;
 
     const auto& node = mission_->current_step();
@@ -676,7 +681,7 @@ asio::awaitable<bool> RobotSession::send_step_order() {
 
     auto proposed = *mission_;
     proposed.order_sent(order, std::chrono::steady_clock::now());
-    if (!(co_await save_and_send(order, proposed))) co_return false;
+    if (!(co_await save_and_send(order, proposed, std::move(guard)))) co_return false;
 
     mission_->order_sent(order, std::chrono::steady_clock::now());
     spdlog::info("[{}] mission {}: step {} order {} queued", robot_id_, mission_->mission_id(),
@@ -684,27 +689,55 @@ asio::awaitable<bool> RobotSession::send_step_order() {
     co_return true;
 }
 
-asio::awaitable<bool> RobotSession::save_and_send(vda5050::Order order, const ActiveMission& proposed) {
-    order.header.header_id = ++order_header_id_;
-    order.header.timestamp = vda5050::make_timestamp();
-    order.header.manufacturer = manufacturer_;
-    order.header.serial_number = serial_number_;
-    const auto payload = nlohmann::json(order).dump();
+std::optional<std::uint32_t> RobotSession::unpublished_revision() const {
+    if (!unpublished_update_ || saving_order() || !mission_ ||
+        mission_->canceling() || mission_->done() || !mission_->tracker()) return {};
+    const auto& e = unpublished_update_->execution();
+    const auto i = mission_->current_index();
+    const auto* tracker = mission_->tracker();
+    if (e.mission().mission_id() != mission_->mission_id() || e.mission().robot_id() != robot_id_ ||
+        i >= e.status().steps_size() || !e.status().steps(i).has_move() ||
+        e.order().mission_node_id() != mission_->current_step().id() ||
+        e.order().order_id() != tracker->order_id() || e.order().order_update_id() == 0 ||
+        e.order().order_update_id() - 1 != tracker->sent_update_id()) return {};
+    const auto revision = e.status().steps(i).move().revision();
+    const auto& before = mission_->status().steps(i).move();
+    if (!revision || revision - 1 != before.revision() || before.revision() != before.confirmed_revision())
+        return {};
+    return revision;
+}
 
-    auto request = checkpoint(proposed);
-    auto* execution = request.mutable_execution();
-
-    *execution->mutable_mission() = proposed.mission();
-    *execution->mutable_status() = proposed.status();
-    auto* saved = execution->mutable_order();
-    saved->set_order_id(order.order_id);
-    saved->set_order_update_id(order.order_update_id);
-    saved->set_mission_node_id(proposed.current_step().id());
-    saved->set_sent_order_json(payload);
-
+asio::awaitable<bool> RobotSession::save_and_send(vda5050::Order order, const ActiveMission& proposed, MotionGuard guard) {
+    fms::database::v1::SaveMissionExecutionRequest request;
+    if (unpublished_update_) {
+        const auto& saved = unpublished_update_->execution();
+        if (saved.order().order_id() == order.order_id && saved.order().order_update_id() == order.order_update_id) {
+            if (!google::protobuf::util::MessageDifferencer::Equals(saved.mission(), proposed.mission()))
+                co_return false;
+            if (!guard) co_return false;
+            request = *unpublished_update_;
+        } else {
+            unpublished_update_.reset();
+        }
+    }
+    if (!request.has_execution()) {
+        order.header.header_id = ++order_header_id_;
+        order.header.timestamp = vda5050::make_timestamp();
+        order.header.manufacturer = manufacturer_;
+        order.header.serial_number = serial_number_;
+        request = checkpoint(proposed);
+        auto* saved = request.mutable_execution()->mutable_order();
+        saved->set_order_id(order.order_id);
+        saved->set_order_update_id(order.order_update_id);
+        saved->set_mission_node_id(proposed.current_step().id());
+        saved->set_sent_order_json(nlohmann::json(order).dump());
+        // A revoked admission can leave the exact update durable but unpublished.
+        if (guard && order.order_update_id != 0) unpublished_update_ = request;
+    }
+    const auto& payload = request.execution().order().sent_order_json();
     const auto id = proposed.mission_id();
     const auto valid = [&] {
-        return !stopped_ && !cancel_preparing_ && mission_ && mission_->mission_id() == id &&
+        return (!guard || guard()) && !stopped_ && !cancel_preparing_ && mission_ && mission_->mission_id() == id &&
                !mission_->done() && !mission_->canceling() &&
                mission_->current_order_id() == order.order_id &&
                (order.order_update_id != 0 || order.nodes.front().node_id == status_.last_node_id()) &&
@@ -719,7 +752,11 @@ asio::awaitable<bool> RobotSession::save_and_send(vda5050::Order order, const Ac
 
             if (result.ok()) {
                 while (valid()) {
-                    if (send("order", payload)) co_return true;
+                    if (send("order", payload)) {
+                        status_hub_.publish(status_, true);
+                        unpublished_update_.reset();
+                        co_return true;
+                    }
                     retry.expires_after(std::chrono::seconds(1));
                     co_await retry.async_wait(asio::use_awaitable);
                 }
@@ -743,7 +780,7 @@ asio::awaitable<bool> RobotSession::save_and_send(vda5050::Order order, const Ac
 
 // Order шага уже у робота — order update; ещё нет — новая base уйдёт сразу в order.
 // Сначала отправка, потом правка: не ушло — control повторит ту же правку, и она не потеряется
-asio::awaitable<bool> RobotSession::extend_mission(std::uint32_t revision, std::uint32_t released_nodes, fms::v1::MoveProgress& progress) {
+asio::awaitable<bool> RobotSession::extend_mission(std::uint32_t revision, std::uint32_t released_nodes, fms::v1::MoveProgress& progress, MotionGuard guard) {
     if (saving_order() || mission_->done() || !mission_->tracker()) co_return false;
 
     const OrderTracker* tracker = mission_->tracker();
@@ -757,7 +794,7 @@ asio::awaitable<bool> RobotSession::extend_mission(std::uint32_t revision, std::
         auto proposed = *mission_;
         proposed.extend(revision, released_nodes);
         saving_order_ = true;
-        const bool sent = co_await save_and_send(update, proposed);
+        const bool sent = co_await save_and_send(update, proposed, std::move(guard));
         saving_order_ = false;
         if (!sent) {
             if (mission_ && mission_->order_needed()) on_mission_changed();

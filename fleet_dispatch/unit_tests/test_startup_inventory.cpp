@@ -1,3 +1,4 @@
+#include "../include/FleetMotionEpoch.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include "../include/RecoveryInventory.hpp"
 #include "../include/StartupInventory.hpp"
@@ -230,4 +231,146 @@ TEST_CASE("Scoped mission observation needs a current durable Add identity", "[s
         inventory.update(rows, live, false, start);
     }
     CHECK_FALSE(inventory.identifies_active(req, start + 2500ms));
+}
+
+TEST_CASE("Recovery motion keeps only its own claim and execution transitions", "[recovery-motion]") {
+    namespace dp = fms::dispatch::v1;
+    using namespace std::chrono_literals;
+    const RecoveryInventory::Clock::time_point start{};
+    RecoveryInventory inv("dispatch");
+    fms::database::v1::RecoveryRows rows;
+    rows.add_robots("A");
+    rows.add_robots("D");
+    auto* a = rows.add_missions();
+    a->set_robot_id("A");
+    a->set_mission_id("held");
+    a->set_uncertain(true);
+    std::map<std::string, RecoveryRobotView> live{{"A", {}}, {"D", {}}};
+    inv.update(rows, live, true, start);
+    dp::MotionScope scope;
+    scope.set_robot_id("D");
+    scope.set_instance_id("dispatch");
+    scope.set_revision(inv.snapshot().revision());
+    scope.set_add_attempt(0);
+    auto admit = [&](bool extend) { return inv.acquire(scope, "trip", extend, start); };
+
+    SECTION("identity and starting state") {
+        CHECK_FALSE(admit(true));
+        CHECK_FALSE(inv.acquire(scope, "held", false, start));
+        scope.clear_add_attempt();
+        CHECK_FALSE(admit(false));
+        scope.set_add_attempt(0);
+        scope.set_instance_id("old");
+        CHECK_FALSE(admit(false));
+        scope.set_instance_id("dispatch");
+        scope.set_revision(scope.revision() + 1);
+        CHECK_FALSE(admit(false));
+        scope.set_revision(inv.snapshot().revision());
+        scope.set_robot_id("A");
+        CHECK_FALSE(admit(false));
+        scope.set_robot_id("D");
+        CHECK_FALSE(inv.acquire(scope, "trip", false, start + 3s));
+    }
+
+    SECTION("own writes and permit revocation") {
+        auto p = admit(false);
+        REQUIRE(p);
+        CHECK_FALSE(admit(false));
+        auto* d = rows.add_missions();
+        d->set_robot_id("D");
+        d->set_mission_id("trip");
+        d->set_add_attempt(0);
+        d->set_uncertain(true);
+        inv.update(rows, live, true, start + 100ms);
+        CHECK(p->expires == start + 3s);
+        d->set_uncertain(false);
+        live.at("D") = {"trip", true, false}; // own execution write
+        inv.update(rows, live, true, start + 200ms);
+        CHECK(p->expires == start + 3s);
+        live.at("D").blocked = false;
+        inv.update(rows, live, true, start + 300ms);
+        CHECK(p->expires == start + 3s);
+        p.reset();
+        scope.set_revision(inv.snapshot().revision());
+        CHECK_FALSE(admit(false));
+        scope.set_add_attempt(1);
+        CHECK_FALSE(admit(true));
+        scope.set_add_attempt(0);
+        auto extension = admit(true);
+        REQUIRE(extension);
+
+        SECTION("another owner changes while DB is writing") {
+            live.at("A").mission = "held";
+            inv.update(rows, live, true, start + 500ms);
+            live.at("A").mission.clear();
+            inv.update(rows, live, true, start + 600ms);
+        }
+        SECTION("target attempt changes") {
+            d->set_add_attempt(1);
+            inv.update(rows, live, true, start + 500ms);
+        }
+        SECTION("target unexpectedly owns another mission") {
+            d->set_mission_id("other");
+            live.at("D").mission = "other";
+            inv.update(rows, live, true, start + 500ms);
+        }
+        SECTION("target becomes uncertain") {
+            d->set_uncertain(true);
+            inv.update(rows, live, true, start + 500ms);
+        }
+        SECTION("target row disappears") {
+            rows.mutable_missions()->RemoveLast();
+            live.at("D").mission.clear();
+            inv.update(rows, live, true, start + 500ms);
+        }
+        SECTION("source fails then returns with the same revision") {
+            inv.read_failed();
+            inv.update(rows, live, true, start + 500ms);
+        }
+        SECTION("startup conflict") { inv.reject_startup(); }
+        CHECK(extension->expires <= start);
+    }
+}
+
+TEST_CASE("Peer motion invalidates a scoped command even if the peer returns", "[recovery-motion]") {
+    FleetMotionEpoch clock;
+    const auto scope = clock.current();
+    CHECK_FALSE(clock.peers_unchanged(0, "D"));
+    CHECK_FALSE(clock.peers_unchanged(scope + 1, "D"));
+    CHECK(clock.peers_unchanged(scope, "D"));
+    clock.change("D");  // our own initial order
+    clock.change("D");
+    CHECK(clock.peers_unchanged(scope, "D"));
+    clock.change("A");  // peer moves off its parked node
+    clock.change("A");  // and returns while the DB call is in flight
+    clock.change("D");
+    CHECK_FALSE(clock.peers_unchanged(scope, "D"));
+    CHECK(clock.peers_unchanged(clock.current(), "D"));
+
+    fms::v1::RobotStatus idle;
+    idle.set_last_node_id("F");
+    idle.mutable_pose()->set_map_id("map");
+    idle.mutable_observed_order()->set_idle(true);
+    auto after = idle;
+    after.mutable_last_state_at()->set_seconds(50);
+    CHECK_FALSE(FleetMotionEpoch::changed(idle, after));
+    after.mutable_pose()->set_x(4.0);
+    CHECK(FleetMotionEpoch::changed(idle, after));
+    after = idle;
+    after.set_last_node_id("E");
+    CHECK(FleetMotionEpoch::changed(idle, after));
+    after = idle;
+    after.set_mission_id("new");
+    CHECK(FleetMotionEpoch::changed(idle, after));
+
+    auto moving = idle;
+    moving.set_mission_id("in-progress");
+    moving.mutable_observed_order()->set_order_id("in-progress-s0");
+    moving.mutable_observed_order()->set_idle(false);
+    after = moving;
+    after.mutable_pose()->set_x(4.0);
+    after.set_last_node_id("C");
+    CHECK_FALSE(FleetMotionEpoch::changed(moving, after)); // already protected base
+    after.mutable_observed_order()->set_update_id(1);
+    CHECK(FleetMotionEpoch::changed(moving, after));
 }

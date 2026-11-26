@@ -19,6 +19,15 @@ using nlohmann::json;
 
 namespace {
 
+    void fill_scope(auto& scope, const MissionRunner::Assessment& permit,
+                    const std::string& robot, std::uint32_t attempt, std::uint64_t robot_epoch) {
+        scope.set_robot_epoch(robot_epoch);
+        scope.set_instance_id(permit.instance);
+        scope.set_revision(permit.revision);
+        scope.set_robot_id(robot);
+        scope.set_add_attempt(attempt);
+    }
+
     constexpr auto kReconnectDelay = std::chrono::seconds(2);
     constexpr auto kOverduePeriod = std::chrono::seconds(5);
     constexpr auto kLoadPoll = std::chrono::milliseconds(100);
@@ -121,13 +130,13 @@ void MissionRunner::stop() {
 
 // ==================================================================== отправка в dispatch
 
-void MissionRunner::start_mission(Mission& mission, const std::string& start_node) {
+void MissionRunner::start_mission(Mission& mission, const std::string& start_node, bool scoped) {
     if (!sending_.insert(mission.id).second) return;
     local_adds_.insert(mission.id);
-    asio::co_spawn(io_context_, send(mission.id, start_node), log_failure);
+    asio::co_spawn(io_context_, send(mission.id, start_node, scoped), log_failure);
 }
 
-asio::awaitable<void> MissionRunner::send(std::string mission_id, std::string start_node) {
+asio::awaitable<void> MissionRunner::send(std::string mission_id, std::string start_node, bool scoped) {
      Mission* mission = missions_.find(mission_id);
     if (!mission || mission->state != "ASSIGNED") {
         sending_.erase(mission_id);
@@ -144,6 +153,7 @@ asio::awaitable<void> MissionRunner::send(std::string mission_id, std::string st
     dpv1::AddMissionRequest request;
     *request.mutable_mission() = std::move(*built);
     request.set_attempt(journal_attempt(mission_id));
+    const auto staged_epoch = mission_stream_epoch_;
     ControlCommandJournal::Handle saved_command;
     try {
         saved_command = stage_command(mission_id,
@@ -176,12 +186,56 @@ asio::awaitable<void> MissionRunner::send(std::string mission_id, std::string st
         sending_.erase(mission_id);
         co_return;
     }
-    add_rpc_started_.insert(mission_id);
     dpv1::AddMissionResponse response;
-    grpc::Status status = co_await services_.call<&Dispatch::PrepareAsyncAddMission>(*services_.dispatch, request, response);
+    std::string addressed_instance;
+    grpc::Status status;
+    // Once a recovery check is needed, this Add must keep the addressed RPC
+    // even if the global stream reopens while the journal write is pending.
+    scoped = scoped || staged_epoch != mission_stream_epoch_ || !traffic_snapshot_ || !checkpoint_jobs_.empty();
+    for (;;) {
+        mission = missions_.find(mission_id);
+        if (stopped_ || !mission || mission->state != "ASSIGNED" || checkpoint_jobs_.contains(mission_id)) {
+            sending_.erase(mission_id);
+            co_return;
+        }
+        if (scoped) {
+            if (recovery_move(*mission)) {
+                const auto permit = assess_motion(mission_id, mission->robot_id, true, nullptr);
+                if (permit.route.granted && traffic_availability_->robot_epoch()) {
+                    dpv1::RecoveryAddRequest envelope;
+                    fill_scope(*envelope.mutable_scope(), permit, mission->robot_id,
+                               request.attempt(), traffic_availability_->robot_epoch());
+                    *envelope.mutable_command() = request;
+                    addressed_instance = permit.instance;
+                    add_rpc_started_.insert(mission_id);
+                    status = co_await services_.call<&Dispatch::PrepareAsyncAddMissionDuringRecovery>(
+                        *services_.dispatch, envelope, response);
+                    if (status.error_code() != grpc::StatusCode::ABORTED ||
+                        status.error_message() != "recovery admission changed before claim") break;
+                    add_rpc_started_.erase(mission_id);
+                }
+            } else if (traffic_ready()) {
+                // A previously assigned ordinary mission can resume when the fleet recovers.
+                scoped = false;
+                continue;
+            }
+        } else if (traffic_ready()) {
+            add_rpc_started_.insert(mission_id);
+            status = co_await services_.call<&Dispatch::PrepareAsyncAddMission>(*services_.dispatch, request, response);
+            break;
+        } else if (!traffic_snapshot_ || !checkpoint_jobs_.empty()) {
+            scoped = true;
+        }
+        retry.expires_after(std::chrono::milliseconds(500));
+        co_await retry.async_wait(asio::as_tuple(asio::use_awaitable));
+    }
     sending_.erase(mission_id);
 
     mission = missions_.find(mission_id);   // пока ждали — могли отменить: ссылки больше нет
+    if (status.ok() && (response.status().mission_id() != mission_id ||
+                        response.status().robot_id() != request.mission().robot_id())) {
+        status = grpc::Status{grpc::StatusCode::UNKNOWN, "Add reply identity mismatch"};
+    }
     if (status.ok()) {
         // Из памяти исчезают только завершённые миссии. Не шлём новую
         // отмену по позднему успешному ответу уже завершённой миссии.
@@ -191,6 +245,8 @@ asio::awaitable<void> MissionRunner::send(std::string mission_id, std::string st
         if (mission->state == "ASSIGNED") {
             apply(*mission, response.status());
         }
+        if (scoped && (!traffic_snapshot_ || mission_stream_instance_ != addressed_instance) &&
+            missions_.find(mission_id)) queue_checkpoint(mission_id);
         co_return;
     }
     if (!mission || mission->finished()) co_return;
@@ -668,21 +724,22 @@ asio::awaitable<void> MissionRunner::watch_dispatch() {
             }
         }
         if (traffic_snapshot_) {
+            traffic_snapshot_ = false;
+            ++mission_stream_epoch_;
             mission_stream_instance_.clear();
             invalidate_inventory();
-        }
-        grpc::Status status = co_await rpc.finish(asio::use_awaitable);
-        stream_ = nullptr;
-        if (traffic_snapshot_) {
             for (const auto* m : missions_.active()) {
-                if (m->state != "QUEUED" && !is_next(m->id)) queue_checkpoint(m->id);
+                if (m->state == "QUEUED" || is_next(m->id)) continue;
+                if (sending_.contains(m->id) && !add_rpc_started_.contains(m->id)) continue;
+                queue_checkpoint(m->id);
             }
             for (auto& [id, job] : checkpoint_jobs_) {
                 ++job->epoch;
                 waiting_plans_.erase(id);
             }
         }
-        traffic_snapshot_ = false;
+        grpc::Status status = co_await rpc.finish(asio::use_awaitable);
+        stream_ = nullptr;
         if (stopped_) {
             break;
         }
@@ -706,7 +763,10 @@ void MissionRunner::on_update(const dpv1::MissionStatusUpdate& update) {
 void MissionRunner::reconcile(
     const dpv1::MissionSnapshot& snapshot) {
 
-    if (!traffic_snapshot_ || mission_stream_instance_ != snapshot.instance_id()) invalidate_inventory();
+    if (!traffic_snapshot_ || mission_stream_instance_ != snapshot.instance_id()) {
+        ++mission_stream_epoch_;
+        invalidate_inventory();
+    }
     mission_stream_instance_ = snapshot.instance_id();
     traffic_snapshot_ = true;
 
@@ -1273,8 +1333,6 @@ asio::awaitable<void> MissionRunner::extension_loop() {
         if (stopped_) co_return;
         if (extensions_.empty()) continue;
 
-        if (!traffic_ready()) continue;
-
         auto entry = extensions_.upper_bound(cursor);
         if (entry == extensions_.end()) {
             entry = extensions_.begin();
@@ -1282,7 +1340,7 @@ asio::awaitable<void> MissionRunner::extension_loop() {
 
         const std::string id = entry->first;
         cursor = id;
-
+        const auto epoch = mission_stream_epoch_;
         Mission* mission = missions_.find(id);
 
         if (!mission ||
@@ -1299,57 +1357,33 @@ asio::awaitable<void> MissionRunner::extension_loop() {
             continue;
         }
 
-        // Сначала сверяем миссию и шаг.
-        // NOT_FOUND не снимает резервы.
-        dpv1::GetMissionRequest get;
-        get.set_mission_id(id);
-
-        dpv1::GetMissionResponse got;
-
-        const auto checked =
-            co_await services_.call<
-                &Dispatch::PrepareAsyncGetMission>(
+        if (!traffic_ready()) {
+            if (!recovery_move(*mission)) continue;
+            entry->second.require_scope();
+        }
+        // During recovery observe_checkpoint() already verifies the robot's
+        // exact running step. A staged write must still be retried if its
+        // journal acknowledgement was lost, even while observation is stale.
+        if (!entry->second.requires_scope()) {
+            dpv1::GetMissionRequest get;
+            get.set_mission_id(id);
+            dpv1::GetMissionResponse got;
+            const auto checked = co_await services_.call<&Dispatch::PrepareAsyncGetMission>(
                 *services_.dispatch, get, got);
-
-        if (stopped_) co_return;
-
-        entry = extensions_.find(id);
-        mission = missions_.find(id);
-
-        if (entry == extensions_.end() ||
-            !mission ||
-            mission->state != "RUNNING" ||
-            entry->second.state() ==
-                ExtensionCommand::State::Blocked ||
-            entry->second.state() ==
-                ExtensionCommand::State::Confirmed) {
-            continue;
+            if (stopped_) co_return;
+            entry = extensions_.find(id);
+            mission = missions_.find(id);
+            if (!checked.ok() || !traffic_ready() || entry == extensions_.end() || !mission ||
+                mission->state != "RUNNING" || entry->second.state() == ExtensionCommand::State::Blocked ||
+                entry->second.state() == ExtensionCommand::State::Confirmed) continue;
+            if (got.status().mission_id() != id || got.status().robot_id() != mission->robot_id ||
+                got.status().state() != fms1::MISSION_STATE_RUNNING ||
+                got.status().current_node_id() != entry->second.request().move_node_id()) {
+                entry->second.block("mission or current step changed; reconcile before extending");
+                continue;
+            }
+            observe_extension(got.status());
         }
-
-        if (!checked.ok() || !traffic_ready()) {
-            continue;
-        }
-
-        if (got.status().mission_id() != id ||
-            got.status().robot_id() != mission->robot_id ||
-            got.status().state() != fms1::MISSION_STATE_RUNNING ||
-            got.status().current_node_id() !=
-                entry->second.request().move_node_id()) {
-
-            entry->second.block(
-                "mission or current step changed; "
-                "reconcile before extending");
-
-            spdlog::warn(
-                "[runner] extension {} blocked: {}",
-                id, entry->second.reason());
-
-            continue;
-        }
-
-        observe_extension(got.status());
-
-        entry = extensions_.find(id);
 
         if (entry->second.state() !=
             ExtensionCommand::State::DispatchPending) {
@@ -1373,17 +1407,31 @@ asio::awaitable<void> MissionRunner::extension_loop() {
         if (!saved.ok()) continue;
         entry = extensions_.find(id);
         mission = missions_.find(id);
-        if (!traffic_ready() || entry == extensions_.end() || !mission ||
+        if (entry == extensions_.end() || !mission ||
             mission->state != "RUNNING" ||
             entry->second.state() != ExtensionCommand::State::DispatchPending ||
             entry->second.request().move_node_id() != request.move_node_id() ||
             entry->second.request().revision() != request.revision()) continue;
         dpv1::ExtendMissionResponse response;
 
-        const auto sent =
-            co_await services_.call<
-                &Dispatch::PrepareAsyncExtendMission>(
-                *services_.dispatch, request, response);
+        grpc::Status sent;
+        if (!traffic_ready() || epoch != mission_stream_epoch_) {
+            if (!recovery_move(*mission)) continue;
+            entry->second.require_scope();
+        }
+        if (entry->second.requires_scope()) {
+            const auto permit = assess_motion(id, mission->robot_id, false, &request);
+            if (!permit.route.granted || !traffic_availability_->robot_epoch()) continue;
+            dpv1::RecoveryExtendRequest envelope;
+            fill_scope(*envelope.mutable_scope(), permit, mission->robot_id,
+                       journal_attempt(id), traffic_availability_->robot_epoch());
+            *envelope.mutable_command() = request;
+            sent = co_await services_.call<&Dispatch::PrepareAsyncExtendMissionDuringRecovery>(
+                *services_.dispatch, envelope, response);
+        } else {
+            if (!traffic_ready()) continue;
+            sent = co_await services_.call<&Dispatch::PrepareAsyncExtendMission>(*services_.dispatch, request, response);
+        }
 
         if (stopped_) co_return;
 
@@ -1400,6 +1448,10 @@ asio::awaitable<void> MissionRunner::extension_loop() {
             entry->second.observe(response.progress());
         } else {
             switch (sent.error_code()) {
+                case grpc::StatusCode::ABORTED:
+                    if (sent.error_message() == "scoped extension retry required")
+                        entry->second.require_scope();
+                    break;
                 case grpc::StatusCode::UNAVAILABLE:
                 case grpc::StatusCode::DEADLINE_EXCEEDED:
                 case grpc::StatusCode::CANCELLED:
@@ -1427,6 +1479,37 @@ void MissionRunner::configure_traffic(AvailabilityTracker& availability) {
 
     traffic_availability_ = &availability;
     availability.on_traffic_epoch = [this] { invalidate_inventory(); };
+}
+
+bool MissionRunner::recovery_move(const Mission& mission) {
+    return mission.steps.size() == 1 && mission.steps.front().actions.empty();
+}
+
+bool MissionRunner::recovery_assignment_ready() const {
+    return !stopped_ && (!traffic_snapshot_ || !checkpoint_jobs_.empty()) && current_inventory() &&
+           traffic_availability_ && traffic_availability_->robot_epoch() && traffic_availability_->assessment_fleet_ready();
+}
+
+bool MissionRunner::queue_recovery_extension(const Mission& mission) {
+    if (!traffic_availability_ || !traffic_availability_->robot_epoch() ||
+        !recovery_move(mission) || mission.state != "RUNNING" || extensions_.contains(mission.id) ||
+        !mission.current_step || *mission.current_step != 0) return false;
+    auto permit = assess_route(mission.id, mission.robot_id);
+    if (!permit.route.granted) return false;
+    auto planned = plans_.find(mission.id);
+    if (planned == plans_.end() || planned->second.progress.empty()) return false;
+    const auto& previous = planned->second.progress.front();
+    dpv1::ExtendMissionRequest command;
+    command.set_mission_id(mission.id);
+    command.set_move_node_id("s0");
+    command.set_revision(previous.revision() + 1);
+    command.set_released_nodes(previous.total_nodes());
+    auto held = traffic_routes_.find(mission.robot_id);
+    if (held == traffic_routes_.end()) return false;
+    if (!queue_extension(command)) return false;
+    extensions_.at(mission.id).require_scope();
+    held->second = std::move(permit.proposed);
+    return true;
 }
 
 bool MissionRunner::traffic_ready() const {
@@ -1613,10 +1696,13 @@ asio::awaitable<void> MissionRunner::traffic_loop() {
             asio::as_tuple(asio::use_awaitable));
 
         if (stopped_) co_return;
-        if (!traffic_ready()) continue;
-
         try {
             const auto active = missions_.active();
+            if (!traffic_ready()) {
+                for (const auto* mission : active)
+                    if (queue_recovery_extension(*mission)) break;
+                continue;
+            }
 
             std::set<std::string> active_robots;
             for (auto* mission : active) {

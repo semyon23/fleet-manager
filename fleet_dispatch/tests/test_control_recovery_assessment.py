@@ -111,8 +111,15 @@ class Storage(db_rpc.ControlStorageServicer, db_rpc.RobotRegistryServicer):
                                              lifecycle=db.ROBOT_LIFECYCLE_ACTIVE)) for name in ("A", "D")])
 
     def ListActiveMissions(self, request, context):
-        return db.ListActiveMissionsResponse(missions=[self.trip, mission_record("free", "D", "F"),
-                                                       mission_record("cross", "D", "C")])
+        previews = [mission_record("free", "D", "F"), mission_record("cross", "D", "C")]
+        # Exercise the read-only first-step assessment. Automatic issuance during
+        # recovery supports a single plain Move; these two-step jobs stay queued.
+        for record in previews:
+            body = json.loads(record.body_json)
+            body["steps"].append(dict(body["steps"][0]))
+            body["stepStates"].append(dict(body["stepStates"][0]))
+            record.body_json = json.dumps(body)
+        return db.ListActiveMissionsResponse(missions=[self.trip, *previews])
 
     def GetMission(self, request, context):
         if request.mission_id != "trip":

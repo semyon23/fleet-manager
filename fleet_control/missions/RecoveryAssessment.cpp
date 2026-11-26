@@ -27,7 +27,7 @@ bool matches_move(const fms::v1::RobotStatus& status, const std::string& mission
 GateResult assess(const Graph& graph, const Inventory& inventory,
     std::span<const TrafficOccupant> occupants, std::span<const ProtectedRoute> held,
     const Local& local, const ProtectedRoute& wanted, const std::string& extend_mission,
-    bool candidate_ready, bool* inventory_mismatch) {
+    bool candidate_ready, bool* inventory_mismatch, bool staged_add) {
     if (inventory_mismatch) *inventory_mismatch = false;
     const auto mismatch = [&](const char* reason) -> GateResult {
         if (inventory_mismatch) *inventory_mismatch = true;
@@ -99,7 +99,16 @@ GateResult assess(const Graph& graph, const Inventory& inventory,
         if (id == extend_mission && !proof.recovering &&
             proof.robot == wanted.robot && route.key == wanted.key) own_step = true;
     }
-    if (owners.size() != installed.size()) return {false, "orphan reservation"};
+    if (staged_add) {
+        const auto it = installed.find(wanted.robot);
+        if (!extend_mission.empty() || owners.contains(wanted.robot) || it == installed.end())
+            return {false, "pending Add has no exclusive origin"};
+        const auto& origin = *it->second;
+        if (origin.key != wanted.key || origin.map != wanted.map || origin.version != wanted.version ||
+            origin.reached != 0 || origin.nodes.size() != 1 || origin.nodes.front() != wanted.nodes.front() ||
+            !origin.edges.empty()) return {false, "pending Add origin changed"};
+    }
+    if (owners.size() + (staged_add ? 1u : 0u) != installed.size()) return {false, "orphan reservation"};
     for (const auto& robot : blocked)
         if (!owners.contains(robot)) return mismatch("unexplained blocked robot");
     for (const auto& [id, o] : fleet)
@@ -113,8 +122,9 @@ GateResult assess(const Graph& graph, const Inventory& inventory,
             !target.stationary || target.map != graph.map_id || wanted.reached != 0 ||
             graph.find_node(target.node) != wanted.nodes.front())
             return {false, "new mission has no free origin"};
-        simulated.push_back({wanted.robot, wanted.key, wanted.map, wanted.version,
-                             {wanted.nodes.front()}, {}, 0});
+        if (!staged_add)
+            simulated.push_back({wanted.robot, wanted.key, wanted.map, wanted.version,
+                                 {wanted.nodes.front()}, {}, 0});
     } else {
         if (!own_step || !target.has_mission || !inventory.has_live_restrictions())
             return {false, "extension lacks a verified running owner"};

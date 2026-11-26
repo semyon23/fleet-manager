@@ -60,6 +60,8 @@ service FleetDispatch {
   // и update_rejected в StreamMissionStatus.
   // Работает, пока шаг RUNNING, в том числе на паузе. Робот не ONLINE — FAILED_PRECONDITION.
   rpc ExtendMission(ExtendMissionRequest) returns (ExtendMissionResponse);
+  rpc AddMissionDuringRecovery(RecoveryAddRequest) returns (AddMissionResponse);
+  rpc ExtendMissionDuringRecovery(RecoveryExtendRequest) returns (ExtendMissionResponse);
 
 
   // Миссия, как её сейчас выполняет dispatch: шаги с маршрутами (у текущего MoveStep released_nodes —
@@ -114,6 +116,23 @@ message RemoveRobotRequest {
 message RemoveRobotResponse {}
 
 // =================================================================== миссии
+
+// A short-lived admission envelope. Only command is stored in journals and receipts.
+message MotionScope {
+  string instance_id = 1;
+  uint64 revision = 2;
+  string robot_id = 3;
+  optional uint32 add_attempt = 4;
+  uint64 robot_epoch = 5; // Last complete robot status update applied by control.
+}
+message RecoveryAddRequest {
+  MotionScope scope = 1;
+  AddMissionRequest command = 2;
+}
+message RecoveryExtendRequest {
+  MotionScope scope = 1;
+  ExtendMissionRequest command = 2;
+}
 
 message AddMissionRequest {
   fms.v1.Mission mission = 1;
@@ -200,6 +219,7 @@ message RobotSnapshot {
 }
 
 message RobotStatusUpdate {
+  uint64 robot_epoch = 4; // Traffic-relevant changes in this dispatch process; 0 means unavailable.
   oneof update {
     RobotSnapshot snapshot = 1;        // только первое сообщение: все роботы
     fms.v1.RobotStatus status = 2;     // один робот изменился; статус целиком, а не разница
@@ -270,5 +290,6 @@ message GetMissionResponse {
   fms.v1.MissionStatus status = 2;
   string instance_id = 3;
   optional uint32 add_attempt = 4; // Present only on a verified scoped read.
+  optional uint32 unpublished_revision = 5; // This session retains the exact update and has never enqueued it; verify durability via the checkpoint.
 }
 

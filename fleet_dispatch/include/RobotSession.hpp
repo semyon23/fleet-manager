@@ -6,7 +6,10 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <cstdint>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include "DatabaseWriter.hpp"
 #include "RobotMessages.hpp"
@@ -22,6 +25,9 @@ public:
     RobotSession(asio::io_context& io_context, Outbox& outbox, RobotStatusHub& status_hub, MissionStatusHub& mission_hub,
                  DatabaseWriter& database, std::string robot_id, std::string manufacturer, std::string serial_number);
 
+    std::optional<std::uint32_t> unpublished_revision() const;
+    using MotionGuard = std::function<bool()>;
+    std::uint64_t observation_epoch() const { return observation_epoch_; }
     void start();
 
     asio::awaitable<void> start_restored(
@@ -45,9 +51,9 @@ public:
     bool resume();
     bool initialize_position(const fms::v1::Pose& pose, const std::string& last_node_id);
     bool post(VdaMessage message);
-    asio::awaitable<bool> start_mission(const fms::v1::Mission& mission,fms::v1::MissionStatus& initial_status);
+    asio::awaitable<bool> start_mission(const fms::v1::Mission& mission,fms::v1::MissionStatus& initial_status, MotionGuard guard = {});
 
-    asio::awaitable<bool> extend_mission(std::uint32_t revision,std::uint32_t released_nodes,fms::v1::MoveProgress& progress);
+    asio::awaitable<bool> extend_mission(std::uint32_t revision,std::uint32_t released_nodes,fms::v1::MoveProgress& progress, MotionGuard guard = {});
 
     asio::awaitable<bool> cancel_mission();
     bool checkpoint_pending() const {
@@ -68,6 +74,7 @@ public:
     const fms::v1::RobotStatus& status() const { return status_; }
 
 private:
+    std::uint64_t observation_epoch_ = 0;
     Observer observer_;
     std::optional<std::chrono::steady_clock::time_point> probe_state_at_;
     std::optional<std::uint32_t> recovery_header_;
@@ -107,8 +114,8 @@ private:
     std::string cancel_id_;
     bool stopped_after_cancel_ = false;
 
-    asio::awaitable<bool> send_step_order();
-    asio::awaitable<bool> save_and_send(vda5050::Order order, const ActiveMission& proposed);
+    asio::awaitable<bool> send_step_order(MotionGuard guard = {});
+    asio::awaitable<bool> save_and_send(vda5050::Order order, const ActiveMission& proposed, MotionGuard guard);
     using Inbox = asio::experimental::channel<void(boost::system::error_code, VdaMessage)>;
 
     asio::io_context& io_context_;
@@ -134,6 +141,7 @@ private:
     std::uint32_t order_header_id_;
     std::unordered_map<std::string, std::string> pending_actions_;
     std::unique_ptr<ActiveMission> mission_;
+    std::optional<fms::database::v1::SaveMissionExecutionRequest> unpublished_update_;
     bool saving_order_ = false;
     bool stopped_ = false;
 };

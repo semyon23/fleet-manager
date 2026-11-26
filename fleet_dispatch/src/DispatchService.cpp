@@ -20,6 +20,8 @@ using StreamMissionStatusRPC = agrpc::ServerRPC<&AsyncService::RequestStreamMiss
 using AddRobotRPC           = agrpc::ServerRPC<&AsyncService::RequestAddRobot>;
 using RemoveRobotRPC        = agrpc::ServerRPC<&AsyncService::RequestRemoveRobot>;
 using AddMissionRPC         = agrpc::ServerRPC<&AsyncService::RequestAddMission>;
+using RecoveryAddRPC        = agrpc::ServerRPC<&AsyncService::RequestAddMissionDuringRecovery>;
+using RecoveryExtendRPC     = agrpc::ServerRPC<&AsyncService::RequestExtendMissionDuringRecovery>;
 using CancelMissionRPC      = agrpc::ServerRPC<&AsyncService::RequestCancelMission>;
 using ExtendMissionRPC      = agrpc::ServerRPC<&AsyncService::RequestExtendMission>;
 using PauseRobotRPC         = agrpc::ServerRPC<&AsyncService::RequestPauseRobot>;
@@ -91,6 +93,21 @@ void DispatchService::start() {
             co_await rpc.finish(response, status);
         },
         on_handler_done);
+
+    agrpc::register_awaitable_rpc_handler<RecoveryAddRPC>(
+        grpc_context_, service_,
+        [this](RecoveryAddRPC& rpc, RecoveryAddRPC::Request& request) -> asio::awaitable<void> {
+            RecoveryAddRPC::Response response;
+            auto status = co_await add_mission(request.command(), response, &request.scope());
+            co_await rpc.finish(response, status);
+        }, on_handler_done);
+    agrpc::register_awaitable_rpc_handler<RecoveryExtendRPC>(
+        grpc_context_, service_,
+        [this](RecoveryExtendRPC& rpc, RecoveryExtendRPC::Request& request) -> asio::awaitable<void> {
+            RecoveryExtendRPC::Response response;
+            auto status = co_await extend_mission(request.command(), response, &request.scope());
+            co_await rpc.finish(response, status);
+        }, on_handler_done);
 
     agrpc::register_awaitable_rpc_handler<CancelMissionRPC>(
         grpc_context_, service_,
@@ -270,7 +287,7 @@ asio::awaitable<grpc::Status> DispatchService::remove_robot(const dv1::RemoveRob
 }
 
 asio::awaitable<grpc::Status> DispatchService::add_mission(
-    const dv1::AddMissionRequest& request, dv1::AddMissionResponse& response) {
+    const dv1::AddMissionRequest& request, dv1::AddMissionResponse& response, const dv1::MotionScope* scope) {
     if (auto g = startup_gate(false); !g.ok()) co_return g;
     using Receipt = fms::database::v1::DispatchAddReceiptRequest;
     using Answer = fms::database::v1::DispatchAddReceiptResponse;
@@ -279,6 +296,9 @@ asio::awaitable<grpc::Status> DispatchService::add_mission(
         co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "mission_id and robot_id are required"};
     }
 
+    if (scope && (scope->robot_id() != mission.robot_id() || scope->instance_id().empty() ||
+        !scope->revision() || !scope->has_add_attempt() || scope->add_attempt() != request.attempt()))
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "inconsistent Add admission identity"};
     Receipt receipt;
     receipt.set_mission_id(mission.mission_id());
     receipt.set_attempt(request.attempt());
@@ -311,8 +331,14 @@ asio::awaitable<grpc::Status> DispatchService::add_mission(
     if (!status.ok()) co_return storage_failure(status);
     if (answer.state() != Answer::MISSING) co_return replay(answer);
 
+    RobotSession::MotionGuard guard;
+    if (scope) {
+        guard = fleet_registry_.motion_guard(*scope, mission, false);
+        if (!guard || !guard())
+            co_return grpc::Status{grpc::StatusCode::ABORTED, "recovery admission changed before claim"};
+    }
     RobotSession* session = nullptr;
-    status = validate_add(mission, session);
+    status = validate_add(mission, session, scope != nullptr);
     if (!status.ok()) co_return status;
 
     receipt.set_operation(Receipt::CLAIM);
@@ -323,13 +349,15 @@ asio::awaitable<grpc::Status> DispatchService::add_mission(
 
     // Пока ждали запись, сессия могла исчезнуть или робот мог сменить позицию.
     session = nullptr;
-    status = validate_add(mission, session);
+    if (guard && !guard())
+        co_return grpc::Status{grpc::StatusCode::UNAVAILABLE, "recovery admission changed after claim"};
+    status = validate_add(mission, session, scope != nullptr);
     if (!status.ok()) {
         co_return grpc::Status{grpc::StatusCode::UNAVAILABLE,
                                "robot changed after dispatch claim: " + status.error_message()};
     }
     auto owner = session->shared_from_this();
-    if (!(co_await owner->start_mission(mission, *response.mutable_status()))) {
+    if (!(co_await owner->start_mission(mission, *response.mutable_status(), std::move(guard)))) {
         co_return grpc::Status{grpc::StatusCode::UNAVAILABLE,
                                "dispatch claim exists, order was not queued"};
     }
@@ -343,8 +371,8 @@ asio::awaitable<grpc::Status> DispatchService::add_mission(
     co_return replay(answer);
 }
 
-grpc::Status DispatchService::validate_add(const fms::v1::Mission& mission, RobotSession*& session) {
-    if (auto g = startup_gate(true, mission.robot_id()); !g.ok()) return g;
+grpc::Status DispatchService::validate_add(const fms::v1::Mission& mission, RobotSession*& session, bool scoped) {
+    if (auto g = startup_gate(!scoped, mission.robot_id()); !g.ok()) return g;
     grpc::Status status;
     session = find_online_robot(mission.robot_id(), status);
     if (!session) {
@@ -437,8 +465,8 @@ asio::awaitable<grpc::Status> DispatchService::cancel_mission(const dv1::CancelM
 }
 
 asio::awaitable<grpc::Status> DispatchService::extend_mission(const dv1::ExtendMissionRequest& request,
-                                                              dv1::ExtendMissionResponse& response) {
-    if (auto g = startup_gate(true); !g.ok()) co_return g;
+                                                              dv1::ExtendMissionResponse& response, const dv1::MotionScope* scope) {
+    if (auto g = startup_gate(!scope); !g.ok()) co_return g;
     if (request.has_replace_tail()) {
         co_return grpc::Status{grpc::StatusCode::UNIMPLEMENTED, "replace_tail is not supported yet"};
     }
@@ -458,6 +486,12 @@ asio::awaitable<grpc::Status> DispatchService::extend_mission(const dv1::ExtendM
         co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION, "mission has ended"};
     }
 
+    RobotSession::MotionGuard guard;
+    if (scope) {
+        guard = fleet_registry_.motion_guard(*scope, mission.mission(), true);
+        if (!guard || !guard())
+            co_return grpc::Status{grpc::StatusCode::UNAVAILABLE, "recovery extension admission changed"};
+    }
     const auto& step = mission.current_step();
     if (step.id() != request.move_node_id() || !step.has_move()) {
         co_return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
@@ -498,8 +532,12 @@ asio::awaitable<grpc::Status> DispatchService::extend_mission(const dv1::ExtendM
                                "robot " + session->robot_id() + " is " + fms::v1::ConnectionState_Name(connection)};
     }
 
+    if (!scope && session->unpublished_revision() == request.revision())
+        co_return grpc::Status{grpc::StatusCode::ABORTED, "scoped extension retry required"};
+    if (scope && wanted == released)
+        co_return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "scoped extension must release new nodes"};
     auto owner = session->shared_from_this();
-    if (!(co_await owner->extend_mission(request.revision(), wanted, *response.mutable_progress()))) {
+    if (!(co_await owner->extend_mission(request.revision(), wanted, *response.mutable_progress(), std::move(guard)))) {
         co_return grpc::Status{grpc::StatusCode::UNAVAILABLE, "order update was not queued"};
     }
     co_return grpc::Status::OK;
@@ -578,6 +616,8 @@ asio::awaitable<grpc::Status> DispatchService::get_mission(const dv1::GetMission
         *response.mutable_status() = mission->status();
         response.set_instance_id(fleet_registry_.instance_id());
         response.set_add_attempt(request.expected_add_attempt());
+        if (const auto r = fleet_registry_.find(request.expected_robot_id())->unpublished_revision())
+            response.set_unpublished_revision(*r);
         co_return grpc::Status::OK;
     }
     if (auto g = startup_gate(true); !g.ok()) co_return g;

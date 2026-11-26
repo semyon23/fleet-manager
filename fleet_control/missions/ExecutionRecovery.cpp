@@ -239,6 +239,53 @@ std::optional<ObservedMove> observe_move(const Checkpoint& cp, const dp::GetMiss
     return {};
 }
 
+std::optional<ObservedMove> observe_unpublished(const Checkpoint& cp,
+    const fms::dispatch::v1::GetMissionRequest& request, const fms::dispatch::v1::GetMissionResponse& reply,
+    const fms::v1::RobotStatus& robot, const ObservedMove* previous,
+    const fms::dispatch::v1::ExtendMissionRequest& pending, std::span<const Command> journal) {
+    if (!reply.has_unpublished_revision() || !cp.has_grant_update() || !pending.revision() ||
+        pending.revision() != reply.unpublished_revision() || pending.revision() != cp.grant_update() ||
+        pending.mission_id() != cp.mission_id() || pending.move_node_id() != cp.grant_step() ||
+        pending.move_node_id() != "s0" || !pending.has_released_nodes() || pending.has_replace_tail() ||
+        cp.executed_mission().nodes_size() != 1 || !cp.executed_mission().nodes(0).has_move() ||
+        reply.status().steps_size() != 1 || !reply.status().steps(0).has_move()) return {};
+
+    const auto& committed = cp.executed_mission().nodes(0).move();
+    const auto& live = reply.status().steps(0).move();
+    if (!committed.has_released_nodes() || committed.released_nodes() != pending.released_nodes() ||
+        pending.released_nodes() != static_cast<std::uint32_t>(committed.nodes_size()) ||
+        !live.released_nodes() || live.released_nodes() >= pending.released_nodes() ||
+        live.confirmed_revision() != pending.revision() - 1) return {};
+    dp::AddMissionRequest original;
+    if (!original.ParseFromString(cp.accepted_add()) || original.mission().nodes_size() != 1 ||
+        original.attempt() != cp.add_attempt() || original.mission().robot_id() != cp.robot_id() ||
+        original.mission().mission_id() != cp.mission_id()) return {};
+    bool prior_grant = !live.confirmed_revision() && original.mission().nodes(0).id() == pending.move_node_id() &&
+        original.mission().nodes(0).move().released_nodes() == live.released_nodes();
+    const auto bytes = pending.SerializeAsString();
+    int exact = 0;
+    for (const auto& cmd : journal) {
+        if (cmd.kind() != db::CONTROL_COMMAND_KIND_EXTEND_MISSION || cmd.mission_id() != cp.mission_id() ||
+            cmd.robot_id() != cp.robot_id() || cmd.attempt() != cp.add_attempt() ||
+            cmd.move_node_id() != pending.move_node_id()) continue;
+        if (cmd.revision() == pending.revision() && cmd.request_proto() == bytes) ++exact;
+        if (live.confirmed_revision() && cmd.revision() == live.confirmed_revision()) {
+            dp::ExtendMissionRequest prior;
+            prior_grant = prior.ParseFromString(cmd.request_proto()) && prior.mission_id() == cp.mission_id() &&
+                prior.move_node_id() == pending.move_node_id() && prior.revision() == live.confirmed_revision() &&
+                prior.has_released_nodes() && prior.released_nodes() == live.released_nodes() && !prior.has_replace_tail();
+        }
+    }
+    if (!prior_grant || exact != 1) return {};
+
+    // Retain the complete committed geometry and its absolute position lower
+    // bound. Compare the physical report against the immediately preceding grant.
+    auto preceding = cp;
+    preceding.set_grant_update(live.confirmed_revision());
+    preceding.mutable_executed_mission()->mutable_nodes(0)->mutable_move()->set_released_nodes(live.released_nodes());
+    return observe_move(preceding, request, reply, robot, previous);
+}
+
 Decision terminal(const Authority& a, const Graph& graph, const Checkpoint& cp) {
     const auto& mission = a.add.mission();
     const auto& s = cp.status();

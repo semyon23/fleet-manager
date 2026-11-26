@@ -9,6 +9,8 @@
 #include <google/protobuf/util/message_differencer.h>
 #include <algorithm>
 #include <chrono>
+#include <memory>
+#include <vector>
 #include <optional>
 #include <map>
 #include <set>
@@ -30,12 +32,21 @@ public:
     const Reply& snapshot() const { return view_; }
     void reject_startup();
     void update(const Rows& rows, const std::map<std::string, RecoveryRobotView>& live,
-                bool startup_consistent, Clock::time_point read_started = Clock::now());
-    void read_failed() { expires_.reset(); }
+                bool startup_consistent, Clock::time_point read_started = Clock::now(), bool robot_epoch_changed = false);
+    void read_failed();
+    struct MotionPermit {
+        fms::dispatch::v1::MotionScope scope;
+        std::string mission;
+        bool extending;
+        Clock::time_point expires;
+    };
+    std::shared_ptr<const MotionPermit> acquire(const fms::dispatch::v1::MotionScope& scope,
+        const std::string& mission, bool extending, Clock::time_point now);
     bool identifies_active(const fms::dispatch::v1::GetMissionRequest& request,
                            Clock::time_point now) const;
 
 private:
+    std::vector<std::weak_ptr<MotionPermit>> writers_;
     Reply view_;
     std::optional<Clock::time_point> expires_;
 };

@@ -25,6 +25,6 @@ traffic::GateResult assess(const Graph& graph,
     std::span<const traffic::TrafficOccupant> occupants,
     std::span<const traffic::ProtectedRoute> held, const Local& local,
     const traffic::ProtectedRoute& wanted, const std::string& extend_mission,
-    bool candidate_ready, bool* inventory_mismatch = nullptr);
+    bool candidate_ready, bool* inventory_mismatch = nullptr, bool staged_add = false);
 
 } // namespace recovery_assessment

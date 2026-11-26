@@ -91,7 +91,10 @@ void FleetSync::on_update(const dpv1::RobotStatusUpdate& update) {
     } else if (update.has_removed_robot_id()) {
         in_dispatch_.erase(update.removed_robot_id());
         availability_.remove(update.removed_robot_id());   // иначе он остался бы «свободным» и получил бы миссию
+    } else {
+        return;
     }
+    availability_.set_robot_epoch(update.robot_epoch());
 }
 
 // ==================================================================== сверка с базой

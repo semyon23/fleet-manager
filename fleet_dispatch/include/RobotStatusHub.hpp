@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "fleet_dispatch.pb.h"
+#include "FleetMotionEpoch.hpp"
 #include "fms_types.pb.h"
 
 namespace asio = boost::asio;
@@ -31,7 +32,8 @@ public:
 
     explicit RobotStatusHub(asio::io_context& io_context);
 
-    void publish(const fms::v1::RobotStatus& status);
+    void publish(const fms::v1::RobotStatus& status, bool traffic_changed = false);
+    const FleetMotionEpoch& motion_epoch() const { return motion_epoch_; }
     void remove(const std::string& robot_id);
 
     std::shared_ptr<Subscriber> subscribe(std::vector<std::string> robot_ids);
@@ -42,6 +44,7 @@ public:
 private:
     void send_to_all(const std::string& robot_id, const dv1::RobotStatusUpdate& update);
 
+    FleetMotionEpoch motion_epoch_;
     asio::io_context& io_context_;
     std::unordered_map<std::string, fms::v1::RobotStatus> last_status_;
     std::vector<std::shared_ptr<Subscriber>> subscribers_;

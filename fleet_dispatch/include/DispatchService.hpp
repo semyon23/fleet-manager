@@ -20,9 +20,11 @@ public:
 private:
     asio::awaitable<grpc::Status> add_robot(const dv1::AddRobotRequest& request, dv1::AddRobotResponse& response);
     asio::awaitable<grpc::Status> remove_robot(const dv1::RemoveRobotRequest& request, dv1::RemoveRobotResponse& response);
-    asio::awaitable<grpc::Status> add_mission(const dv1::AddMissionRequest& request, dv1::AddMissionResponse& response);
+    asio::awaitable<grpc::Status> add_mission(const dv1::AddMissionRequest& request, dv1::AddMissionResponse& response,
+        const dv1::MotionScope* scope = nullptr);
     asio::awaitable<grpc::Status> cancel_mission(const dv1::CancelMissionRequest& request, dv1::CancelMissionResponse& response);
-    asio::awaitable<grpc::Status> extend_mission(const dv1::ExtendMissionRequest& request, dv1::ExtendMissionResponse& response);
+    asio::awaitable<grpc::Status> extend_mission(const dv1::ExtendMissionRequest& request, dv1::ExtendMissionResponse& response,
+        const dv1::MotionScope* scope = nullptr);
     asio::awaitable<grpc::Status> get_mission(const dv1::GetMissionRequest& request, dv1::GetMissionResponse& response);
     asio::awaitable<grpc::Status> pause_robot(const dv1::PauseRobotRequest& request, dv1::PauseRobotResponse& response);
     asio::awaitable<grpc::Status> resume_robot(const dv1::ResumeRobotRequest& request, dv1::ResumeRobotResponse& response);
@@ -32,7 +34,7 @@ private:
 
     grpc::Status startup_gate(bool needs_clear, const std::string& motion_robot = {}) const;
 
-    grpc::Status validate_add(const fms::v1::Mission& mission, RobotSession*& session);
+    grpc::Status validate_add(const fms::v1::Mission& mission, RobotSession*& session, bool scoped);
 
     DatabaseWriter& database_;
     agrpc::GrpcContext& grpc_context_;

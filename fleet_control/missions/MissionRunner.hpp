@@ -43,11 +43,14 @@ public:
     void configure_traffic(AvailabilityTracker& availability);
 
     bool traffic_ready() const;
+    bool recovery_assignment_ready() const;
+    static bool recovery_move(const Mission& mission);
 
     struct Assessment {
         traffic::GateResult route;
         std::string instance;
         std::uint64_t revision = 0;
+        traffic::ProtectedRoute proposed;
     };
     Assessment assess_route(const std::string& mission_id, const std::string& robot_id);
 
@@ -65,7 +68,7 @@ public:
     std::optional<ExtensionCommand::State> extension_state(const std::string& mission_id) const;
 
     // Миссия назначена (ASSIGNED), робот стоит на start_node: построить маршруты и отправить в dispatch
-    void start_mission(Mission& mission, const std::string& start_node);
+    void start_mission(Mission& mission, const std::string& start_node, bool scoped = false);
 
     // Отменить начатую миссию: сохраняем CANCELING до RPC.
     // Намерение отмены сохраняется; NOT_FOUND не доказывает отмену.
@@ -129,7 +132,10 @@ private:
         int64_t deadline_ms = 0;   // текущая не закончилась к этому времени — следующую обратно в очередь
     };
 
-    asio::awaitable<void> send(std::string mission_id, std::string start_node);
+    asio::awaitable<void> send(std::string mission_id, std::string start_node, bool scoped);
+    bool queue_recovery_extension(const Mission& mission);
+    Assessment assess_motion(const std::string& id, const std::string& robot, bool pending_add,
+                             const fms::dispatch::v1::ExtendMissionRequest* pending_extend);
     asio::awaitable<void> watch_dispatch();
     asio::awaitable<void> overdue_loop();
     using RecoveryCommands = std::vector<fms::database::v1::ControlCommandRecord>;
@@ -154,7 +160,7 @@ private:
     using Job = std::shared_ptr<CheckpointJob>;
     void queue_checkpoint(const std::string& id);
     asio::awaitable<void> observe_checkpoint(const std::string& id, const Job& job,
-        std::uint64_t epoch, const execution_recovery::Checkpoint& cp);
+        std::uint64_t epoch, const execution_recovery::Checkpoint& cp, const RecoveryCommands& journal);
     const execution_recovery::ObservedMove* scoped_progress(const Mission& mission) const;
     bool checkpoint_current(const std::string& id, const Job& job, std::uint64_t epoch) const;
     asio::awaitable<void> checkpoint_loop();
@@ -218,6 +224,7 @@ private:
     AvailabilityTracker* traffic_availability_ = nullptr;
     bool traffic_snapshot_ = false;
     std::string mission_stream_instance_;
+    std::uint64_t mission_stream_epoch_ = 0;
     bool traffic_fault_ = false;
 
     std::string traffic_error_;
@@ -244,7 +251,7 @@ private:
     const Inventory* current_inventory() const;
     void invalidate_inventory();
     void wake_inventory_if_idle();
-    std::optional<recovery_assessment::Local> assessment_evidence() const;
+    std::optional<recovery_assessment::Local> assessment_evidence(const std::string& pending_add = {}) const;
 
     asio::steady_timer inventory_timer_{io_context_};
     recovery_assessment::InventoryCache inventory_cache_;

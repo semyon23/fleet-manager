@@ -6,6 +6,7 @@
 #include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <limits>
+#include <utility>
 #include <spdlog/spdlog.h>
 
 using namespace boost::asio::experimental::awaitable_operators;
@@ -74,7 +75,8 @@ asio::awaitable<void> MissionAssigner::loop() {
 
 
 void MissionAssigner::assign() {
-    if (!maps_.loaded() || !missions_.loaded() || !runner_.traffic_ready()) {
+    const bool scoped = !runner_.traffic_ready();
+    if (!maps_.loaded() || !missions_.loaded() || (scoped && !runner_.recovery_assignment_ready())) {
         return;
     }
     std::vector<Mission*> queue = missions_.queue();
@@ -91,12 +93,14 @@ void MissionAssigner::assign() {
         }
     }
     // Скоро свободные (c1b): заканчивают миссию, дальше у них только езда, следующей ещё нет
-    std::vector<MissionRunner::SoonFree> soon = runner_.soon_free();
+    std::vector<MissionRunner::SoonFree> soon;
+    if (!scoped) soon = runner_.soon_free();
 
     for (Mission* mission : queue) {
         if (free.empty() && soon.empty()) {
             break;   // назначать некому — остальные ждут следующего события
         }
+        if (scoped && !MissionRunner::recovery_move(*mission)) continue;
         const Graph* graph = maps_.find(mission->map_id);
         if (!graph) {
             fail_no_route(missions_, *mission, "map " + mission->map_id + " no longer exists");
@@ -130,9 +134,23 @@ void MissionAssigner::assign() {
         double best_free_time = kInf;
         size_t best_free = 0;
         if (!free_nodes.empty()) {
-            std::vector<double> times = router->times_to(targets, free_nodes, kNearest, kInf);
-            best_free = static_cast<size_t>(std::ranges::min_element(times) - times.begin());
-            best_free_time = times[best_free];
+            const auto times = router->times_to(targets, free_nodes, scoped ? free_nodes.size() : kNearest, kInf);
+            if (scoped) {
+                std::vector<std::pair<double, size_t>> ranked;
+                for (size_t i = 0; i < times.size(); ++i)
+                    if (times[i] < kInf) ranked.emplace_back(times[i], i);
+                std::ranges::sort(ranked);
+                for (const auto& [time, i] : ranked) {
+                    if (runner_.assess_route(mission->id, free[free_candidates[i]].robot_id).route.granted) {
+                        best_free = i;
+                        best_free_time = time;
+                        break;
+                    }
+                }
+            } else {
+                best_free = static_cast<size_t>(std::ranges::min_element(times) - times.begin());
+                best_free_time = times[best_free];
+            }
         }
 
         // ---- 2. Скоро свободные: остаток их миссии + путь от её конца до первого шага.
@@ -185,7 +203,8 @@ void MissionAssigner::assign() {
             const std::string start_node = free[chosen].last_node_id;   // до erase: потом free[chosen] — другой робот
             free.erase(free.begin() + static_cast<std::ptrdiff_t>(chosen));
             missions_.changed(*mission, std::format("{:.1f} s to the first step", best_free_time));   // строка 187
-            runner_.start_mission(*mission, start_node);
+            runner_.start_mission(*mission, start_node, scoped);
+            if (scoped) return;
         }
     }
 }

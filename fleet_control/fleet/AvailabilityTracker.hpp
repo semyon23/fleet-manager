@@ -46,6 +46,8 @@ public:
     std::function<void()> on_traffic_epoch;
     const std::string& traffic_instance() const { return traffic_instance_; }
     void set_traffic_instance(const std::string& instance);
+    std::uint64_t robot_epoch() const { return robot_epoch_; }
+    void set_robot_epoch(std::uint64_t epoch) { robot_epoch_ = epoch; }
     bool traffic_inventory_ready() const;
     bool assessment_fleet_ready() const;
     const fms::v1::RobotStatus* live_status(const std::string& robot_id) const;
@@ -81,6 +83,7 @@ private:
     const MapStore& maps_;
     double low_battery_percent_;
     std::string traffic_instance_;
+    std::uint64_t robot_epoch_ = 0;
     std::uint64_t traffic_epoch_ = 0;
     bool traffic_registry_ready_ = false;
     bool dispatch_connected_ = false;

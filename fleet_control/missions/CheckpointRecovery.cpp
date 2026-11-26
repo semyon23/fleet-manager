@@ -1,4 +1,5 @@
 #include "missions/MissionRunner.hpp"
+#include "fleet/Availability.hpp"
 #include "missions/ExecutionRecovery.hpp"
 
 #include <boost/asio/as_tuple.hpp>
@@ -83,8 +84,9 @@ bool MissionRunner::checkpoint_current(const std::string& id, const Job& job, st
     return !stopped_ && it != checkpoint_jobs_.end() && it->second == job && job->epoch == epoch;
 }
 
-std::optional<recovery_assessment::Local> MissionRunner::assessment_evidence() const {
-    if (!journal_loaded_ || !sending_.empty()) return std::nullopt;
+std::optional<recovery_assessment::Local> MissionRunner::assessment_evidence(const std::string& pending_add) const {
+    if (!journal_loaded_) return std::nullopt;
+    auto unaccounted = sending_.size();
     recovery_assessment::Local owners;
     for (const auto& [id, job] : checkpoint_jobs_) {
         if (!job->assessment || job->proof_epoch != job->epoch ||
@@ -95,6 +97,34 @@ std::optional<recovery_assessment::Local> MissionRunner::assessment_evidence() c
     }
     for (const auto* mission : missions_.active()) {
         const auto& id = mission->id;
+        if (sending_.contains(id)) {
+            if (!local_adds_.contains(id) || add_rpc_started_.contains(id) || owners.contains(id) ||
+                mission->state != "ASSIGNED" || !command_journal_.all_stored(id)) return std::nullopt;
+            --unaccounted;
+            if (id == pending_add) continue; // assess() checks its exact origin and dispatch ownership.
+            const auto* view = current_inventory();
+            const auto* graph = maps_.find(mission->map_id);
+            const auto held = traffic_routes_.find(mission->robot_id);
+            if (!view || !graph || held == traffic_routes_.end() ||
+                std::ranges::find(view->blocked_robots(), mission->robot_id) != view->blocked_robots().end() ||
+                !traffic_availability_) return std::nullopt;
+            const auto* robot = traffic_availability_->live_status(mission->robot_id, view->instance_id());
+            if (!robot || !robot->mission_id().empty() || !robot->observed_order().idle() ||
+                !stopped_on_node(*robot, *graph, robot->last_node_id())) return std::nullopt;
+            RecoveryCommands records;
+            if (!command_journal_.merge_stored(id, records, ControlCommandJournal::Missing::Append))
+                return std::nullopt;
+            const auto auth = execution_recovery::read_authority(*mission, *graph, records, journal_attempt(id));
+            if (!auth || auth->cancel || auth->steps.empty() ||
+                std::ranges::any_of(auth->steps, [](const auto& grant) { return grant.revision != 0; }))
+                return std::nullopt;
+            const auto& origin = auth->steps.front().base;
+            if (origin.nodes.size() != 1 || graph->find_node(robot->last_node_id()) != origin.nodes.front() ||
+                held->second.key != origin.key || held->second.nodes != origin.nodes ||
+                !held->second.edges.empty() || held->second.reached != 0) return std::nullopt;
+            owners.emplace(id, recovery_assessment::LocalEvidence{mission->robot_id, journal_attempt(id), {origin}, true});
+            continue;
+        }
         if (const auto it = owners.find(id); it != owners.end()) {
             if (mission->robot_id != it->second.robot || it->second.steps.empty() ||
                 mission->map_id != it->second.steps.front().map) return std::nullopt;
@@ -125,13 +155,14 @@ std::optional<recovery_assessment::Local> MissionRunner::assessment_evidence() c
         copy.recovering = copy.recovering || uncertain_.contains(id) ||
             (mission->state != "RUNNING" && mission->state != "PAUSED");
     }
+    if (unaccounted) return std::nullopt;
     return owners;
 }
 
-// A targeted read is telemetry. Keep its route on the job, apart from plans_
-// and traffic_routes_, which are used to issue or release movement grants.
+// Bind the observation to the checkpoint epoch. An extension consumes it only
+// after reassessing the complete fleet and the traffic reservation.
 asio::awaitable<void> MissionRunner::observe_checkpoint(const std::string& id, const Job& job,
-    std::uint64_t epoch, const execution_recovery::Checkpoint& cp) {
+    std::uint64_t epoch, const execution_recovery::Checkpoint& cp, const RecoveryCommands& journal) {
     const auto* view = current_inventory();
     if (!view || view->state() != Inventory::READY || !view->has_live_restrictions() ||
         !traffic_availability_ || !job->assessment || job->assessment->steps.empty()) co_return;
@@ -167,15 +198,23 @@ asio::awaitable<void> MissionRunner::observe_checkpoint(const std::string& id, c
         !job->assessment || job->assessment->steps.empty() ||
         job->proof_epoch != epoch || job->proof_source_epoch != source ||
         !command_journal_.all_stored(id) || journal_attempt(id) != cp.add_attempt()) co_return;
-    const auto* m = missions_.find(id);
+    auto* m = missions_.find(id);
     if (!m || m->robot_id != robot_id || (m->state != "ASSIGNED" && m->state != "RUNNING")) co_return;
     const auto* graph = maps_.find(m->map_id);
     const auto& proof = job->assessment->steps.front();
     if (!graph || proof.map != graph->map_id || proof.version != graph->version) co_return;
     const auto* robot = traffic_availability_->live_status(robot_id, req.expected_instance_id());
     if (!robot) co_return;
-    auto move = execution_recovery::observe_move(cp, req, reply, *robot,
-                                                job->observed ? &*job->observed : nullptr);
+    const auto* prior = job->observed ? &*job->observed : nullptr;
+    auto move = execution_recovery::observe_move(cp, req, reply, *robot, prior);
+    if (!move && recovery_move(*m) && reply.has_unpublished_revision()) {
+        const auto pending = extensions_.find(id);
+        if (pending != extensions_.end() && pending->second.requires_scope() &&
+            pending->second.state() == ExtensionCommand::State::DispatchPending) {
+            move = execution_recovery::observe_unpublished(cp, req, reply, *robot, prior,
+                                                           pending->second.request(), journal);
+        }
+    }
     if (!move || move->step < m->current_step.value_or(0)) co_return;
     const auto old = plans_.find(id);
     if (old != plans_.end() && move->step < static_cast<int>(old->second.progress.size())) {
@@ -183,6 +222,18 @@ asio::awaitable<void> MissionRunner::observe_checkpoint(const std::string& id, c
         if (move->progress.last_node_index() < prior.last_node_index() ||
             move->progress.revision() < prior.revision() ||
             move->progress.released_nodes() < prior.released_nodes()) co_return;
+    }
+    if (old != plans_.end() && recovery_move(*m) && move->step == 0) {
+        // The Add response can precede the first running status. Accept only
+        // the status whose route, step, attempt and robot we just verified.
+        uncertain_.erase(id);
+        update_plan(old->second, reply.status());
+        observe_extension(reply.status());
+        if (m->state == "ASSIGNED" || !m->current_step || m->step_states.empty() ||
+            m->step_states.front().state != "RUNNING") {
+            copy_status(*m, reply.status());
+            missions_.changed(*m, "running move confirmed by robot during recovery");
+        }
     }
     job->observed = std::move(move);
     job->observed_revision = revision;
@@ -373,8 +424,9 @@ asio::awaitable<void> MissionRunner::recover_checkpoint(std::string id, Job job,
     if (cp.kind() == Checkpoint::ACTIVE) {
         remember();
         // A durable ACTIVE may precede MQTT. Only the live view may resume execution.
-        if (active && !traffic_snapshot_ && refresh.checked)
-            co_await observe_checkpoint(id, job, epoch, cp);
+        if (auth->cancel) job->observed_until = {};
+        if (active && !traffic_snapshot_ && refresh.checked && !auth->cancel)
+            co_await observe_checkpoint(id, job, epoch, cp, commands);
         else if (active && traffic_snapshot_ && live != waiting_plans_.end() &&
             (live->second.state() == types::MISSION_STATE_RUNNING ||
              live->second.state() == types::MISSION_STATE_PAUSED))

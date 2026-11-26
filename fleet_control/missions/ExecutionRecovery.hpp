@@ -43,6 +43,13 @@ std::optional<ObservedMove> observe_move(const Checkpoint& cp,
     const fms::dispatch::v1::GetMissionResponse& reply, const fms::v1::RobotStatus& robot,
     const ObservedMove* previous);
 
+// Recover the robot's *preceding* progress only for the exact committed but
+// unpublished extension retained by this same dispatch session.
+std::optional<ObservedMove> observe_unpublished(const Checkpoint& cp,
+    const fms::dispatch::v1::GetMissionRequest& request, const fms::dispatch::v1::GetMissionResponse& reply,
+    const fms::v1::RobotStatus& robot, const ObservedMove* previous,
+    const fms::dispatch::v1::ExtendMissionRequest& pending, std::span<const Command> journal);
+
 struct Decision {
     bool terminal = false;
     bool preceding_steps_complete = false;

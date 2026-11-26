@@ -41,6 +41,8 @@ public:
 
     RobotSession* find(const std::string& robot_id);
     RobotSession* find_by_mission(const std::string& mission_id);
+    RobotSession::MotionGuard motion_guard(const fms::dispatch::v1::MotionScope& scope,
+        const fms::v1::Mission& mission, bool extending);
     const ActiveMission* observed_mission(const fms::dispatch::v1::GetMissionRequest& request);
     bool post(const std::string& manufacturer, const std::string& serial_number, VdaMessage message);
 
@@ -52,6 +54,7 @@ private:
         grpc::Status status{grpc::StatusCode::UNAVAILABLE, "recovery read interrupted"};
         fms::dispatch::v1::GetRecoveryInventoryResponse reply;
     };
+    std::uint64_t inventory_robot_epoch_ = 0;
     RecoveryInventory recovery_;
     std::shared_ptr<RecoveryRead> reading_;
     RecoveryRobotView recovery_robot(const std::string& id, const RobotSession& session) const;

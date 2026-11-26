@@ -82,6 +82,7 @@ void AvailabilityTracker::set_deleting(const std::string& robot_id) {
 
 void AvailabilityTracker::set_traffic_instance(const std::string& instance) {
     traffic_instance_ = instance;
+    robot_epoch_ = 0;
     ++traffic_epoch_;
     if (on_traffic_epoch) on_traffic_epoch();
 }

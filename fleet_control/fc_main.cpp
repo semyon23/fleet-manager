@@ -6,7 +6,6 @@
 #include <string>
 
 #include "alarms/AlarmEngine.hpp"
-
 #include "journal/Journal.hpp"
 #include "journal/RobotEvents.hpp"
 #include "api/HealthApi.hpp"

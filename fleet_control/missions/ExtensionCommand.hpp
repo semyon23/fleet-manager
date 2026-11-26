@@ -27,6 +27,8 @@ public:
 
     const fms::dispatch::v1::ExtendMissionRequest& request() const;
     State state() const;
+    bool requires_scope() const { return scoped_; }
+    void require_scope() { scoped_ = true; }
     const std::string& reason() const;
     void block(std::string reason);
     void observe(const fms::v1::MoveProgress& progress);
@@ -37,6 +39,7 @@ private:
     std::uint32_t total_nodes_ = 0;
     State state_ = State::DispatchPending;
     std::string reason_;
+    bool scoped_ = false;
 };
 
 #endif //FLEETMANAGERSYSTEM_EXTENSIONCOMMAND_HPP

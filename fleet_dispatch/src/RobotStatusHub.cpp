@@ -17,10 +17,14 @@ bool RobotStatusHub::Subscriber::wants(const std::string& robot_id) const {
 
 RobotStatusHub::RobotStatusHub(asio::io_context& io_context) : io_context_(io_context) {}
 
-void RobotStatusHub::publish(const fms::v1::RobotStatus& status) {
+void RobotStatusHub::publish(const fms::v1::RobotStatus& status, bool traffic_changed) {
+    const auto old = last_status_.find(status.robot_id());
+    if (traffic_changed || old == last_status_.end() || FleetMotionEpoch::changed(old->second, status))
+        motion_epoch_.change(status.robot_id());
     last_status_[status.robot_id()] = status;
 
     dv1::RobotStatusUpdate update;
+    update.set_robot_epoch(motion_epoch_.current());
     *update.mutable_status() = status;
     send_to_all(status.robot_id(), update);
 }
@@ -31,6 +35,8 @@ void RobotStatusHub::remove(const std::string& robot_id) {
     }
 
     dv1::RobotStatusUpdate update;
+    motion_epoch_.change(robot_id);
+    update.set_robot_epoch(motion_epoch_.current());
     update.set_removed_robot_id(robot_id);
     send_to_all(robot_id, update);
 }
@@ -44,6 +50,7 @@ std::shared_ptr<RobotStatusHub::Subscriber> RobotStatusHub::subscribe(std::vecto
         }
     }
     snapshot.mutable_snapshot();
+    snapshot.set_robot_epoch(motion_epoch_.current());
     subscriber->channel.try_send(boost::system::error_code{}, std::move(snapshot));
 
     subscribers_.push_back(subscriber);

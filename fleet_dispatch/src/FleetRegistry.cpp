@@ -1,4 +1,5 @@
 #include "../include/FleetRegistry.hpp"
+#include <cmath>
 #include "spdlog/spdlog.h"
 #include "../include/VdaTopics.hpp"
 #include <google/protobuf/util/time_util.h>
@@ -144,6 +145,7 @@ bool FleetRegistry::observe(const std::string& id, const vda5050::State* state) 
         p.unclaimed_motion = !inventory_->occupied.contains(id) &&
             (state->driving || !vda5050::is_idle(*state));
         if (p.unclaimed_motion) {
+            recovery_.reject_startup();
             retry();
             return false;
         }
@@ -179,6 +181,7 @@ bool FleetRegistry::observe(const std::string& id, const vda5050::State* state) 
         result = {D::Conflict, "cannot restore execution or its deadline", {}};
     }
     p.decision = result;
+    recovery_.reject_startup();
     spdlog::warn("[recovery] robot={} mission={} result=Conflict reason={}",
                  id, p.head->mission().mission_id(), result.reason);
     return false;
@@ -215,6 +218,58 @@ std::map<std::string, RecoveryRobotView> FleetRegistry::recovery_robots() const 
     for (const auto& [id, session] : sessions_)
         robots.emplace(id, recovery_robot(id, *session));
     return robots;
+}
+
+RobotSession::MotionGuard FleetRegistry::motion_guard(const fms::dispatch::v1::MotionScope& scope,
+    const fms::v1::Mission& mission, bool extending) {
+    using namespace fms::v1;
+    const auto* session = find(scope.robot_id());
+    if (stopping_ || !inventory_ || !inventory_->consistent || !session || session->saving_order() ||
+        !status_hub_.motion_epoch().peers_unchanged(inventory_robot_epoch_, scope.robot_id()) ||
+        !status_hub_.motion_epoch().peers_unchanged(scope.robot_epoch(), scope.robot_id()) ||
+        scope.robot_id() != mission.robot_id() || mission.nodes_size() != 1) return {};
+    const auto& step = mission.nodes(0);
+    if (!step.has_move() || step.on_failure() == FAILURE_ACTION_RETRY || !step.move().has_released_nodes() ||
+        step.move().nodes_size() == 0 || (!extending && step.move().released_nodes() != 1) ||
+        std::ranges::any_of(step.move().nodes(), [](const auto& n) { return n.actions_size() != 0; }) ||
+        std::ranges::any_of(step.move().edges(), [](const auto& e) { return e.actions_size() != 0; })) return {};
+    auto permit = recovery_.acquire(scope, mission.mission_id(), extending, RecoveryInventory::Clock::now());
+    if (!permit) return {};
+    return [this, permit, owner = session->shared_from_this(), epoch = session->observation_epoch(),
+            peer_epoch = status_hub_.motion_epoch().current(), start = step.move().nodes(0), step_id = step.id()] {
+        const auto& robot = permit->scope.robot_id();
+        if (RecoveryInventory::Clock::now() >= permit->expires || stopping_ || !inventory_ ||
+            !status_hub_.motion_epoch().peers_unchanged(peer_epoch, robot) ||
+            !inventory_->consistent || inventory_->deleting.contains(robot) || find(robot) != owner.get() ||
+            owner->observation_epoch() != epoch || owner->awaiting_live_state() || owner->checkpoint_pending())
+            return false;
+        const auto live = recovery_robot(robot, *owner);
+        const auto& s = owner->status();
+        if (live.conflict || !s.has_observed_order() || s.connection() != CONNECTION_STATE_ONLINE ||
+            !s.localized() || !s.has_pose() || s.pose().map_id() != start.map_id() || s.paused() ||
+            !s.has_safety() || s.safety().field_violation() || s.safety().emergency_stop() != EMERGENCY_STOP_NONE ||
+            (s.operating_mode() != OPERATING_MODE_AUTOMATIC && s.operating_mode() != OPERATING_MODE_SEMIAUTOMATIC) ||
+            std::ranges::any_of(s.errors(), [](const auto& e) {
+                return e.level() == ERROR_LEVEL_FATAL || e.level() == ERROR_LEVEL_CRITICAL;
+            })) return false;
+        const auto* active = owner->mission();
+        if (active && (active->done() || active->canceling() || active->mission_id() != permit->mission ||
+            active->current_step().id() != step_id || active->status().steps(0).attempts() != 1)) return false;
+        const auto& seen = s.observed_order();
+        if (!permit->extending)
+            return (!active || active->order_needed()) && s.mission_id().empty() && seen.idle() && !s.driving() &&
+                   s.last_node_id() == start.node_id() &&
+                   std::hypot(s.pose().x() - start.x(), s.pose().y() - start.y()) <= 0.5;
+        if (!active || !active->tracker() || seen.idle() || s.mission_id() != permit->mission ||
+            active->status().state() != MISSION_STATE_RUNNING) return false;
+        const auto* tracker = active->tracker();
+        const auto& move = active->status().steps(0).move();
+        return tracker->phase() == OrderTracker::Phase::Accepted && tracker->order_id() == seen.order_id() &&
+               tracker->sent_update_id() == seen.update_id() && tracker->confirmed_update_id() == seen.update_id() &&
+               move.revision() == move.confirmed_revision() && move.update_rejected().empty() &&
+               seen.node_sequence() % 2 == 0 && seen.node_sequence() / 2 == move.last_node_index() &&
+               s.last_node_id() == move.last_node_id();
+    };
 }
 
 const ActiveMission* FleetRegistry::observed_mission(const fms::dispatch::v1::GetMissionRequest& request) {
@@ -257,7 +312,10 @@ asio::awaitable<grpc::Status> FleetRegistry::recovery_inventory(
                     read->status = grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
                                                 "compact recovery inventory unavailable"};
                 } else {
-                    recovery_.update(stored.recovery(), recovery_robots(), inventory_->consistent, read_started);
+                    const auto robot_epoch = status_hub_.motion_epoch().current();
+                    recovery_.update(stored.recovery(), recovery_robots(), inventory_->consistent, read_started,
+                                     robot_epoch != inventory_robot_epoch_);
+                    inventory_robot_epoch_ = robot_epoch;
                     read->reply = recovery_.snapshot();
                 }
             }

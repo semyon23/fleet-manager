@@ -68,3 +68,64 @@ TEST_CASE("Scoped progress follows the physical node index while recovery holds"
     SECTION("live mission became terminal") { reply.mutable_status()->set_state(t::MISSION_STATE_COMPLETED); }
     CHECK_FALSE(observe_move(trip.cp, req, reply, trip.robot, &*third));
 }
+
+TEST_CASE("A retained unpublished extension can only retry the journaled bytes", "[recovery-send][scoped-progress]") {
+    Trip t;
+    t.cp.set_kind(Checkpoint::ACTIVE);
+    auto& status = *t.cp.mutable_status();
+    status.set_state(fms::v1::MISSION_STATE_RUNNING);
+    status.set_current_node_id("s0");
+    auto& step = *status.mutable_steps(0);
+    step.set_state(fms::v1::STEP_STATE_RUNNING);
+    step.mutable_move()->set_last_node_index(0);
+    step.mutable_move()->set_last_node_id("B");
+
+    dp::GetMissionRequest get;
+    get.set_mission_id("trip");
+    get.set_expected_robot_id("r");
+    get.set_expected_instance_id("new");
+    get.set_expected_add_attempt(0);
+    dp::GetMissionResponse live;
+    live.set_instance_id("new");
+    live.set_add_attempt(0);
+    live.set_unpublished_revision(1);
+    *live.mutable_status() = status;
+    *live.mutable_mission() = t.add.mission();
+    auto& physical = *live.mutable_status()->mutable_steps(0)->mutable_move();
+    physical.set_released_nodes(1);
+    physical.set_revision(0);
+    physical.set_confirmed_revision(0);
+    t.robot.set_mission_id("trip");
+    t.robot.set_operating_mode(fms::v1::OPERATING_MODE_AUTOMATIC);
+    t.robot.mutable_safety()->set_emergency_stop(fms::v1::EMERGENCY_STOP_NONE);
+    t.robot.set_last_node_id("B");
+    auto* order = t.robot.mutable_observed_order();
+    order->set_idle(false);
+    order->set_update_id(0);
+    order->set_node_sequence(0);
+    dp::ExtendMissionRequest command;
+    REQUIRE(command.ParseFromString(t.journal.back().request_proto()));
+
+    auto read = [&] { return observe_unpublished(t.cp, get, live, t.robot, nullptr, command, t.journal); };
+    CHECK_FALSE(observe_move(t.cp, get, live, t.robot, nullptr));
+    const auto observed = read();
+    REQUIRE(observed);
+    CHECK(observed->progress.confirmed_revision() == 0);
+    CHECK(observed->parts.released.nodes.size() == 1);
+    CHECK(observed->parts.planned.edges.size() == 1);
+
+    SECTION("missing retained update") { live.clear_unpublished_revision(); }
+    SECTION("another update retained") { live.set_unpublished_revision(2); }
+    SECTION("different dispatch instance") { live.set_instance_id("elsewhere"); }
+    SECTION("no exact journal entry") { t.journal.back().set_request_proto("other"); }
+    SECTION("preceding Add granted a different base") {
+        t.add.mutable_mission()->mutable_nodes(0)->mutable_move()->set_released_nodes(2);
+        t.cp.set_accepted_add(t.add.SerializeAsString());
+    }
+    SECTION("different route under the same revision") {
+        live.mutable_mission()->mutable_nodes(0)->mutable_move()->mutable_edges(0)->set_edge_id("other");
+    }
+    SECTION("checkpoint grant has a different length") { command.set_released_nodes(1); }
+    SECTION("robot has already accepted the new revision") { order->set_update_id(1); }
+    CHECK_FALSE(read());
+}
