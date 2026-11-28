@@ -70,7 +70,7 @@ TEST_CASE("Scoped progress follows the physical node index while recovery holds"
 }
 
 TEST_CASE("A retained unpublished extension can only retry the journaled bytes", "[recovery-send][scoped-progress]") {
-    Trip t;
+    Trip t(true); // B–C–B; позволяет проверить продление только до C.
     t.cp.set_kind(Checkpoint::ACTIVE);
     auto& status = *t.cp.mutable_status();
     status.set_state(fms::v1::MISSION_STATE_RUNNING);
@@ -112,8 +112,25 @@ TEST_CASE("A retained unpublished extension can only retry the journaled bytes",
     REQUIRE(observed);
     CHECK(observed->progress.confirmed_revision() == 0);
     CHECK(observed->parts.released.nodes.size() == 1);
-    CHECK(observed->parts.planned.edges.size() == 1);
+    CHECK(observed->parts.planned.edges.size() == 2);
 
+    SECTION("a retained partial release keeps the preceding base until publish") {
+        command.set_released_nodes(2);
+        t.cp.mutable_executed_mission()->mutable_nodes(0)->mutable_move()->set_released_nodes(2);
+        step.mutable_move()->set_released_nodes(2);
+        t.snapshot["protectedBase"]["nodes"] = {0, 1};
+        t.snapshot["protectedBase"]["edges"] = {0};
+        t.journal.back().set_request_proto(command.SerializeAsString());
+        t.journal.back().set_recovery_json(t.snapshot.dump());
+        const auto authority = t.authority();
+        REQUIRE(authority);
+        CHECK(execution_recovery::matches_execution(*authority, t.cp));
+        const auto partial = read();
+        REQUIRE(partial);
+        CHECK(partial->progress.released_nodes() == 1);
+        CHECK(partial->parts.planned.edges.size() == 2);
+        return;
+    }
     SECTION("missing retained update") { live.clear_unpublished_revision(); }
     SECTION("another update retained") { live.set_unpublished_revision(2); }
     SECTION("different dispatch instance") { live.set_instance_id("elsewhere"); }

@@ -118,12 +118,17 @@ MissionRunner::Assessment MissionRunner::assess_motion(const std::string& id, co
             return deny("current robot order does not confirm the protected base");
         if (pending_extend) {
             const auto& entry = extensions_.at(id);
+            const auto released = pending_extend->released_nodes();
             if (entry.state() != ExtensionCommand::State::DispatchPending ||
                 entry.request().SerializeAsString() != pending_extend->SerializeAsString() ||
                 pending_extend->mission_id() != id || pending_extend->move_node_id() != "s" + std::to_string(step) ||
                 pending_extend->revision() != p.revision() + 1 || !pending_extend->has_released_nodes() ||
-                pending_extend->released_nodes() != p.total_nodes() || pending_extend->has_replace_tail() ||
-                held.nodes != wanted.nodes || held.edges != wanted.edges)
+                released <= p.released_nodes() || released > p.total_nodes() || pending_extend->has_replace_tail())
+                return deny("reserved extension differs from its command");
+            // Повторяем уже записанное разрешение с той же границей.
+            wanted.nodes.resize(released);
+            wanted.edges.resize(released - 1);
+            if (held.nodes != wanted.nodes || held.edges != wanted.edges)
                 return deny("reserved extension differs from its command");
         } else if (held.nodes.size() != p.released_nodes()) {
             return deny("protected base length changed");

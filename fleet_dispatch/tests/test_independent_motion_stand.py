@@ -140,8 +140,10 @@ class MotionStand(Stand):
             db.CONTROL_COMMAND_KIND_ADD_MISSION, db.CONTROL_COMMAND_KIND_EXTEND_MISSION])
 
     def broker_barrier(self):
+        # A scenario can place several barriers without resetting its MQTT history.
+        mark = self.wire.mark()
         self.wire.client.publish("amr/v3/ktc/amr101/barrier", b"checked", qos=1).wait_for_publish(3)
-        wait(lambda: self.wire.raw("barrier", self.mark) == [b"checked"], "observer caught up")
+        wait(lambda: self.wire.raw("barrier", mark) == [b"checked"], "observer caught up")
 
     def unresolved_a(self):
         def inventory_with_a():

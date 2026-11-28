@@ -3,7 +3,9 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <span>
 #include <string>
@@ -37,6 +39,8 @@ namespace traffic {
     struct GateResult {
         bool granted = false;
         std::string reason;
+        // Абсолютное число узлов base, включая уже пройденные.
+        std::size_t released_nodes = 0;
     };
 
     // All possibly issued step bases from one verified mission/attempt.
@@ -54,10 +58,6 @@ namespace traffic {
         bool complete = false;
         std::vector<RecoveryMission> missions;
     };
-    // Начальная стендовая реализация: проверяет весь оставшийся путь шага.
-    // При конфликте робот ждёт в конце прежнего base.
-    // Частичную новую выдачу до произвольного узла не делает.
-    //
     // Один поток. Нет освобождения по ETA и нет геометрии роботов.
     // Реестр защищённых маршрутов хранится вызывающим кодом.
     //
@@ -65,6 +65,8 @@ namespace traffic {
     // Стоимость нужно измерить и оптимизировать перед большой нагрузкой.
     class FixedRouteGate {
     public:
+        using CanWait = std::function<bool(std::uint32_t)>;
+
         GateResult check(
             const Graph& graph,
             std::span<const TrafficOccupant> occupants,
@@ -77,6 +79,24 @@ namespace traffic {
             std::span<const ProtectedRoute> protected_routes,
             const ProtectedRoute &wanted,
             const RecoveryBounds &recovery) const;
+
+        // Возвращает границу для штатного продления. При конфликте разрешает
+        // подъезд до последнего свободного узла, где допустимо ждать.
+        GateResult plan_extension(
+            const Graph& graph,
+            std::span<const TrafficOccupant> occupants,
+            std::span<const ProtectedRoute> protected_routes,
+            const ProtectedRoute& wanted,
+            const CanWait& can_wait) const;
+
+    private:
+        GateResult check_impl(
+            const Graph& graph,
+            std::span<const TrafficOccupant> occupants,
+            std::span<const ProtectedRoute> protected_routes,
+            const ProtectedRoute& wanted,
+            const RecoveryBounds& recovery,
+            const CanWait* can_wait) const;
     };
 
 } // namespace traffic

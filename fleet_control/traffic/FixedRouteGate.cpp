@@ -1,5 +1,6 @@
 #include "FixedRouteGate.hpp"
 #include <algorithm>
+#include <format>
 #include <limits>
 #include <set>
 #include <stdexcept>
@@ -22,6 +23,26 @@ GateResult FixedRouteGate::check(
     std::span<const ProtectedRoute> routes,
     const ProtectedRoute& wanted,
     const RecoveryBounds& recovery) const {
+    return check_impl(graph, occupants, routes, wanted, recovery, nullptr);
+}
+
+GateResult FixedRouteGate::plan_extension(
+    const Graph& graph,
+    std::span<const TrafficOccupant> occupants,
+    std::span<const ProtectedRoute> routes,
+    const ProtectedRoute& wanted,
+    const CanWait& can_wait) const {
+    return check_impl(graph, occupants, routes, wanted,
+                      RecoveryBounds{graph.map_id, graph.version, true, {}}, &can_wait);
+}
+
+GateResult FixedRouteGate::check_impl(
+    const Graph& graph,
+    std::span<const TrafficOccupant> occupants,
+    std::span<const ProtectedRoute> routes,
+    const ProtectedRoute& wanted,
+    const RecoveryBounds& recovery,
+    const CanWait* can_wait) const {
 
     if (!recovery.complete || recovery.map != graph.map_id ||
         recovery.version != graph.version) {
@@ -228,16 +249,47 @@ GateResult FixedRouteGate::check(
             "protected prefix changed");
     }
 
+    const auto robot = id(wanted.robot);
+    if (can_wait) {
+        const auto& resources = guard.resources();
+        const auto old_size = old.nodes.size();
+        // Сначала ищем первый занятый ресурс по ходу движения. Если путь
+        // открыт до цели, промежуточная точка ожидания не требуется.
+        for (auto i = old_size; i < wanted.nodes.size(); ++i) {
+            const auto edge = wanted.edges[i - 1];
+            const auto node = wanted.nodes[i];
+            const auto lane_owner = guard.owner(resources.lane_resource(edge));
+            const auto node_owner = guard.owner(resources.node_resource(node));
+            const bool lane_blocked = lane_owner && *lane_owner != robot;
+            const bool node_blocked = node_owner && *node_owner != robot;
+            if (!lane_blocked && !node_blocked) continue;
+
+            const auto owner = lane_blocked ? *lane_owner : *node_owner;
+            const auto blocker = std::ranges::find_if(ids, [owner](const auto& entry) {
+                return entry.second == owner;
+            });
+            auto reason = std::format("{} {} is reserved by robot {}",
+                lane_blocked ? "lane" : "node", lane_blocked ? graph.edges[edge].id : graph.nodes[node].id,
+                blocker->first);
+
+            // i — число узлов перед конфликтом. Ищем границу назад,
+            // пока она ещё удлиняет прежний base.
+            while (i > old_size && !(*can_wait)(wanted.nodes[i - 1])) --i;
+            return {i > old_size, std::move(reason), i};
+        }
+        return {true, {}, wanted.nodes.size()};
+    }
+
     const auto nodes =
         std::span(wanted.nodes).subspan(wanted.reached);
     const auto edges =
         std::span(wanted.edges).subspan(wanted.reached);
 
-    if (guard.extend(id(wanted.robot), 1, nodes, edges)) {
+    if (guard.extend(robot, 1, nodes, edges)) {
         return {false, "requested route is occupied"};
     }
 
-    return {true, {}};
+    return {true, {}, wanted.nodes.size()};
 }
 
 } // namespace traffic

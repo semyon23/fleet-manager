@@ -8,6 +8,7 @@
 #include <google/protobuf/util/json_util.h>
 #include <google/protobuf/util/time_util.h>
 #include <algorithm>
+#include <string_view>
 #include <type_traits>
 #include <spdlog/spdlog.h>
 
@@ -1698,6 +1699,10 @@ asio::awaitable<void> MissionRunner::traffic_loop() {
         if (stopped_) co_return;
         try {
             const auto active = missions_.active();
+            std::erase_if(traffic_wait_reason_, [&](const auto& entry) {
+                const auto* mission = missions_.find(entry.first);
+                return !mission || mission->state != "RUNNING";
+            });
             if (!traffic_ready()) {
                 for (const auto* mission : active)
                     if (queue_recovery_extension(*mission)) break;
@@ -1756,6 +1761,30 @@ asio::awaitable<void> MissionRunner::traffic_loop() {
 
             const auto occupants =
                 traffic_availability_->traffic_occupants();
+
+            // По карте и узлу храним робота, которому ещё нужно через него
+            // проехать. Пустой владелец означает несколько роботов.
+            // Строим индекс один раз за проход, когда впервые ищем место ожидания.
+            using OwnersByNode = std::map<std::string_view, std::string_view>;
+            std::optional<std::map<std::string_view, OwnersByNode>> passages;
+            const auto planned_passages = [&]() -> const auto& {
+                if (passages) return *passages;
+                passages.emplace();
+                for (const auto* peer : active) {
+                    if (peer->state == "QUEUED" || is_next(peer->id)) continue;
+                    const auto& plan = plans_.at(peer->id);
+                    const auto step = static_cast<std::size_t>(peer->current_step.value_or(0));
+                    auto& nodes = (*passages)[peer->map_id];
+                    for (auto i = step; i < plan.routes.size(); ++i) {
+                        const auto from = i == step ? plan.progress[step].last_node_index() : 0;
+                        for (const auto& node : std::span(plan.routes[i]).subspan(from)) {
+                            auto [it, inserted] = nodes.try_emplace(node, peer->robot_id);
+                            if (!inserted && it->second != peer->robot_id) it->second = {};
+                        }
+                    }
+                }
+                return *passages;
+            };
 
             auto ordered = active;
             const auto now = now_ms();
@@ -1837,34 +1866,45 @@ asio::awaitable<void> MissionRunner::traffic_loop() {
 
                     wanted.nodes.push_back(*node);
 
-                    auto edge = std::find_if(
-                        graph->edges.begin(),
-                        graph->edges.end(),
-                        [&](const auto& e) {
-                            return e.id ==
-                                plan.edges[step][i - 1];
-                        });
-
-                    if (edge == graph->edges.end()) {
+                    const auto edge = graph->edge_index.find(plan.edges[step][i - 1]);
+                    if (edge == graph->edge_index.end()) {
                         throw std::runtime_error(
                             "traffic edge missing");
                     }
 
-                    wanted.edges.push_back(
-                        static_cast<std::uint32_t>(
-                            edge - graph->edges.begin()));
+                    wanted.edges.push_back(edge->second);
                 }
 
-                const auto allowed = traffic_gate_.check(
-                    *graph, occupants, held, wanted);
+                const auto can_wait = [&](std::uint32_t node) {
+                    const auto& by_map = planned_passages();
+                    const auto map = by_map.find(graph->map_id);
+                    if (map == by_map.end()) return true;
+                    const auto use = map->second.find(graph->nodes[node].id);
+                    return use == map->second.end() || use->second == mission->robot_id;
+                };
+                const auto allowed = traffic_gate_.plan_extension(
+                    *graph, occupants, held, wanted, can_wait);
+
+                if (allowed.reason.empty()) {
+                    traffic_wait_reason_.erase(mission->id);
+                } else {
+                    auto& last = traffic_wait_reason_[mission->id];
+                    if (last != allowed.reason) {
+                        spdlog::info("[traffic] mission {}: {}", mission->id, allowed.reason);
+                        last = allowed.reason;
+                    }
+                }
 
                 if (!allowed.granted) continue;
+                wanted.nodes.resize(allowed.released_nodes);
+                wanted.edges.resize(allowed.released_nodes - 1);
+                const auto released = static_cast<std::uint32_t>(allowed.released_nodes);
 
                 dpv1::ExtendMissionRequest request;
                 request.set_mission_id(mission->id);
                 request.set_move_node_id("s" + std::to_string(step));
                 request.set_revision(progress.revision() + 1);
-                request.set_released_nodes(progress.total_nodes());
+                request.set_released_nodes(released);
 
                 if (queue_extension(request)) {
                     // Зафиксировать резерв до следующего await.
@@ -1876,9 +1916,8 @@ asio::awaitable<void> MissionRunner::traffic_loop() {
                         std::move(wanted);
 
                     spdlog::info(
-                        "[traffic] mission {}: reserved {} "
-                        "nodes before extension",
-                        mission->id, progress.total_nodes());
+                        "[traffic] mission {}: reserved {}/{} nodes before extension",
+                        mission->id, released, progress.total_nodes());
                 }
 
                 break;

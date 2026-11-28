@@ -230,6 +230,7 @@ private:
     std::string traffic_error_;
     std::set<std::string> traffic_editing_;
     std::map<std::string, traffic::ProtectedRoute> traffic_routes_;
+    std::map<std::string, std::string> traffic_wait_reason_;
 
     traffic::FixedRouteGate traffic_gate_;
     asio::steady_timer traffic_timer_;

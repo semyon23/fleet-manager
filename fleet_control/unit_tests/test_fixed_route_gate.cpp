@@ -198,3 +198,64 @@ TEST_CASE(
         gate.check(g, robots, held, wanted),
         std::invalid_argument);
 }
+
+TEST_CASE("A waiting robot can approach the reserved crossing", "[traffic-approach]") {
+    auto g = graph();
+    g.nodes.push_back({"5"});
+    g.node_index.emplace("5", 5);
+    g.edges.push_back({"14", 1, 4, 1});
+    g.edges.push_back({"45", 4, 5, 1});
+    g.edges.push_back({"52", 5, 2, 1});
+    g.edges.push_back({"20", 2, 0, 1});
+
+    auto a = route("A", 0);
+    a.nodes = {0, 2, 3};
+    a.edges = {0, 1};
+    auto b = route("B", 1);
+    auto wanted = b;
+    wanted.nodes = {1, 4, 5, 2, 0};
+    wanted.edges = {4, 5, 6, 7};
+
+    auto robots = occupants();
+    std::vector<ProtectedRoute> held{a, b};
+    FixedRouteGate gate;
+    const auto can_wait = [](std::uint32_t) { return true; };
+
+    SECTION("advance to the last safe node and extend when the crossing clears") {
+        const auto approach = gate.plan_extension(g, robots, held, wanted, can_wait);
+        REQUIRE(approach.granted);
+        CHECK(approach.released_nodes == 3);
+        CHECK(approach.reason == "node 2 is reserved by robot A");
+        CHECK_FALSE(gate.check(g, robots, held, wanted).granted);
+
+        // B уже у границы 5. Пока A держит узел 2, новой выдачи нет.
+        held[1].nodes = {1, 4, 5};
+        held[1].edges = {4, 5};
+        held[1].reached = wanted.reached = 2;
+        CHECK_FALSE(gate.plan_extension(g, robots, held, wanted, can_wait).granted);
+
+        held[0].reached = 2; // A подтвердил узел 3 за пересечением.
+        const auto rest = gate.plan_extension(g, robots, held, wanted, can_wait);
+        CHECK(rest.granted);
+        CHECK(rest.released_nodes == 5);
+        CHECK(rest.reason.empty());
+    }
+    SECTION("the closest stop would block another route") {
+        const auto approach = gate.plan_extension(g, robots, held, wanted,
+            [](std::uint32_t node) { return node == 4; });
+        CHECK(approach.granted);
+        CHECK(approach.released_nodes == 2);
+    }
+    SECTION("there is no safe stop") {
+        const auto approach = gate.plan_extension(g, robots, held, wanted,
+            [](std::uint32_t) { return false; });
+        CHECK_FALSE(approach.granted);
+        CHECK(approach.released_nodes == 1);
+    }
+    SECTION("the other robot's location is unknown") {
+        robots[0].map.clear();
+        const auto approach = gate.plan_extension(g, robots, held, wanted, can_wait);
+        CHECK_FALSE(approach.granted);
+        CHECK(approach.released_nodes == 0);
+    }
+}

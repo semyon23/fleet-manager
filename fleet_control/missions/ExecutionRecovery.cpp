@@ -253,7 +253,7 @@ std::optional<ObservedMove> observe_unpublished(const Checkpoint& cp,
     const auto& committed = cp.executed_mission().nodes(0).move();
     const auto& live = reply.status().steps(0).move();
     if (!committed.has_released_nodes() || committed.released_nodes() != pending.released_nodes() ||
-        pending.released_nodes() != static_cast<std::uint32_t>(committed.nodes_size()) ||
+        pending.released_nodes() > static_cast<std::uint32_t>(committed.nodes_size()) ||
         !live.released_nodes() || live.released_nodes() >= pending.released_nodes() ||
         live.confirmed_revision() != pending.revision() - 1) return {};
     dp::AddMissionRequest original;
