@@ -50,6 +50,9 @@ class Proxy(grpc.GenericRpcHandler):
         self.robot_mode = "live"
         self.block_save = False
         self.block_close = False
+        self.hold_close_ack = False
+        self.close_committed = threading.Event()
+        self.release_close_ack = threading.Event()
         self.lose_save_ack = False
         self.lose_close_ack = False
         self.last_save = None
@@ -101,6 +104,12 @@ class Proxy(grpc.GenericRpcHandler):
             if name == "GetExecutionCheckpoint":
                 kind = fms.GetExecutionCheckpointResponse.FromString(reply).kind
                 self.hit(f"lookup {kind}")
+            if name == "CloseMissionCommands" and self.hold_close_ack:
+                # БД закрыла записи, но control ещё не получил подтверждение.
+                self.close_committed.set()
+                while not self.release_close_ack.wait(.02):
+                    if not ctx.is_active():
+                        ctx.abort(grpc.StatusCode.CANCELLED, "journal close ACK deadline elapsed")
             if name == "CloseMissionCommands" and self.lose_close_ack:
                 self.lose_close_ack = False
                 self.hit("lost close ack")
@@ -476,6 +485,42 @@ def test_control_recovery(case, tmp_path):
         if case == "cold_commit":
             stop(s.ctl)
             check_inventory_pages(s.storage, s.commands()[0].command)
+
+
+def test_queued_mission_starts_after_close_ack(tmp_path):
+    with ExitStack() as stack:
+        s = Stand(stack, tmp_path)
+        s.dbproxy.hold_close_ack = True
+
+        followup = "queued-after-handoff"
+        followup_order = followup + "-s0"
+
+        def next_order():
+            for raw in s.wire.raw("order", s.mark):
+                order = json.loads(raw)
+                if order["orderId"] == followup_order and order["orderUpdateId"] == 0:
+                    return order
+
+        try:
+            s.start_trip()
+            assert s.dbproxy.close_committed.wait(30), "journal close did not commit"
+            # Два шага оставляют задачу в обычной очереди, пока идёт сверка.
+            # POST сам будит назначение, поэтому резервный таймер отсчитывает
+            # примерно 5 секунд от этого прохода с удержанным подтверждением.
+            code, body = s.http("POST", "/api/fms/missions", dict(
+                id=followup, name=followup, mapId="map_1", requestedRobotId=RID,
+                steps=[{"nodeId": "B"}, {"nodeId": "C"}]))
+            assert code == 201 and body["state"] == "QUEUED", (code, body)
+            time.sleep(.25)
+            assert next_order() is None, "the robot got another order before close ACK"
+        finally:
+            s.dbproxy.release_close_ack.set()
+
+        # Сигнал должен привести к новому заказу раньше резервного прохода.
+        order = wait(next_order, "queued order after journal close ACK", 3)
+        assert order["nodes"][0]["nodeId"] == "C"
+        s.wire.state(s.mark, lambda state: state["orderId"] == followup_order and state["driving"],
+                     "robot begins follow-up mission", timeout=15)
 
 
 def check_inventory_pages(storage, original):

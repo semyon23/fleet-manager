@@ -1,10 +1,37 @@
 #include "ExecutionRecoveryFixture.hpp"
 
+#include <map>
+
 using recovery_test::Trip;
 using execution_recovery::Checkpoint;
 namespace db = fms::database::v1;
 namespace t = fms::v1;
 namespace dp = fms::dispatch::v1;
+
+TEST_CASE("Finishing the last checkpoint wakes assignment once", "[mission-queue-wakeup]") {
+    std::map<std::string, int> pending{{"trip-a", 1}, {"trip-b", 1}};
+    int wakes = 0;
+    const auto wake = [&] {
+        // Назначение может проверить очередь прямо из обработчика сигнала.
+        CHECK(pending.empty());
+        ++wakes;
+    };
+
+    execution_recovery::finish_checkpoint_job(pending, "missing", wake);
+    CHECK(wakes == 0);
+    CHECK(pending.size() == 2);
+
+    execution_recovery::finish_checkpoint_job(pending, "trip-a", wake);
+    CHECK(wakes == 0);
+    CHECK(pending.contains("trip-b"));
+
+    execution_recovery::finish_checkpoint_job(pending, "trip-b", wake);
+    CHECK(wakes == 1);
+
+    // Повтор последнего подтверждения не порождает второй сигнал.
+    execution_recovery::finish_checkpoint_job(pending, "trip-b", wake);
+    CHECK(wakes == 1);
+}
 
 TEST_CASE("Only the matching Add receipt and effective route can finish a mission", "[execution-recovery]") {
     Trip trip;

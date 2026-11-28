@@ -366,7 +366,8 @@ asio::awaitable<void> MissionRunner::recover_checkpoint(std::string id, Job job,
             if (!current() || !status.ok()) co_return;
         }
         journal_attempts_.erase(id);
-        checkpoint_jobs_.erase(id);
+        // Локальная отмена окончательно закрыта ответами БД.
+        execution_recovery::finish_checkpoint_job(checkpoint_jobs_, id, on_checkpoint_jobs_drained);
         co_return;
     }
 
@@ -543,5 +544,6 @@ asio::awaitable<void> MissionRunner::handoff_checkpoint(std::string id, Job job,
     add_rpc_started_.erase(id);
     local_adds_.erase(id);
     release_next(base.robot, false, "");
-    checkpoint_jobs_.erase(id);
+    // БД подтвердила закрытие. Теперь планировщик может проверить новую миссию.
+    execution_recovery::finish_checkpoint_job(checkpoint_jobs_, id, on_checkpoint_jobs_drained);
 }

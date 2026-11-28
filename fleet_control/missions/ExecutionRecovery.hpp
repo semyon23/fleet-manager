@@ -5,13 +5,27 @@
 #include "missions/Mission.hpp"
 #include "missions/RouteParts.hpp"
 #include "traffic/FixedRouteGate.hpp"
+#include <functional>
+#include <map>
 #include <optional>
 #include <span>
+#include <string>
 
 namespace execution_recovery {
 
 using Command = fms::database::v1::ControlCommandRecord;
 using Checkpoint = fms::v1::GetExecutionCheckpointResponse;
+
+// Вызывается после подтверждённого закрытия журнала и передачи резерва.
+template<class Job>
+void finish_checkpoint_job(std::map<std::string, Job>& pending,
+                           const std::string& mission_id,
+                           const std::function<void()>& on_drained) {
+    if (pending.erase(mission_id) != 0 && pending.empty() && on_drained) {
+        // Планировщик увидит пустой список сверок в момент сигнала.
+        on_drained();
+    }
+}
 
 struct Grant {
     traffic::ProtectedRoute base;

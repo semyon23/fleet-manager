@@ -41,7 +41,7 @@ public:
     void stop();
 
     void configure_traffic(AvailabilityTracker& availability);
-
+    std::function<void()> on_checkpoint_jobs_drained;
     bool traffic_ready() const;
     bool recovery_assignment_ready() const;
     static bool recovery_move(const Mission& mission);

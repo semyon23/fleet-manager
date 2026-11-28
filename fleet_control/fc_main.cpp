@@ -72,6 +72,7 @@ int main() {
         MissionAssigner assigner{io_context, missions, availability, maps, runner};
         missions.on_queue_change = [&] { assigner.wake(); };
         availability.on_idle = [&] { assigner.wake(); };
+        runner.on_checkpoint_jobs_drained = [&] { assigner.wake(); };
         maps.on_change = [&] {
             availability.recompute_all();
             assigner.wake();
